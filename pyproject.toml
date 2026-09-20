@@ -1,0 +1,11 @@
+[project]
+name = "pid-dexpi-aas"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "pydexpi==1.2.0",
+    "python-pptx",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
