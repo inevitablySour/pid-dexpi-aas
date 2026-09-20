@@ -64,3 +64,22 @@ def test_all_seven_team_files_render_without_error(tmp_path):
         result = build_model(diagram)
         d = build_diagram(diagram, result, result.model)
         render_diagram_svg(d, tmp_path / f"{xml_path.stem}.svg")
+
+
+def test_instrument_bubbles_get_their_own_text_as_a_label(tmp_path):
+    """Regression test: instrument bubbles (e.g. drawio shape text "PI 201", "TT 203")
+    carry their tag directly on the shape itself, not via a nearby floating label, so
+    tag_lookup (built from tag_association.py, which only covers floating labels) is
+    empty for them. build_diagram.py must fall back to shape.text directly, or every
+    instrument bubble renders with no text at all - confirmed visually on the gramflow
+    reactor file (19 instrument bubbles, all missing their tags) before this fix.
+    """
+    xml_path = DECODED_DIR / "P&ID gramflow reactor V3__diagram0.xml"
+    diagram = parse_drawio_file(xml_path)
+    result = build_model(diagram)
+    d = build_diagram(diagram, result, result.model)
+    svg_path = render_diagram_svg(d, tmp_path / "gramflow.svg")
+
+    content = svg_path.read_text(encoding="utf-8")
+    for expected_tag in ("PI 201", "TT 203", "TIC 203", "PC 201"):
+        assert f">{expected_tag}<" in content, f"missing instrument tag: {expected_tag}"

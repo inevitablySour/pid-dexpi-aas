@@ -86,7 +86,12 @@ def build_diagram(diagram: ParsedDiagram, result: BuildResult, model: DexpiModel
 
         elements: list = [shape_usage]
 
-        tags = tag_lookup.get(shape.id) or []
+        # tag_lookup only covers floating labels associated to a nearby shape
+        # (tag_association.py); shapes that carry their own text directly - e.g. every
+        # instrument bubble ("PI 201", "TT 203") - never appear there and were silently
+        # rendered with no label at all until this fallback was added (confirmed against
+        # the gramflow reactor file: 19 instrument bubbles, all missing their tags).
+        tags = tag_lookup.get(shape.id) or ([shape.text] if shape.text else [])
         if tags:
             label_text = Text(
                 position=Point(x=shape.x, y=-(shape.y + height) - 15.0),
