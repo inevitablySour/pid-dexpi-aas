@@ -196,3 +196,37 @@ SYMBOL_BUILDERS = {
 def build_primitives_for_class(dexpi_class_name: str) -> list[GraphicalPrimitive]:
     builder = SYMBOL_BUILDERS.get(dexpi_class_name, draw_generic_box)
     return builder()
+
+
+def compute_local_bounding_box(
+    primitives: list[GraphicalPrimitive],
+) -> tuple[float, float, float, float]:
+    """Return (min_x, min_y, max_x, max_y) of a symbol's actual drawn geometry, in its
+    own local 0-100 coordinate space.
+
+    Every symbol_library shape is inset from its own declared 0-100 box (e.g. draw_pump's
+    circle has radius 40 centered at (50,50), so it only spans 10-90, not 0-100; _bowtie's
+    valve triangles span 10-90 too). Routing connector lines to the full 0-100 box left a
+    visible gap between the line's endpoint and the symbol's actual visible edge -
+    reported by the user as "they still don't look connected". Computing the real
+    bounding box from the primitives themselves (rather than guessing a fixed margin)
+    means routing stays correct even as symbols are added or adjusted later.
+    """
+    min_x = min_y = float("inf")
+    max_x = max_y = float("-inf")
+
+    for primitive in primitives:
+        if isinstance(primitive, (PolyLine, Polygon)):
+            for point in primitive.points:
+                min_x, max_x = min(min_x, point.x), max(max_x, point.x)
+                min_y, max_y = min(min_y, point.y), max(max_y, point.y)
+        elif isinstance(primitive, Ellipse):
+            cx, cy = primitive.center.x, primitive.center.y
+            rx, ry = primitive.horizontalSemiAxis, primitive.verticalSemiAxis
+            min_x, max_x = min(min_x, cx - rx), max(max_x, cx + rx)
+            min_y, max_y = min(min_y, cy - ry), max(max_y, cy + ry)
+
+    if min_x == float("inf"):  # no primitives with point/center geometry (shouldn't happen)
+        return (0.0, 0.0, 100.0, 100.0)
+
+    return (min_x, min_y, max_x, max_y)

@@ -37,7 +37,7 @@ from pydexpi.dexpi_classes.pydantic_classes import DexpiBaseModel, DexpiModel
 
 from pid_dexpi_aas.build_model import BuildResult
 from pid_dexpi_aas.parser_drawio import ParsedDiagram
-from pid_dexpi_aas.symbol_library import build_primitives_for_class
+from pid_dexpi_aas.symbol_library import build_primitives_for_class, compute_local_bounding_box
 from pid_dexpi_aas.tag_association import build_tag_lookup
 
 _BACKGROUND = Color(r=255, g=255, b=255)
@@ -106,6 +106,7 @@ def build_diagram(diagram: ParsedDiagram, result: BuildResult, model: DexpiModel
         class_name = type(dexpi_object).__name__
         primitives = build_primitives_for_class(class_name)
         symbol_shape = Shape(name=class_name, primitives=primitives)
+        local_box = compute_local_bounding_box(primitives)
 
         # symbol_library draws every shape in a normalized 0-100 box (Y increases
         # downward within that local box, matching how the box was authored); scale it
@@ -146,12 +147,22 @@ def build_diagram(diagram: ParsedDiagram, result: BuildResult, model: DexpiModel
             RepresentationGroup(represents=dexpi_object, groups=[Static(elements=elements)])
         )
 
-        # DEXPI-space box: top-left is (x, -y), extending +width in x and -height in y
-        # (matching the same Y-flip used for the ShapeUsage position above).
-        box_min_x = shape.x
-        box_max_x = shape.x + width
-        box_min_y = -(shape.y + height)
-        box_max_y = -shape.y
+        # Transform the symbol's REAL local bounding box (compute_local_bounding_box,
+        # which reflects the actual drawn geometry - e.g. a pump's inscribed circle, not
+        # its full declared 0-100 box) into DEXPI space with the same scale/flip used for
+        # the ShapeUsage above. Using the full declared box here (the original approach)
+        # left a visible gap between a routed connector's endpoint and the symbol's
+        # actual drawn edge for every inset symbol (pumps, valves, etc) - reported by the
+        # user as "they still don't look connected".
+        local_min_x, local_min_y, local_max_x, local_max_y = local_box
+        scale_x = width / 100.0
+        scale_y = height / 100.0
+        box_min_x = shape.x + local_min_x * scale_x
+        box_max_x = shape.x + local_max_x * scale_x
+        # local Y grows downward; DEXPI Y grows upward, and the shape's origin is at
+        # DEXPI Y = -shape.y, so a larger local Y maps to a SMALLER DEXPI Y.
+        box_max_y = -shape.y - local_min_y * scale_y
+        box_min_y = -shape.y - local_max_y * scale_y
         shape_boxes[shape.id] = (box_min_x, box_min_y, box_max_x, box_max_y)
 
         min_x = min(min_x, shape.x)
