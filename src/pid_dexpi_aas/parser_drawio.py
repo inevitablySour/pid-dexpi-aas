@@ -43,6 +43,20 @@ class Edge:
     # source/target attribute and rely on this instead - not a rare edge case).
     source_point: tuple[float, float] | None = None
     target_point: tuple[float, float] | None = None
+    # exitX/exitY (source side) and entryX/entryY (target side) from the style string:
+    # normalized (0-1) fractions of a shape's bounding box where the edge attaches.
+    # ONLY meaningful when paired with source=/target= per the mxGraph convention - when
+    # present WITHOUT the corresponding attribute, confirmed (by direct measurement
+    # against real shape geometry) to be a roughly 50/50 mix of genuinely accurate
+    # leftover hints and pure stale noise from a since-detached connection, so these are
+    # used as a secondary, tighter-tolerance resolution signal, not trusted blindly.
+    exit_fraction: tuple[float, float] | None = None
+    entry_fraction: tuple[float, float] | None = None
+    # How source/target actually got resolved - surfaced in reports so an inferred
+    # connection is never presented with the same confidence as one the file states
+    # explicitly. See mapping.py/build_model.py's BuildRecord for how this is reported.
+    source_resolution: str = "explicit"  # "explicit" | "exit_fraction" | "nearest_shape" | "unresolved"
+    target_resolution: str = "explicit"
 
 
 @dataclass
@@ -54,6 +68,8 @@ class ParsedDiagram:
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _SHAPE_TOKEN_RE = re.compile(r"(?:^|;)shape=([^;]+)")
+_EXIT_RE = re.compile(r"(?:^|;)exitX=([\d.]+);exitY=([\d.]+)")
+_ENTRY_RE = re.compile(r"(?:^|;)entryX=([\d.]+);entryY=([\d.]+)")
 
 
 def _strip_html(value: str) -> str:
@@ -85,7 +101,11 @@ def parse_drawio_xml(xml_text: str, source_file: str) -> ParsedDiagram:
 
         if cell.get("edge") == "1":
             source_point = target_point = None
-            if cell.get("source") is None or cell.get("target") is None:
+            exit_fraction = entry_fraction = None
+            has_source = cell.get("source") is not None
+            has_target = cell.get("target") is not None
+
+            if not has_source or not has_target:
                 geometry = cell.find("mxGeometry")
                 if geometry is not None:
                     source_mxpoint = geometry.find("mxPoint[@as='sourcePoint']")
@@ -101,6 +121,15 @@ def parse_drawio_xml(xml_text: str, source_file: str) -> ParsedDiagram:
                             float(target_mxpoint.get("y", 0)),
                         )
 
+                if not has_source:
+                    exit_match = _EXIT_RE.search(style)
+                    if exit_match:
+                        exit_fraction = (float(exit_match.group(1)), float(exit_match.group(2)))
+                if not has_target:
+                    entry_match = _ENTRY_RE.search(style)
+                    if entry_match:
+                        entry_fraction = (float(entry_match.group(1)), float(entry_match.group(2)))
+
             diagram.edges.append(
                 Edge(
                     id=cell_id,
@@ -109,6 +138,10 @@ def parse_drawio_xml(xml_text: str, source_file: str) -> ParsedDiagram:
                     style=style,
                     source_point=source_point,
                     target_point=target_point,
+                    exit_fraction=exit_fraction,
+                    entry_fraction=entry_fraction,
+                    source_resolution="explicit" if has_source else "unresolved",
+                    target_resolution="explicit" if has_target else "unresolved",
                 )
             )
             continue
@@ -154,18 +187,57 @@ def _distance_to_shape(shape: Shape, x: float, y: float) -> float:
 # happens to be closest, is more robust than tuning a fixed containment margin.
 _MAX_RESOLUTION_DISTANCE = 40.0
 
+# exitX/exitY (or entryX/entryY) without a paired source=/target= attribute is a real,
+# tighter geometric signal - confirmed by direct measurement on the gramflow reactor
+# file: reverse-computing "shape.x + shape.width*exitX, shape.y + shape.height*exitY"
+# for every candidate shape and comparing against the edge's own sourcePoint/targetPoint
+# found near-exact matches (0.4-27 units) for about half of these edges, and no good
+# match at all for the other half (confirming this is a mix of genuine leftover
+# attachment hints and pure stale noise from a since-detached connection - NOT reliably
+# one or the other). This tight tolerance is what separates the two: a real hint
+# reproduces the exact point almost exactly, stale noise does not land anywhere close.
+_MAX_FRACTION_MATCH_DISTANCE = 10.0
+
+
+def _predict_point_from_fraction(shape: Shape, fraction: tuple[float, float]) -> tuple[float, float]:
+    fx, fy = fraction
+    return (shape.x + shape.width * fx, shape.y + shape.height * fy)
+
 
 def resolve_floating_edge_endpoints(diagram: ParsedDiagram) -> None:
     """Fill in Edge.source/target for edges that only have a raw mxPoint coordinate
-    (see Edge.source_point/target_point), by finding the nearest shape to that point.
-    Mutates diagram.edges in place. Real, non-label (equipment/valve/inst) shapes are
-    checked first so a floating point lands on the actual symbol it's drawn touching,
-    not a nearby text label that happens to sit closer.
+    (see Edge.source_point/target_point). Mutates diagram.edges in place, and records
+    how each endpoint was actually resolved in source_resolution/target_resolution so
+    downstream reporting never presents an inferred connection with the same confidence
+    as one the file states explicitly (see Edge's docstring on *_resolution).
+
+    Two tiers, tried in order:
+    1. exit_fraction/entry_fraction match (see _MAX_FRACTION_MATCH_DISTANCE) - tighter,
+       more trustworthy when it hits, but only available on ~1/3 of floating edges and
+       only actually matches on about half of those.
+    2. Nearest-shape-by-distance fallback (_MAX_RESOLUTION_DISTANCE) - the original,
+       looser heuristic, for everything the fraction match didn't resolve.
     """
     real_shapes = [s for s in diagram.shapes if not s.is_labeled_only]
     label_shapes = [s for s in diagram.shapes if s.is_labeled_only]
+    all_shapes = real_shapes + label_shapes
 
-    def resolve(point: tuple[float, float]) -> str | None:
+    def resolve_by_fraction(point: tuple[float, float], fraction: tuple[float, float]) -> str | None:
+        best_shape_id = None
+        best_distance = None
+        for shape in all_shapes:
+            if shape.width <= 0 or shape.height <= 0:
+                continue
+            predicted = _predict_point_from_fraction(shape, fraction)
+            distance = ((predicted[0] - point[0]) ** 2 + (predicted[1] - point[1]) ** 2) ** 0.5
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_shape_id = shape.id
+        if best_distance is not None and best_distance <= _MAX_FRACTION_MATCH_DISTANCE:
+            return best_shape_id
+        return None
+
+    def resolve_by_nearest_shape(point: tuple[float, float]) -> str | None:
         x, y = point
         for candidates in (real_shapes, label_shapes):
             if not candidates:
@@ -177,9 +249,28 @@ def resolve_floating_edge_endpoints(diagram: ParsedDiagram) -> None:
 
     for edge in diagram.edges:
         if edge.source is None and edge.source_point is not None:
-            edge.source = resolve(edge.source_point)
+            if edge.exit_fraction is not None:
+                resolved = resolve_by_fraction(edge.source_point, edge.exit_fraction)
+                if resolved is not None:
+                    edge.source = resolved
+                    edge.source_resolution = "exit_fraction"
+            if edge.source is None:
+                resolved = resolve_by_nearest_shape(edge.source_point)
+                if resolved is not None:
+                    edge.source = resolved
+                    edge.source_resolution = "nearest_shape"
+
         if edge.target is None and edge.target_point is not None:
-            edge.target = resolve(edge.target_point)
+            if edge.entry_fraction is not None:
+                resolved = resolve_by_fraction(edge.target_point, edge.entry_fraction)
+                if resolved is not None:
+                    edge.target = resolved
+                    edge.target_resolution = "exit_fraction"
+            if edge.target is None:
+                resolved = resolve_by_nearest_shape(edge.target_point)
+                if resolved is not None:
+                    edge.target = resolved
+                    edge.target_resolution = "nearest_shape"
 
 
 def parse_drawio_xml_resolved(xml_text: str, source_file: str) -> ParsedDiagram:

@@ -44,6 +44,15 @@ class BuildRecord:
     status: str  # "built", "skipped"
     dexpi_class_name: str | None
     reason: str = ""
+    # For edges: how the connection's endpoints were actually determined - "explicit"
+    # (the drawio file states it directly), "exit_fraction" (a tight, high-confidence
+    # geometric match), "nearest_shape" (a looser proximity guess), or "mixed" (one
+    # endpoint explicit, the other inferred). Confirmed via manual cross-checking against
+    # the original P&ID image that nearest_shape resolutions can be wrong even when they
+    # succeed - this field lets a reviewer immediately see which built connections are
+    # ground truth and which are the tool's best guess, rather than treating both the
+    # same way. Empty string for shapes (not applicable).
+    confidence: str = ""
 
 
 @dataclass
@@ -176,6 +185,27 @@ def wire_edges(diagram: ParsedDiagram, build_result: BuildResult) -> None:
             )
             continue
 
+        if edge.source == edge.target:
+            # Both endpoints resolved to the same shape - always wrong data, never a
+            # real connection. Confirmed cause: resolve_floating_edge_endpoints'
+            # nearest-shape search (parser_drawio.py) can match BOTH ends of a very
+            # short line segment (e.g. one dash-mark of a hand-drawn dashed line) to the
+            # same nearby shape, producing a nonsense self-loop in the DEXPI model
+            # itself, not just the picture - confirmed on the gramflow reactor file
+            # (e.g. "TIC 203 -> TIC 203"). Skip rather than build a corrupt connection.
+            build_result.records.append(
+                BuildRecord(
+                    edge.id,
+                    "edge",
+                    "skipped",
+                    None,
+                    "both endpoints resolved to the same shape (self-loop, invalid) - "
+                    "likely a fragment of a multi-segment dashed line that couldn't be "
+                    "distinguished from a real short connection",
+                )
+            )
+            continue
+
         source_connector = _connector_item(source_obj)
         target_connector = _connector_item(target_obj)
 
@@ -207,8 +237,12 @@ def wire_edges(diagram: ParsedDiagram, build_result: BuildResult) -> None:
             continue
 
         system.segments.append(segment)
+        if edge.source_resolution == edge.target_resolution:
+            confidence = edge.source_resolution
+        else:
+            confidence = "mixed"
         build_result.records.append(
-            BuildRecord(edge.id, "edge", "built", "PipingNetworkSegment")
+            BuildRecord(edge.id, "edge", "built", "PipingNetworkSegment", confidence=confidence)
         )
 
     if system.segments:

@@ -78,6 +78,22 @@ with tempfile.TemporaryDirectory() as tmp_dir:
                 "please report it rather than trusting this output."
             )
 
+        explicit_count = report.connections_by_confidence.get("explicit", 0)
+        inferred_count = report.inferred_connection_count
+        if inferred_count > 0:
+            st.warning(
+                f"Of {explicit_count + inferred_count} piping connections converted, "
+                f"only {explicit_count} were stated directly in your drawing file. The "
+                f"other {inferred_count} were GUESSED by finding the nearest shape to a "
+                "loose line-end, because the line wasn't snapped exactly onto the shape "
+                "when it was drawn. These guesses can be wrong - please check them "
+                "against your original drawing before trusting the output. To fix at "
+                "the source: in draw.io, drag each connector's loose end until it "
+                "snaps onto the shape (you'll see a green highlight)."
+            )
+        else:
+            st.success("Every converted connection was stated directly in your drawing file.")
+
         if report.multi_tag_shapes:
             st.warning(
                 f"{len(report.multi_tag_shapes)} shape(s) picked up more than one nearby "

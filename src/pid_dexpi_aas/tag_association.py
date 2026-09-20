@@ -32,11 +32,25 @@ def _distance(a: Shape, b: Shape) -> float:
     return math.hypot(ax - bx, ay - by)
 
 
+# A label further than this from every real shape is not associated with anything,
+# rather than force-matched to whatever happens to be least-far-away. Confirmed as a
+# real bug on the gramflow reactor file: with no cap, "XV202" (a valve tag) was
+# incorrectly attached to a tank shape 535 units away, and "V201" to the same tank at
+# 758 units - both nowhere near their real, intended shapes - producing a corrupted
+# tagName and creating the false impression of a wrong piping connection downstream
+# (the connection itself was correct; the printed tag was not). 150 units is generous
+# relative to typical shape sizes in these files (~80-180 units) and typical genuine
+# label-to-shape distances seen elsewhere (0-110 units in the PFD smoke-test fixture).
+_MAX_TAG_ASSOCIATION_DISTANCE = 150.0
+
+
 def associate_tags(diagram: ParsedDiagram) -> list[TagAssociation]:
     """Return one TagAssociation per label-only shape that has non-empty text.
 
     Label-only shapes with empty text are dropped (nothing to attach). Ties in distance
-    are broken by shape id order, deterministically.
+    are broken by shape id order, deterministically. A label with no real shape within
+    _MAX_TAG_ASSOCIATION_DISTANCE gets target_shape_id=None (unresolved) rather than
+    being force-matched to the nearest shape regardless of how far away it actually is.
 
     KNOWN LIMITATION: nearest-distance-only association conflates true equipment tags
     (e.g. "V101") with nearby stream/state annotations (e.g. "Product", "Reaction
@@ -58,9 +72,9 @@ def associate_tags(diagram: ParsedDiagram) -> list[TagAssociation]:
             continue
 
         nearest = min(labeled_shapes, key=lambda s: (_distance(label, s), s.id))
-        associations.append(
-            TagAssociation(label.id, label.text, nearest.id, _distance(label, nearest))
-        )
+        nearest_distance = _distance(label, nearest)
+        target_id = nearest.id if nearest_distance <= _MAX_TAG_ASSOCIATION_DISTANCE else None
+        associations.append(TagAssociation(label.id, label.text, target_id, nearest_distance))
 
     return associations
 

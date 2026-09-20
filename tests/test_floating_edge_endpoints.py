@@ -35,10 +35,30 @@ def test_floating_edges_resolve_to_real_shapes():
 
 
 def test_resolving_floating_edges_meaningfully_increases_built_count():
-    """Before the fix, this file built only 69/251 elements; after, 111/251 - pin a
-    conservative floor so a future regression is caught, not just "still runs".
+    """Before the floating-edge fix, this file built only 69/251 elements. The nearest-
+    shape resolver initially (wrongly) pushed this to 111 by also matching short dash-
+    mark segments to whatever real shape happened to be within 40 units of BOTH their
+    endpoints, producing self-loop connections (e.g. "TIC 203 -> TIC 203") that are
+    invalid data, not just an ugly picture - see test_no_self_loop_connections_in_model
+    below. After also rejecting self-loops, the honest count is lower (82) but the data
+    is actually correct instead of inflated with garbage connections.
     """
     diagram = parse_drawio_file(GRAMFLOW)
     result = build_model(diagram)
     built = sum(1 for r in result.records if r.status == "built")
-    assert built >= 100
+    assert built >= 75
+
+
+def test_no_self_loop_connections_in_model():
+    """Regression test: resolve_floating_edge_endpoints' nearest-shape search can match
+    BOTH endpoints of a very short edge segment (e.g. one dash-mark of a hand-drawn
+    dashed line) to the same nearby shape, producing a nonsense self-loop connection in
+    the actual DEXPI model - not just a rendering issue. Confirmed on this file: 36 such
+    edges (e.g. "TIC 203 -> TIC 203", "P101 -> P101") before build_model.py's wire_edges
+    started rejecting edge.source == edge.target explicitly.
+    """
+    diagram = parse_drawio_file(GRAMFLOW)
+    result = build_model(diagram)
+    for system in result.model.conceptualModel.pipingNetworkSystems:
+        for segment in system.segments:
+            assert segment.sourceItem is not segment.targetItem or segment.sourceItem is None
