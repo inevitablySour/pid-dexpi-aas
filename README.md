@@ -42,4 +42,37 @@ suite (`tests/test_serialize_patch.py` once written) and re-checking whether ups
 shipped real piping/instrumentation export** - if they have, delete our patch and switch
 back to the stock `ProteusSerializer`.
 
-Location of the patch: `src/pid_dexpi_aas/proteus_patch.py` (once written).
+Location of the patch: `src/pid_dexpi_aas/proteus_patch.py`.
+
+## P&ID re-render (SVG)
+
+`run_pipeline.py` also writes a `<name>.svg` re-rendering the built model back into a
+picture, for visual "does this match my drawing" verification alongside the raw XML.
+
+**pyDEXPI ships no symbol geometry at all** - confirmed by direct inspection:
+`svg_loader.py`'s renderer only dispatches on primitive type (polygon/polyline/ellipse/
+text/etc), never on DEXPI class name, and no shape-catalogue data ships in the package or
+exists in any sample/test data. `symbol_library.py` is a small, independently hand-drawn
+ISO-10628/ISA-5.1-style symbol set (bowtie valves, circular pumps/instruments, capsule
+vessels, a pentagon off-page connector, etc) covering every DEXPI class `mapping.py` can
+produce - not copied from any source, so no licensing concerns.
+
+**Also confirmed and worked around: a pyDEXPI 1.2.0 viewBox bug.**
+`DrawDiagram.draw_svg()` resets its bounds tracking to `±inf` on every call and rebuilds
+the SVG `viewBox` from each primitive's raw *local* coordinates (our symbol library's
+normalized 0-100 box) - never accounting for the `<g transform="translate(...)
+scale(...)">` that places each symbol on the diagram. In practice this collapsed the
+viewBox to roughly 0-100 regardless of the actual diagram size. `render_svg.py` works
+around this by rendering normally via `DrawDiagram`, then overwriting the root SVG's
+width/height/viewBox using the correct global bounds `build_diagram.py` already computed
+from the original drawio coordinates.
+
+**Also confirmed: `DexpiModel.diagram` is a math-convention (Y increases upward)
+coordinate space**, opposite to drawio/mxGraph's screen convention (Y increases
+downward) - `build_diagram.py` negates Y throughout; get this wrong and everything
+renders with large negative coordinates and an empty-looking canvas.
+
+Coverage/known limits: piping lines are drawn as straight lines between shape centers
+(not routed like the original drawing); a shape with multiple associated tags (see
+`tag_association.py`'s documented limitation) shows all of them comma-joined on one
+label, which is a visible cue that the shape needs manual review, not a rendering bug.

@@ -4,7 +4,9 @@ Usage:
     .venv/bin/python run_pipeline.py "path/to/your.drawio" output_dir/
 
 Decodes the drawio file (if needed), parses it, builds a DexpiModel, prints the
-validate-by-counting report, and writes Proteus XML to <output_dir>/<name>.xml.
+validate-by-counting report, writes Proteus XML to <output_dir>/<name>.xml, and
+re-renders the built model as a P&ID-style SVG at <output_dir>/<name>.svg for visual
+verification against the original drawing.
 """
 from __future__ import annotations
 
@@ -13,9 +15,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
+from pid_dexpi_aas.build_diagram import build_diagram
 from pid_dexpi_aas.build_model import build_model
 from pid_dexpi_aas.decode_drawio import decode_drawio
 from pid_dexpi_aas.parser_drawio import parse_drawio_xml
+from pid_dexpi_aas.render_svg import render_diagram_svg
 from pid_dexpi_aas.serialize import save_and_verify
 from pid_dexpi_aas.validate_by_counting import format_report, report_for_diagram
 
@@ -45,6 +49,10 @@ def main() -> None:
     print(f"Round-trip verified: equipment={len(reloaded.conceptualModel.taggedPlantItems)}, "
           f"piping systems={len(reloaded.conceptualModel.pipingNetworkSystems)}, "
           f"instrumentation={len(reloaded.conceptualModel.processInstrumentationFunctions)}")
+
+    diagram_obj = build_diagram(diagram, result, result.model)
+    svg_path = render_diagram_svg(diagram_obj, output_dir / f"{output_name}.svg")
+    print(f"Wrote {svg_path} (re-rendered P&ID for visual verification)")
 
 
 if __name__ == "__main__":
