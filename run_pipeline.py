@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from pid_dexpi_aas.build_diagram import build_diagram
 from pid_dexpi_aas.build_model import build_model
 from pid_dexpi_aas.decode_drawio import decode_drawio
-from pid_dexpi_aas.parser_drawio import parse_drawio_xml
+from pid_dexpi_aas.parser_drawio import parse_drawio_xml_resolved
 from pid_dexpi_aas.render_svg import render_diagram_svg
 from pid_dexpi_aas.serialize import save_and_verify
 from pid_dexpi_aas.validate_by_counting import format_report, report_for_diagram
@@ -36,7 +36,7 @@ def main() -> None:
     xml_variants = decode_drawio(drawio_path)
     xml_text = xml_variants[0]  # first <diagram> in the file
 
-    diagram = parse_drawio_xml(xml_text, source_file=drawio_path.name)
+    diagram = parse_drawio_xml_resolved(xml_text, source_file=drawio_path.name)
     result = build_model(diagram)
 
     report = report_for_diagram(diagram, result)

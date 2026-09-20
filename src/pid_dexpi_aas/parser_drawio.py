@@ -36,6 +36,13 @@ class Edge:
     source: str | None
     target: str | None
     style: str
+    # Raw (x, y) fallback endpoints from <mxPoint as="sourcePoint"/targetPoint">,
+    # populated only when the corresponding source/target cell-id attribute is absent.
+    # drawio stores an edge endpoint this way whenever it isn't snapped exactly onto a
+    # shape (confirmed: roughly half of all edges across every team file lack a
+    # source/target attribute and rely on this instead - not a rare edge case).
+    source_point: tuple[float, float] | None = None
+    target_point: tuple[float, float] | None = None
 
 
 @dataclass
@@ -77,12 +84,31 @@ def parse_drawio_xml(xml_text: str, source_file: str) -> ParsedDiagram:
         style = cell.get("style", "")
 
         if cell.get("edge") == "1":
+            source_point = target_point = None
+            if cell.get("source") is None or cell.get("target") is None:
+                geometry = cell.find("mxGeometry")
+                if geometry is not None:
+                    source_mxpoint = geometry.find("mxPoint[@as='sourcePoint']")
+                    target_mxpoint = geometry.find("mxPoint[@as='targetPoint']")
+                    if source_mxpoint is not None:
+                        source_point = (
+                            float(source_mxpoint.get("x", 0)),
+                            float(source_mxpoint.get("y", 0)),
+                        )
+                    if target_mxpoint is not None:
+                        target_point = (
+                            float(target_mxpoint.get("x", 0)),
+                            float(target_mxpoint.get("y", 0)),
+                        )
+
             diagram.edges.append(
                 Edge(
                     id=cell_id,
                     source=cell.get("source"),
                     target=cell.get("target"),
                     style=style,
+                    source_point=source_point,
+                    target_point=target_point,
                 )
             )
             continue
@@ -110,6 +136,61 @@ def parse_drawio_xml(xml_text: str, source_file: str) -> ParsedDiagram:
     return diagram
 
 
+def _distance_to_shape(shape: Shape, x: float, y: float) -> float:
+    """Distance from (x, y) to the nearest point on shape's bounding box - 0 if the
+    point is inside/on the box, matching how a drawio edge endpoint typically sits
+    exactly on a symbol's edge rather than dead-center."""
+    dx = max(shape.x - x, 0.0, x - (shape.x + shape.width))
+    dy = max(shape.y - y, 0.0, y - (shape.y + shape.height))
+    return (dx**2 + dy**2) ** 0.5
+
+
+# Endpoints drawn "loosely" (not snapped exactly to a shape's connection points) can
+# land a real distance away from the shape they visually touch - confirmed empirically
+# on the gramflow reactor file, where a strict bounding-box-containment check (even with
+# a small margin) missed a point that was genuinely still touching its target shape's
+# edge from just outside it. A generous nearest-shape search, capped at this distance
+# so an edge floating in genuinely empty space doesn't get wrongly attached to whatever
+# happens to be closest, is more robust than tuning a fixed containment margin.
+_MAX_RESOLUTION_DISTANCE = 40.0
+
+
+def resolve_floating_edge_endpoints(diagram: ParsedDiagram) -> None:
+    """Fill in Edge.source/target for edges that only have a raw mxPoint coordinate
+    (see Edge.source_point/target_point), by finding the nearest shape to that point.
+    Mutates diagram.edges in place. Real, non-label (equipment/valve/inst) shapes are
+    checked first so a floating point lands on the actual symbol it's drawn touching,
+    not a nearby text label that happens to sit closer.
+    """
+    real_shapes = [s for s in diagram.shapes if not s.is_labeled_only]
+    label_shapes = [s for s in diagram.shapes if s.is_labeled_only]
+
+    def resolve(point: tuple[float, float]) -> str | None:
+        x, y = point
+        for candidates in (real_shapes, label_shapes):
+            if not candidates:
+                continue
+            nearest = min(candidates, key=lambda s: _distance_to_shape(s, x, y))
+            if _distance_to_shape(nearest, x, y) <= _MAX_RESOLUTION_DISTANCE:
+                return nearest.id
+        return None
+
+    for edge in diagram.edges:
+        if edge.source is None and edge.source_point is not None:
+            edge.source = resolve(edge.source_point)
+        if edge.target is None and edge.target_point is not None:
+            edge.target = resolve(edge.target_point)
+
+
+def parse_drawio_xml_resolved(xml_text: str, source_file: str) -> ParsedDiagram:
+    """parse_drawio_xml + resolve_floating_edge_endpoints in one call - the entry point
+    build_model.py/run_pipeline.py/app.py should use, so floating (non-snapped) edges
+    aren't silently dropped."""
+    diagram = parse_drawio_xml(xml_text, source_file=source_file)
+    resolve_floating_edge_endpoints(diagram)
+    return diagram
+
+
 def parse_drawio_file(path: str | Path) -> ParsedDiagram:
     path = Path(path)
-    return parse_drawio_xml(path.read_text(encoding="utf-8"), source_file=path.name)
+    return parse_drawio_xml_resolved(path.read_text(encoding="utf-8"), source_file=path.name)
