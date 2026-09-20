@@ -24,7 +24,9 @@ from pydexpi.dexpi_classes.graphics import (
     ConnectorLine,
     DashStyle,
     Diagram,
+    FillStyle,
     Point,
+    Polygon,
     RepresentationGroup,
     Shape,
     ShapeUsage,
@@ -33,17 +35,22 @@ from pydexpi.dexpi_classes.graphics import (
     Text,
     TextAlignment,
 )
+from pydexpi.dexpi_classes import piping
 from pydexpi.dexpi_classes.pydantic_classes import DexpiBaseModel, DexpiModel
 
 from pid_dexpi_aas.build_model import BuildResult
-from pid_dexpi_aas.parser_drawio import ParsedDiagram
+from pid_dexpi_aas.parser_drawio import Edge, ParsedDiagram
 from pid_dexpi_aas.symbol_library import build_primitives_for_class, compute_local_bounding_box
 from pid_dexpi_aas.tag_association import build_tag_lookup
 
 _BACKGROUND = Color(r=255, g=255, b=255)
 _PADDING = 20.0
-_LINE_STROKE = Stroke(color=Color(r=0, g=0, b=0), dashStyle=DashStyle.Solid, width=1.5)
+_LINE_COLOR = Color(r=0, g=0, b=0)
+_SOLID_LINE_STROKE = Stroke(color=_LINE_COLOR, dashStyle=DashStyle.Solid, width=1.5)
+_DASHED_LINE_STROKE = Stroke(color=_LINE_COLOR, dashStyle=DashStyle.Dash, width=1.5)
 _LABEL_COLOR = Color(r=0, g=0, b=0)
+_ARROW_LENGTH = 12.0
+_ARROW_HALF_WIDTH = 5.0
 
 
 def _route_orthogonal(
@@ -83,6 +90,41 @@ def _route_orthogonal(
         return [(s_cx, start_y), (s_cx, mid_y), (t_cx, mid_y), (t_cx, end_y)]
 
 
+def _arrowhead_polygon(tip: tuple[float, float], from_point: tuple[float, float]) -> Polygon:
+    """A small filled triangle pointing from from_point toward tip, for drawing an
+    endArrow/startArrow at a connector's end - pyDEXPI's SVG renderer draws no
+    arrowheads at all (confirmed: no marker/arrow code anywhere in svg_loader.py), so
+    flow direction shown in the original drawing (endArrow=classic/startArrow=classic)
+    was previously lost entirely.
+
+    Only handles axis-aligned segments (horizontal or vertical), which is all
+    _route_orthogonal ever produces.
+    """
+    tip_x, tip_y = tip
+    from_x, from_y = from_point
+
+    if tip_y == from_y:  # horizontal segment
+        direction = 1.0 if tip_x > from_x else -1.0
+        base_x = tip_x - direction * _ARROW_LENGTH
+        return _polygon_from_points(
+            (tip_x, tip_y), (base_x, tip_y - _ARROW_HALF_WIDTH), (base_x, tip_y + _ARROW_HALF_WIDTH)
+        )
+    else:  # vertical segment
+        direction = 1.0 if tip_y > from_y else -1.0
+        base_y = tip_y - direction * _ARROW_LENGTH
+        return _polygon_from_points(
+            (tip_x, tip_y), (tip_x - _ARROW_HALF_WIDTH, base_y), (tip_x + _ARROW_HALF_WIDTH, base_y)
+        )
+
+
+def _polygon_from_points(*points: tuple[float, float]) -> Polygon:
+    return Polygon(
+        points=[Point(x=x, y=y) for x, y in points],
+        stroke=_SOLID_LINE_STROKE,
+        fillStyle=FillStyle.Solid,
+    )
+
+
 def build_diagram(diagram: ParsedDiagram, result: BuildResult, model: DexpiModel) -> Diagram:
     """Construct and return a Diagram; also sets model.diagram."""
     representation_groups: list[RepresentationGroup] = []
@@ -104,6 +146,27 @@ def build_diagram(diagram: ParsedDiagram, result: BuildResult, model: DexpiModel
             continue  # unmapped/skipped shapes (see BuildRecord) have no DEXPI object
 
         class_name = type(dexpi_object).__name__
+
+        if isinstance(dexpi_object, (piping.FlowInPipeOffPageConnector, piping.FlowOutPipeOffPageConnector)):
+            # This shape is a floating TEXT LABEL (e.g. "Fume hood [atm]") that
+            # build_model.py's off-page-connector fallback turned into a DEXPI object
+            # purely so an edge could terminate somewhere real - it's not equipment with
+            # its own symbol. Drawing the generic-box fallback symbol here produced a
+            # visibly wrong second box overlapping the label/pentagon that's already
+            # drawn as its own separate shape right next to it. Skip the symbol
+            # entirely; still register a (tiny, point-sized) box below so connector
+            # routing still terminates at the right place.
+            width = shape.width or 100.0
+            height = shape.height or 100.0
+            box_center_x = shape.x + width / 2.0
+            box_center_y = -(shape.y + height / 2.0)
+            shape_boxes[shape.id] = (box_center_x, box_center_y, box_center_x, box_center_y)
+            min_x = min(min_x, shape.x)
+            max_x = max(max_x, shape.x + width)
+            min_y = min(min_y, -(shape.y + height))
+            max_y = max(max_y, -shape.y)
+            continue
+
         primitives = build_primitives_for_class(class_name)
         symbol_shape = Shape(name=class_name, primitives=primitives)
         local_box = compute_local_bounding_box(primitives)
@@ -177,11 +240,17 @@ def build_diagram(diagram: ParsedDiagram, result: BuildResult, model: DexpiModel
         if source_box is None or target_box is None:
             continue  # matches build_model.wire_edges' own "not built" skip condition
         routed_points = _route_orthogonal(source_box, target_box)
+        stroke = _DASHED_LINE_STROKE if edge.is_dashed else _SOLID_LINE_STROKE
         edge_elements.append(
             ConnectorLine(
-                innerPoints=[Point(x=x, y=y) for x, y in routed_points], stroke=_LINE_STROKE
+                innerPoints=[Point(x=x, y=y) for x, y in routed_points], stroke=stroke
             )
         )
+
+        if edge.has_end_arrow:
+            edge_elements.append(_arrowhead_polygon(routed_points[-1], routed_points[-2]))
+        if edge.has_start_arrow:
+            edge_elements.append(_arrowhead_polygon(routed_points[0], routed_points[1]))
 
     if edge_elements:
         # `represents=model` is a placeholder: RepresentationGroup.represents is only

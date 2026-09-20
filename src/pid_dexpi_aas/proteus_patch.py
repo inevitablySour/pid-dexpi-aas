@@ -81,8 +81,23 @@ class PipingNodeExporter(ExporterModule):
         return node_elem
 
 
+# Off-page connectors get their own dedicated XML tag per the parser (confirmed:
+# PipeOffPageConnectorParser is registered against the "PipeOffPageConnector" tag,
+# separate from "PipingComponent" - parser_factory.py's item-dispatch loop checks
+# subelement.tag == "PipeOffPageConnector" as a distinct branch, not a ComponentClass
+# value under PipingComponent). FlowIn/FlowOutPipeOffPageConnector (the only classes
+# that satisfy PipingSourceItem/PipingTargetItem, needed for build_model.py's off-page
+# connector fallback - see _get_or_build_off_page_connector) are subclasses of
+# PipeOffPageConnector and round-trip through this same tag; the FlowIn/FlowOut
+# distinction itself is not preserved by the parser (it always reconstructs plain
+# PipeOffPageConnector), which is an acceptable minor fidelity loss for a text-only
+# off-page destination label - the connection topology itself is preserved exactly.
+_OFF_PAGE_CONNECTOR_CLASSES = (piping.PipeOffPageConnector,)
+
+
 class PipingComponentExporter(ExporterModule):
-    """Exports a PipingNetworkSegmentItem (e.g. a valve) as <PipingComponent>.
+    """Exports a PipingNetworkSegmentItem (e.g. a valve, or an off-page connector) as
+    <PipingComponent> or <PipeOffPageConnector> depending on its class.
 
     Mirrors NozzleExporter/EquipmentExporter's pattern exactly (same ExporterModule
     contract), adding a <ConnectionPoints> block since piping connections need to
@@ -102,10 +117,23 @@ class PipingComponentExporter(ExporterModule):
 
     def compositional_pass(self) -> ET.Element:
         class_name = type(self.item).__name__
-        elem = ET.Element("PipingComponent")
+        is_off_page_connector = isinstance(self.item, _OFF_PAGE_CONNECTOR_CLASSES)
+        tag = "PipeOffPageConnector" if is_off_page_connector else "PipingComponent"
+        elem = ET.Element(tag)
         elem.set("ID", self.make_id_attribute(self.item))
-        elem.set("ComponentClass", class_name)
-        elem.set(*make_default_component_class_uri(class_name))
+        # PipeOffPageConnectorParser reuses PipingComponentParser.compositional_pass
+        # unconditionally (PipeOffPageConnectorParser.compositional_pass calls
+        # super().compositional_pass() first thing), which always reads "ComponentClass"
+        # regardless of tag - confirmed by a crash without this
+        # ("attribute name must be string, not 'NoneType'" from getattr(piping, None)).
+        # For a real off-page connector this class name is always "PipeOffPageConnector"
+        # itself here (FlowIn/FlowOut subtypes aren't preserved through this tag, see
+        # this module's _OFF_PAGE_CONNECTOR_CLASSES comment) since getattr(piping,
+        # "PipeOffPageConnector") is what the parser needs to resolve back to the base
+        # class successfully.
+        elem.set("ComponentClass", "PipeOffPageConnector" if is_off_page_connector else class_name)
+        if not is_off_page_connector:
+            elem.set(*make_default_component_class_uri(class_name))
 
         self.generic_attribute_exporter.compose_and_add_attributes(elem)
 
@@ -157,7 +185,24 @@ class PipingNetworkSegmentExporter(ExporterModule):
             )
 
         self.item_exporters = [PipingComponentExporter(context, item) for item in segment.items]
+
+        # A segment's sourceItem/targetItem is usually an equipment Nozzle (registered
+        # via EquipmentExporter's tree) or one of segment.items (registered above) - but
+        # build_model.py's off-page-connector fallback (see _get_or_build_off_page_
+        # connector) produces a standalone FlowIn/FlowOutPipeOffPageConnector that is
+        # NEITHER: it's not nested under any equipment, and it's not one of this
+        # segment's own items (it typically IS the segment's connector item, not
+        # something inside it). Nothing else ever builds an exporter for it, so without
+        # this it's simply never registered and _resolve_connector_proteus_id silently
+        # returns None - confirmed via a failing round-trip test (targetItem came back
+        # None after reload) before this fix.
+        self.endpoint_exporters = []
+        for endpoint in (segment.sourceItem, segment.targetItem):
+            if isinstance(endpoint, piping.PipingNetworkSegmentItem) and endpoint not in segment.items:
+                self.endpoint_exporters.append(PipingComponentExporter(context, endpoint))
+
         self.register_submodule_list(self.item_exporters)
+        self.register_submodule_list(self.endpoint_exporters)
 
     def compositional_pass(self) -> ET.Element:
         elem = ET.Element("PipingNetworkSegment")
@@ -166,9 +211,23 @@ class PipingNetworkSegmentExporter(ExporterModule):
         for item_exporter in self.item_exporters:
             elem.append(item_exporter.compositional_pass())
 
+        # Build (and register) endpoint exporters now so _resolve_connector_proteus_id
+        # can find them in reference_pass, but do NOT nest their elements inside this
+        # <PipingNetworkSegment> - the parser interleaves item/CenterLine children by
+        # document order to build the segment's internal items/connections (see
+        # PipingNetworkSegmentParser.compositional_pass), so appending an unrelated
+        # standalone connector here would corrupt that structure on reload. Elements are
+        # returned via get_orphan_elements() for the caller to place as top-level
+        # PlantModel siblings instead - the same flat, registry-resolved placement a
+        # Nozzle gets (nested under its owning Equipment, referenced purely by ID).
+        self.orphan_elements = [exporter.compositional_pass() for exporter in self.endpoint_exporters]
+
         self.segment_element = elem
         self.register_object(self.segment.id, elem)
         return elem
+
+    def get_orphan_elements(self) -> list[ET.Element]:
+        return getattr(self, "orphan_elements", [])
 
     def reference_pass(self) -> None:
         super().reference_pass()
@@ -204,6 +263,12 @@ class PipingNetworkSystemExporter(ExporterModule):
             elem.append(segment_exporter.compositional_pass())
         self.register_object(self.system.id, elem)
         return elem
+
+    def get_orphan_elements(self) -> list[ET.Element]:
+        orphans = []
+        for segment_exporter in self.segment_exporters:
+            orphans.extend(segment_exporter.get_orphan_elements())
+        return orphans
 
 
 class ProcessInstrumentationFunctionExporter(ExporterModule):
@@ -260,6 +325,15 @@ class PatchedPlantModelExporter(PlantModelExporter):
 
         for exporter in self.pif_exporters:
             plant_model.append(exporter.compositional_pass())
+
+        # Standalone off-page-connector items referenced by a segment's sourceItem/
+        # targetItem but not nested under any equipment or segment - see
+        # PipingNetworkSegmentExporter's endpoint_exporters. Placed as flat PlantModel
+        # siblings, resolved purely by Proteus ID via <Connection FromID=.../ToID=...>,
+        # matching how the parser's registry-based ID resolution works for any object.
+        for exporter in self.piping_system_exporters:
+            for orphan_element in exporter.get_orphan_elements():
+                plant_model.append(orphan_element)
 
         return plant_model
 

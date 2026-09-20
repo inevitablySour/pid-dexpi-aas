@@ -57,6 +57,13 @@ class Edge:
     # explicitly. See mapping.py/build_model.py's BuildRecord for how this is reported.
     source_resolution: str = "explicit"  # "explicit" | "exit_fraction" | "nearest_shape" | "unresolved"
     target_resolution: str = "explicit"
+    # Visual style read straight from the style string - dashed=1 for control/signal
+    # lines drawn dashed in the original, endArrow=classic/startArrow=classic for a
+    # drawn arrowhead. Previously never parsed at all, so every rendered connector came
+    # out solid with no arrowhead regardless of what the source file actually specified.
+    is_dashed: bool = False
+    has_end_arrow: bool = False
+    has_start_arrow: bool = False
 
 
 @dataclass
@@ -70,6 +77,9 @@ _TAG_RE = re.compile(r"<[^>]+>")
 _SHAPE_TOKEN_RE = re.compile(r"(?:^|;)shape=([^;]+)")
 _EXIT_RE = re.compile(r"(?:^|;)exitX=([\d.]+);exitY=([\d.]+)")
 _ENTRY_RE = re.compile(r"(?:^|;)entryX=([\d.]+);entryY=([\d.]+)")
+_DASHED_RE = re.compile(r"(?:^|;)dashed=1(?:;|$)")
+_END_ARROW_RE = re.compile(r"(?:^|;)endArrow=([a-zA-Z]+)")
+_START_ARROW_RE = re.compile(r"(?:^|;)startArrow=([a-zA-Z]+)")
 
 
 def _strip_html(value: str) -> str:
@@ -130,6 +140,9 @@ def parse_drawio_xml(xml_text: str, source_file: str) -> ParsedDiagram:
                     if entry_match:
                         entry_fraction = (float(entry_match.group(1)), float(entry_match.group(2)))
 
+            end_arrow_match = _END_ARROW_RE.search(style)
+            start_arrow_match = _START_ARROW_RE.search(style)
+
             diagram.edges.append(
                 Edge(
                     id=cell_id,
@@ -142,6 +155,10 @@ def parse_drawio_xml(xml_text: str, source_file: str) -> ParsedDiagram:
                     entry_fraction=entry_fraction,
                     source_resolution="explicit" if has_source else "unresolved",
                     target_resolution="explicit" if has_target else "unresolved",
+                    is_dashed=_DASHED_RE.search(style) is not None,
+                    has_end_arrow=end_arrow_match is not None and end_arrow_match.group(1) != "none",
+                    has_start_arrow=start_arrow_match is not None
+                    and start_arrow_match.group(1) != "none",
                 )
             )
             continue

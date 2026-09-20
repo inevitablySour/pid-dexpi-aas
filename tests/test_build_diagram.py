@@ -14,12 +14,22 @@ def test_diagram_has_one_group_per_built_equipment_plus_piping_lines():
     result = build_model(diagram)
     d = build_diagram(diagram, result, result.model)
 
+    off_page_connector_count = sum(
+        1
+        for r in result.records
+        if r.status == "built"
+        and r.element_kind == "shape"
+        and r.dexpi_class_name in ("FlowInPipeOffPageConnector", "FlowOutPipeOffPageConnector")
+    )
     built_shape_count = sum(
         1 for r in result.records if r.status == "built" and r.element_kind == "shape"
     )
-    # one RepresentationGroup per built shape, plus (if any edges rendered) one more
-    # group holding all the piping ConnectorLines.
-    assert len(d.groups) in (built_shape_count, built_shape_count + 1)
+    # one RepresentationGroup per built shape EXCEPT off-page connectors (which get no
+    # symbol of their own - see build_diagram.py, they're a floating text label already
+    # drawn as its own separate shape, not equipment), plus (if any edges rendered) one
+    # more group holding all the piping ConnectorLines.
+    real_symbol_count = built_shape_count - off_page_connector_count
+    assert len(d.groups) in (real_symbol_count, real_symbol_count + 1)
 
 
 def test_diagram_bounds_are_sane_not_degenerate():

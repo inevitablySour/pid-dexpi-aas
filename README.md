@@ -72,7 +72,41 @@ coordinate space**, opposite to drawio/mxGraph's screen convention (Y increases
 downward) - `build_diagram.py` negates Y throughout; get this wrong and everything
 renders with large negative coordinates and an empty-looking canvas.
 
-Coverage/known limits: piping lines are drawn as straight lines between shape centers
-(not routed like the original drawing); a shape with multiple associated tags (see
+**Also confirmed and fixed: pyDEXPI 1.2.0's `convert_stroke`/`convert_polygon` never
+render dashed lines or filled polygons.** `convert_stroke` checks `stroke.dashStyle.value
+== "Dashed"`/`"Dotted"`, but the real `DashStyle` enum members are `Dash`/`Dot` - that
+condition can never be true, so every stroke renders solid. `convert_polygon` computes
+`fill` via `"none" if ... == "Solid" else "none"` - both branches return `"none"`, so a
+filled polygon (needed for arrowhead triangles) always renders unfilled. Subclassing
+`DrawDiagram` does NOT fix this: `_create_content_group` hands off to nested
+`DrawRepresentationGroup`/`DrawShapeUsage` drawers that each construct their own plain
+`SvgRenderer` internally, with no dependency-injection point - `svg_renderer_patch.py`
+monkeypatches `SvgRenderer.convert_stroke`/`convert_polygon` directly (at class level,
+applied once on import) so every renderer instance gets the fix regardless of which
+drawer class constructs it.
+
+**Also confirmed: pyDEXPI 1.2.0's Proteus round-trip is broken for off-page connectors,
+in the library itself, not just our exporter.** `PipeOffPageConnector` (the class the
+parser reconstructs from a `<PipeOffPageConnector>` XML tag) implements neither
+`PipingSourceItem` nor `PipingTargetItem` - only its `FlowIn`/`FlowOutPipeOffPageConnector`
+subclasses do, and the parser never produces those. `PipingNetworkSegmentParser.
+reference_pass` unconditionally assigns any adjacent segment item (including a plain
+`PipeOffPageConnector`) as a `PipingConnection`'s `sourceItem`/`targetItem`, which
+pydantic then rejects. This means ANY Proteus file with an off-page connector adjacent to
+an internal connection fails to fully reload in this pyDEXPI version - confirmed via
+direct testing, independent of our exporter's correctness. Our exporter still emits a
+schema-correct `<PipeOffPageConnector>` (used by `build_model.py`'s
+`_get_or_build_off_page_connector`, for edges terminating at a text-only destination like
+"Fume hood [atm]" or "safe location" - real, distinct connections that would otherwise be
+silently dropped since nothing else builds a DEXPI object for a floating text label); the
+rest of the model (all equipment, all other segments, instrumentation) survives reload
+fully - only that one segment's off-page-connector-side `sourceItem`/`targetItem` comes
+back `None` after a save-then-reload round-trip. See `tests/test_proteus_patch.py`'s
+`test_known_parser_bugs_produce_only_expected_errors` for the exact confirmed error.
+
+Coverage/known limits: a shape with multiple associated tags (see
 `tag_association.py`'s documented limitation) shows all of them comma-joined on one
 label, which is a visible cue that the shape needs manual review, not a rendering bug.
+Piping connections route as right-angle ("elbow") lines between the two shapes' real,
+computed bounding boxes (`build_diagram.py`'s `_route_orthogonal`/
+`compute_local_bounding_box`), not the diagram's original routed paths.

@@ -162,16 +162,71 @@ def _connector_item(obj):
     return obj
 
 
+def _get_or_build_off_page_connector(
+    shape_id: str, build_result: BuildResult, shapes_by_id: dict, as_source: bool
+):
+    """Return the object already built for shape_id, or - if it's a floating text label
+    with no DEXPI representation - lazily build an off-page connector for it and record
+    that build, so an edge terminating at a text-only destination (e.g. "Fume hood
+    [atm]", "safe location") isn't silently dropped just because it's not process
+    equipment. Confirmed as a real, distinct gap (not a resolution failure): the shape
+    and edge both resolve correctly, there's just nothing to connect the edge TO,
+    because build_shapes() only builds equipment/piping/instrumentation shapes.
+    Only fires for shapes with non-empty text - an empty/unlabeled floating rectangle
+    has no meaningful identity to attach a connector to.
+
+    Bare PipeOffPageConnector is NOT a valid PipingSourceItem/PipingTargetItem (confirmed
+    by pydantic rejecting it at construction time) - only its FlowIn/FlowOut subclasses
+    are, so which one to build depends on which side of the edge this shape is on.
+    """
+    existing = build_result.shape_objects.get(shape_id)
+    if existing is not None:
+        return existing
+
+    shape = shapes_by_id.get(shape_id)
+    if shape is None or not shape.is_labeled_only or not shape.text:
+        return None
+
+    connector_cls = piping.FlowInPipeOffPageConnector if as_source else piping.FlowOutPipeOffPageConnector
+    connector = connector_cls(nodes=[piping.PipingNode()])
+    build_result.shape_objects[shape_id] = connector
+
+    # build_shapes() (pass 1) already appended a "skipped" record for this shape id
+    # (labels with no shape token are skipped there) - update it in place rather than
+    # appending a second record, or validate_by_counting's total-element accounting
+    # would double-count this shape.
+    for existing_record in build_result.records:
+        if existing_record.element_id == shape_id and existing_record.element_kind == "shape":
+            existing_record.status = "built"
+            existing_record.dexpi_class_name = connector_cls.__name__
+            existing_record.reason = (
+                "text-only connection target (e.g. an off-page destination), not "
+                "process equipment - built lazily because an edge terminates here"
+            )
+            break
+
+    return connector
+
+
 def wire_edges(diagram: ParsedDiagram, build_result: BuildResult) -> None:
     """Pass 2: for every edge whose endpoints both mapped to piping-capable objects,
     build a PipingNetworkSegment connecting them. Valve-shaped endpoints become segment
     items; equipment/instrument endpoints become source/target connector items.
     """
     system = piping.PipingNetworkSystem(segments=[])
+    shapes_by_id = {shape.id: shape for shape in diagram.shapes}
 
     for edge in diagram.edges:
-        source_obj = build_result.shape_objects.get(edge.source) if edge.source else None
-        target_obj = build_result.shape_objects.get(edge.target) if edge.target else None
+        source_obj = (
+            _get_or_build_off_page_connector(edge.source, build_result, shapes_by_id, as_source=True)
+            if edge.source
+            else None
+        )
+        target_obj = (
+            _get_or_build_off_page_connector(edge.target, build_result, shapes_by_id, as_source=False)
+            if edge.target
+            else None
+        )
 
         if source_obj is None or target_obj is None:
             build_result.records.append(
@@ -222,9 +277,23 @@ def wire_edges(diagram: ParsedDiagram, build_result: BuildResult) -> None:
             )
             continue
 
+        # An off-page connector must be an internal segment item, per the DEXPI/Proteus
+        # convention the parser itself follows (PipingNetworkSegmentParser's docstring:
+        # "In accordance with the DEXPI convention" - the first/last item IS the
+        # source/target when it's an off-page connector, there is no external
+        # <Connection> reference to it). A bare 0-item segment with the connector as
+        # sourceItem/targetItem is legal at the pydantic level but has no schema-correct
+        # export path (confirmed: <PlantModel>/<PipingNetworkSystem> both have closed,
+        # enumerated child-tag lists with no slot for a standalone connector reference).
+        segment_items = []
+        if isinstance(source_obj, piping.FlowInPipeOffPageConnector):
+            segment_items.append(source_connector)
+        if isinstance(target_obj, piping.FlowOutPipeOffPageConnector):
+            segment_items.append(target_connector)
+
         try:
             segment = pt.construct_new_segment(
-                segment_items=[],
+                segment_items=segment_items,
                 segment_connections=[piping.PipingConnection()],
                 source_connector_item=source_connector,
                 target_connector_item=target_connector,
