@@ -46,6 +46,43 @@ _LINE_STROKE = Stroke(color=Color(r=0, g=0, b=0), dashStyle=DashStyle.Solid, wid
 _LABEL_COLOR = Color(r=0, g=0, b=0)
 
 
+def _route_orthogonal(
+    source_box: tuple[float, float, float, float],
+    target_box: tuple[float, float, float, float],
+) -> list[tuple[float, float]]:
+    """Route a connector between two axis-aligned boxes (min_x, min_y, max_x, max_y in
+    DEXPI space) as a right-angle ("elbow") path, standard P&ID/schematic drawing
+    convention - straight diagonal lines between shape centers (the previous behavior)
+    don't read as a real P&ID no matter how correct the underlying connection is.
+
+    Picks an exit/entry side on each box (whichever pair of sides face each other most
+    directly) and connects them with a single mid-point bend, matching how draw.io's own
+    default "orthogonal" edge style routes an unconstrained connector.
+    """
+    sx0, sy0, sx1, sy1 = source_box
+    tx0, ty0, tx1, ty1 = target_box
+    s_cx, s_cy = (sx0 + sx1) / 2.0, (sy0 + sy1) / 2.0
+    t_cx, t_cy = (tx0 + tx1) / 2.0, (ty0 + ty1) / 2.0
+
+    horizontal_gap = tx0 - sx1 if tx0 > sx1 else (sx0 - tx1 if sx0 > tx1 else 0.0)
+    vertical_gap = ty0 - sy1 if ty0 > sy1 else (sy0 - ty1 if sy0 > ty1 else 0.0)
+
+    if horizontal_gap >= vertical_gap:
+        # Boxes are more separated left-right: exit/enter through the facing vertical
+        # sides, bend at the horizontal midpoint between them.
+        start_x = sx1 if tx0 >= sx1 else (sx0 if sx0 >= tx1 else s_cx)
+        end_x = tx0 if tx0 >= sx1 else (tx1 if sx0 >= tx1 else t_cx)
+        mid_x = (start_x + end_x) / 2.0
+        return [(start_x, s_cy), (mid_x, s_cy), (mid_x, t_cy), (end_x, t_cy)]
+    else:
+        # Boxes are more separated top-bottom: exit/enter through the facing horizontal
+        # sides, bend at the vertical midpoint between them.
+        start_y = sy1 if ty0 >= sy1 else (sy0 if sy0 >= ty1 else s_cy)
+        end_y = ty0 if ty0 >= sy1 else (ty1 if sy0 >= ty1 else t_cy)
+        mid_y = (start_y + end_y) / 2.0
+        return [(s_cx, start_y), (s_cx, mid_y), (t_cx, mid_y), (t_cx, end_y)]
+
+
 def build_diagram(diagram: ParsedDiagram, result: BuildResult, model: DexpiModel) -> Diagram:
     """Construct and return a Diagram; also sets model.diagram."""
     representation_groups: list[RepresentationGroup] = []
@@ -57,8 +94,9 @@ def build_diagram(diagram: ParsedDiagram, result: BuildResult, model: DexpiModel
     min_x = min_y = float("inf")
     max_x = max_y = float("-inf")
 
-    # shape.id -> DEXPI-space center point, needed to draw piping edges as lines below.
-    shape_centers: dict[str, Point] = {}
+    # shape.id -> DEXPI-space bounding box (min_x, min_y, max_x, max_y), needed to
+    # route piping edges as orthogonal lines below.
+    shape_boxes: dict[str, tuple[float, float, float, float]] = {}
 
     for shape in diagram.shapes:
         dexpi_object = result.shape_objects.get(shape.id)
@@ -108,9 +146,13 @@ def build_diagram(diagram: ParsedDiagram, result: BuildResult, model: DexpiModel
             RepresentationGroup(represents=dexpi_object, groups=[Static(elements=elements)])
         )
 
-        center_x = shape.x + width / 2.0
-        center_y = -(shape.y + height / 2.0)
-        shape_centers[shape.id] = Point(x=center_x, y=center_y)
+        # DEXPI-space box: top-left is (x, -y), extending +width in x and -height in y
+        # (matching the same Y-flip used for the ShapeUsage position above).
+        box_min_x = shape.x
+        box_max_x = shape.x + width
+        box_min_y = -(shape.y + height)
+        box_max_y = -shape.y
+        shape_boxes[shape.id] = (box_min_x, box_min_y, box_max_x, box_max_y)
 
         min_x = min(min_x, shape.x)
         max_x = max(max_x, shape.x + width)
@@ -119,12 +161,15 @@ def build_diagram(diagram: ParsedDiagram, result: BuildResult, model: DexpiModel
 
     edge_elements = []
     for edge in diagram.edges:
-        source_center = shape_centers.get(edge.source) if edge.source else None
-        target_center = shape_centers.get(edge.target) if edge.target else None
-        if source_center is None or target_center is None:
+        source_box = shape_boxes.get(edge.source) if edge.source else None
+        target_box = shape_boxes.get(edge.target) if edge.target else None
+        if source_box is None or target_box is None:
             continue  # matches build_model.wire_edges' own "not built" skip condition
+        routed_points = _route_orthogonal(source_box, target_box)
         edge_elements.append(
-            ConnectorLine(innerPoints=[source_center, target_center], stroke=_LINE_STROKE)
+            ConnectorLine(
+                innerPoints=[Point(x=x, y=y) for x, y in routed_points], stroke=_LINE_STROKE
+            )
         )
 
     if edge_elements:

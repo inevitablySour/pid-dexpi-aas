@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pid_dexpi_aas.build_diagram import build_diagram
+from pid_dexpi_aas.build_diagram import _route_orthogonal, build_diagram
 from pid_dexpi_aas.build_model import build_model
 from pid_dexpi_aas.parser_drawio import parse_drawio_file
 from pid_dexpi_aas.render_svg import render_diagram_svg
@@ -64,6 +64,37 @@ def test_all_seven_team_files_render_without_error(tmp_path):
         result = build_model(diagram)
         d = build_diagram(diagram, result, result.model)
         render_diagram_svg(d, tmp_path / f"{xml_path.stem}.svg")
+
+
+def test_orthogonal_routing_produces_right_angle_bends_not_a_diagonal():
+    """Regression test: connections used to be a single straight line from center to
+    center (reported by the user as "not even close to being a real P&ID"). A routed
+    path must have at least one intermediate bend point, and every consecutive segment
+    must be purely horizontal or purely vertical (no diagonals).
+    """
+    source_box = (0.0, 0.0, 50.0, 50.0)
+    target_box = (300.0, 200.0, 350.0, 250.0)
+    points = _route_orthogonal(source_box, target_box)
+
+    assert len(points) >= 3, "expected at least one bend, got a straight 2-point line"
+
+    for (x1, y1), (x2, y2) in zip(points, points[1:]):
+        is_horizontal = y1 == y2
+        is_vertical = x1 == x2
+        assert is_horizontal or is_vertical, f"diagonal segment: ({x1},{y1}) -> ({x2},{y2})"
+
+
+def test_orthogonal_routing_side_by_side_boxes_routes_horizontally():
+    """Two boxes separated mostly left-right should route via their facing vertical
+    sides (exit right side of source, enter left side of target), not centers."""
+    source_box = (0.0, 0.0, 50.0, 50.0)
+    target_box = (200.0, 10.0, 250.0, 60.0)
+    points = _route_orthogonal(source_box, target_box)
+
+    start_x, _ = points[0]
+    end_x, _ = points[-1]
+    assert start_x == 50.0  # source's right edge (max_x), not its center
+    assert end_x == 200.0  # target's left edge (min_x), not its center
 
 
 def test_instrument_bubbles_get_their_own_text_as_a_label(tmp_path):
