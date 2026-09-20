@@ -64,6 +64,15 @@ class Edge:
     is_dashed: bool = False
     has_end_arrow: bool = False
     has_start_arrow: bool = False
+    # True when this edge is very likely decorative linework belonging to a single
+    # equipment symbol (e.g. a safety valve's hand-drawn spring/relief indicator), not a
+    # real piping connection - see classify_decorative_edges(). Confirmed by direct
+    # inspection: several team files draw this kind of symbol detail as multiple tiny,
+    # criss-crossing mxCell edges clustered entirely around ONE valve, rather than as
+    # part of the valve's own shape style - these were previously misclassified as
+    # "self-loop" (both ends resolve to the same shape) alongside GENUINELY corrupt
+    # short segments, conflating two different things under one misleading label.
+    is_decorative: bool = False
 
 
 @dataclass
@@ -221,6 +230,65 @@ def _predict_point_from_fraction(shape: Shape, fraction: tuple[float, float]) ->
     return (shape.x + shape.width * fx, shape.y + shape.height * fy)
 
 
+# A cluster of at least this many tiny floating edges hugging one shape's boundary is
+# decorative symbol linework, not piping - confirmed by direct inspection on the
+# gramflow reactor file: three safety-relief valves (valveType=angle) each have 6-7 such
+# edges with one endpoint exactly on the valve's boundary (distance 0) and the other a
+# short distance (8-33 units) beyond it, all in the same direction - the visual signature
+# of a hand-drawn spring/relief symbol, not a piping run (a real connection's far
+# endpoint lands near a DIFFERENT, distant shape, e.g. PSV201's real vent line to
+# "safe location" is 520+ units away, not 8-33). A single stray tiny edge could still be
+# a genuine (if oddly short) connection, so this only fires on a cluster, not any one edge.
+_DECORATIVE_CLUSTER_MIN_SIZE = 3
+_DECORATIVE_MAX_DISTANCE = 40.0
+
+
+def classify_decorative_edges(diagram: ParsedDiagram) -> None:
+    """Mark Edge.is_decorative=True for edges whose both endpoints are near the same
+    single shape AND that shape has a cluster of _DECORATIVE_CLUSTER_MIN_SIZE+ such
+    edges - almost certainly hand-drawn symbol detail (e.g. a safety valve's spring
+    indicator), not real piping. Must run BEFORE resolve_floating_edge_endpoints, since
+    these edges should never be resolved into a (wrong) "self-loop" piping connection in
+    the first place - they're not unresolved, they're identified as not-piping-at-all.
+    """
+    real_shapes = [s for s in diagram.shapes if not s.is_labeled_only]
+    # Only edges with NEITHER end already resolved to a real cell-id are candidates - an
+    # edge with an explicit source= or target= attribute is a real, file-stated
+    # connection regardless of where its other floating end happens to land, never
+    # decorative linework. Confirmed as a real bug during testing: two edges with a
+    # genuine explicit target= were wrongly caught here before this check, because their
+    # source_point (the floating end) happened to land near the same cluster.
+    candidates = [
+        e
+        for e in diagram.edges
+        if e.source_point is not None
+        and e.target_point is not None
+        and e.source is None
+        and e.target is None
+    ]
+
+    # For each candidate edge, find its single nearest shape if BOTH endpoints are near it.
+    edge_to_shape: dict[str, str] = {}
+    for edge in candidates:
+        sx, sy = edge.source_point
+        tx, ty = edge.target_point
+        for shape in real_shapes:
+            source_distance = _distance_to_shape(shape, sx, sy)
+            target_distance = _distance_to_shape(shape, tx, ty)
+            if source_distance <= _DECORATIVE_MAX_DISTANCE and target_distance <= _DECORATIVE_MAX_DISTANCE:
+                edge_to_shape[edge.id] = shape.id
+                break
+
+    cluster_sizes: dict[str, int] = {}
+    for shape_id in edge_to_shape.values():
+        cluster_sizes[shape_id] = cluster_sizes.get(shape_id, 0) + 1
+
+    for edge in candidates:
+        shape_id = edge_to_shape.get(edge.id)
+        if shape_id is not None and cluster_sizes[shape_id] >= _DECORATIVE_CLUSTER_MIN_SIZE:
+            edge.is_decorative = True
+
+
 def resolve_floating_edge_endpoints(diagram: ParsedDiagram) -> None:
     """Fill in Edge.source/target for edges that only have a raw mxPoint coordinate
     (see Edge.source_point/target_point). Mutates diagram.edges in place, and records
@@ -265,6 +333,12 @@ def resolve_floating_edge_endpoints(diagram: ParsedDiagram) -> None:
         return None
 
     for edge in diagram.edges:
+        if edge.is_decorative:
+            # Classified by classify_decorative_edges as symbol linework, not piping -
+            # deliberately never resolved into a (fake) connection, however tempting the
+            # proximity match. Left unresolved and reported distinctly downstream.
+            continue
+
         if edge.source is None and edge.source_point is not None:
             if edge.exit_fraction is not None:
                 resolved = resolve_by_fraction(edge.source_point, edge.exit_fraction)
@@ -291,10 +365,12 @@ def resolve_floating_edge_endpoints(diagram: ParsedDiagram) -> None:
 
 
 def parse_drawio_xml_resolved(xml_text: str, source_file: str) -> ParsedDiagram:
-    """parse_drawio_xml + resolve_floating_edge_endpoints in one call - the entry point
-    build_model.py/run_pipeline.py/app.py should use, so floating (non-snapped) edges
-    aren't silently dropped."""
+    """parse_drawio_xml + classify_decorative_edges + resolve_floating_edge_endpoints in
+    one call - the entry point build_model.py/run_pipeline.py/app.py should use, so
+    floating (non-snapped) edges aren't silently dropped, and decorative symbol linework
+    isn't wrongly resolved into a fake piping connection."""
     diagram = parse_drawio_xml(xml_text, source_file=source_file)
+    classify_decorative_edges(diagram)
     resolve_floating_edge_endpoints(diagram)
     return diagram
 

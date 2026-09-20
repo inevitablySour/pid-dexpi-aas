@@ -27,11 +27,18 @@ def test_edges_without_source_target_attrs_exist_in_the_fixture():
 
 
 def test_floating_edges_resolve_to_real_shapes():
+    """32 of the ~40+ originally-resolving edges are now correctly excluded as
+    decorative symbol linework (see test_decorative_edges_are_classified_separately in
+    test_decorative_edges.py) rather than resolved into fake connections, so the honest
+    count of real resolved piping edges is lower than before that fix - 33, not 40+.
+    """
     diagram = parse_drawio_file(GRAMFLOW)  # goes through parse_drawio_xml_resolved
     resolved_count = sum(
-        1 for e in diagram.edges if (e.source_point or e.target_point) and e.source and e.target
+        1
+        for e in diagram.edges
+        if (e.source_point or e.target_point) and e.source and e.target and not e.is_decorative
     )
-    assert resolved_count > 40
+    assert resolved_count > 25
 
 
 def test_resolving_floating_edges_meaningfully_increases_built_count():

@@ -217,6 +217,25 @@ def wire_edges(diagram: ParsedDiagram, build_result: BuildResult) -> None:
     shapes_by_id = {shape.id: shape for shape in diagram.shapes}
 
     for edge in diagram.edges:
+        if edge.is_decorative:
+            # Classified by parser_drawio.classify_decorative_edges: a cluster of tiny
+            # edges hugging one shape's boundary, almost certainly hand-drawn symbol
+            # detail (e.g. a safety valve's spring/relief indicator) rather than piping -
+            # confirmed by manual inspection against the source drawing. Reported
+            # distinctly so it's not confused with a genuinely broken/corrupt connection.
+            build_result.records.append(
+                BuildRecord(
+                    edge.id,
+                    "edge",
+                    "skipped",
+                    None,
+                    "decorative symbol linework (e.g. a valve's hand-drawn spring/relief "
+                    "indicator), not a piping connection - part of a cluster of similar "
+                    "tiny edges all confined to one shape's boundary",
+                )
+            )
+            continue
+
         source_obj = (
             _get_or_build_off_page_connector(edge.source, build_result, shapes_by_id, as_source=True)
             if edge.source
