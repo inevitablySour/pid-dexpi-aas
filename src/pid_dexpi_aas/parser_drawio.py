@@ -55,7 +55,7 @@ class Edge:
     # How source/target actually got resolved - surfaced in reports so an inferred
     # connection is never presented with the same confidence as one the file states
     # explicitly. See mapping.py/build_model.py's BuildRecord for how this is reported.
-    source_resolution: str = "explicit"  # "explicit" | "exit_fraction" | "nearest_shape" | "unresolved"
+    source_resolution: str = "explicit"  # "explicit" | "exit_fraction" | "nearest_shape" | "nearest_shape_by_margin" | "unresolved"
     target_resolution: str = "explicit"
     # Visual style read straight from the style string - dashed=1 for control/signal
     # lines drawn dashed in the original, endArrow=classic/startArrow=classic for a
@@ -208,10 +208,28 @@ def _distance_to_shape(shape: Shape, x: float, y: float) -> float:
 # land a real distance away from the shape they visually touch - confirmed empirically
 # on the gramflow reactor file, where a strict bounding-box-containment check (even with
 # a small margin) missed a point that was genuinely still touching its target shape's
-# edge from just outside it. A generous nearest-shape search, capped at this distance
-# so an edge floating in genuinely empty space doesn't get wrongly attached to whatever
-# happens to be closest, is more robust than tuning a fixed containment margin.
+# edge from just outside it.
+#
+# A single fixed distance threshold is the wrong tool for this, not just imprecisely
+# tuned: published research (Gadekar et al., "Grounded and Faithful P&ID Reasoning",
+# arXiv:2609.05880 - see research/03-topology-extraction.md) shows a fixed 10px snap
+# tolerance collapses connectivity edge F1 from 0.742 to 0.193 in an ablation against an
+# adaptive approach - a ~4x degradation from exactly this class of heuristic. Their
+# result and a US patent on flow-drawing repair (8,578,346) both point the same
+# direction: use a MARGIN over the runner-up candidate, not a bare distance cutoff.
+#
+# Confirmed directly on our own data: a real V202 connection point sits 65 units away
+# (beyond the old flat 40-unit cap) but the next-nearest shape is 130 units away - twice
+# as far. That 2x gap is real signal a flat threshold discards entirely. Two tiers:
+# - _MAX_RESOLUTION_DISTANCE: a "confidently close" cutoff, high enough alone.
+# - _MARGIN_RESOLUTION_DISTANCE / _MARGIN_RATIO: a wider ceiling, but ONLY when the best
+#   candidate beats the second-best by a healthy ratio - i.e. it is unambiguously the
+#   right shape even though it's not close in absolute terms. Resolved this way is
+#   reported as a distinct, lower-confidence tier ("nearest_shape_by_margin"), never
+#   conflated with a confident short-distance match.
 _MAX_RESOLUTION_DISTANCE = 40.0
+_MARGIN_RESOLUTION_DISTANCE = 150.0
+_MARGIN_RATIO = 1.5
 
 # exitX/exitY (or entryX/entryY) without a paired source=/target= attribute is a real,
 # tighter geometric signal - confirmed by direct measurement on the gramflow reactor
@@ -322,15 +340,27 @@ def resolve_floating_edge_endpoints(diagram: ParsedDiagram) -> None:
             return best_shape_id
         return None
 
-    def resolve_by_nearest_shape(point: tuple[float, float]) -> str | None:
+    def resolve_by_nearest_shape(point: tuple[float, float]) -> tuple[str, str] | tuple[None, None]:
+        """Returns (shape_id, resolution_tier) or (None, None). Two tiers: a confident
+        short-distance match, or a wider-but-unambiguous margin-based match (see
+        _MARGIN_RESOLUTION_DISTANCE's docstring above for why margin matters more than
+        absolute distance here)."""
         x, y = point
         for candidates in (real_shapes, label_shapes):
             if not candidates:
                 continue
-            nearest = min(candidates, key=lambda s: _distance_to_shape(s, x, y))
-            if _distance_to_shape(nearest, x, y) <= _MAX_RESOLUTION_DISTANCE:
-                return nearest.id
-        return None
+            ranked = sorted(candidates, key=lambda s: _distance_to_shape(s, x, y))
+            nearest = ranked[0]
+            nearest_distance = _distance_to_shape(nearest, x, y)
+
+            if nearest_distance <= _MAX_RESOLUTION_DISTANCE:
+                return nearest.id, "nearest_shape"
+
+            if nearest_distance <= _MARGIN_RESOLUTION_DISTANCE and len(ranked) > 1:
+                second_distance = _distance_to_shape(ranked[1], x, y)
+                if second_distance >= nearest_distance * _MARGIN_RATIO:
+                    return nearest.id, "nearest_shape_by_margin"
+        return None, None
 
     for edge in diagram.edges:
         if edge.is_decorative:
@@ -346,10 +376,10 @@ def resolve_floating_edge_endpoints(diagram: ParsedDiagram) -> None:
                     edge.source = resolved
                     edge.source_resolution = "exit_fraction"
             if edge.source is None:
-                resolved = resolve_by_nearest_shape(edge.source_point)
-                if resolved is not None:
-                    edge.source = resolved
-                    edge.source_resolution = "nearest_shape"
+                resolved_id, tier = resolve_by_nearest_shape(edge.source_point)
+                if resolved_id is not None:
+                    edge.source = resolved_id
+                    edge.source_resolution = tier
 
         if edge.target is None and edge.target_point is not None:
             if edge.entry_fraction is not None:
@@ -358,10 +388,10 @@ def resolve_floating_edge_endpoints(diagram: ParsedDiagram) -> None:
                     edge.target = resolved
                     edge.target_resolution = "exit_fraction"
             if edge.target is None:
-                resolved = resolve_by_nearest_shape(edge.target_point)
-                if resolved is not None:
-                    edge.target = resolved
-                    edge.target_resolution = "nearest_shape"
+                resolved_id, tier = resolve_by_nearest_shape(edge.target_point)
+                if resolved_id is not None:
+                    edge.target = resolved_id
+                    edge.target_resolution = tier
 
 
 def parse_drawio_xml_resolved(xml_text: str, source_file: str) -> ParsedDiagram:

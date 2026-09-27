@@ -311,6 +311,30 @@ def wire_edges(diagram: ParsedDiagram, build_result: BuildResult) -> None:
             )
             continue
 
+        if isinstance(source_obj, (piping.FlowInPipeOffPageConnector, piping.FlowOutPipeOffPageConnector)) and isinstance(
+            target_obj, (piping.FlowInPipeOffPageConnector, piping.FlowOutPipeOffPageConnector)
+        ):
+            # Both ends are text-only labels with no real equipment/valve/instrument
+            # behind them - an off-page connector is meant to link real process flow to
+            # one external destination, not one arbitrary floating label to another.
+            # Confirmed as a real false-positive risk from the margin-based resolution
+            # fix: one case connected the free-floating annotation "18 bar" to "PSV201"
+            # (a valve's own tag label) purely because the margin test passed, not
+            # because these labels represent a real connection. Reject rather than
+            # build a plausible-looking but almost certainly wrong segment.
+            build_result.records.append(
+                BuildRecord(
+                    edge.id,
+                    "edge",
+                    "skipped",
+                    None,
+                    "both endpoints are text-only labels with no real equipment behind "
+                    "them - very likely two unrelated annotations, not a genuine "
+                    "off-page connection; needs manual review",
+                )
+            )
+            continue
+
         # NOTE: edge.source == edge.target (both ends resolving to the same SHAPE) is no
         # longer rejected here - per research/04-dexpi-semantics.md, a real recirculation/
         # kickback/reflux loop legitimately connects back to the same equipment, and
