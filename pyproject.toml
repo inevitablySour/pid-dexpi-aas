@@ -5,6 +5,7 @@ requires-python = ">=3.10"
 dependencies = [
     "pydexpi==1.2.0",
     "python-pptx",
+    "streamlit",
 ]
 
 [tool.pytest.ini_options]
