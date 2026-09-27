@@ -22,7 +22,7 @@ Files in this directory:
 
 ## Why this directory exists
 
-Two claims during this project turned out, on checking, to be materially different from
+Four claims during this project turned out, on checking, to be materially different from
 how they were first stated:
 
 1. pyDEXPI's Proteus exporter was assumed to round-trip a full DEXPI model. Direct
@@ -33,5 +33,19 @@ how they were first stated:
    strongest paper), but there is no comparable few-shot evidence for *topology*
    extraction — the harder problem this project actually has. (See
    `02-few-shot-symbol-recognition.md`.)
+3. A "~83% VLM connectivity accuracy, training-free" claim traced to a real (but
+   non-peer-reviewed, unverified-in-full) preprint, but 83% turned out to be *symbol*
+   association — the actual connectivity number in the same source is 82%. A second,
+   unrelated "83%" (node AP, not connectivity, from a different paper entirely) exists in
+   this literature too — easy to conflate. (See `03-topology-extraction.md`.)
+4. Self-loops in the extracted graph were initially treated as pure extraction noise to
+   discard. Research into the DEXPI spec and pyDEXPI's own source showed real
+   recirculation/reflux/kickback loops are a legitimate, common P&ID feature — but DEXPI
+   cannot represent them as literal equipment-level self-loops at all (Equipment is not a
+   valid segment source/target type); they must be two distinct nozzles on the same
+   equipment. This pipeline currently builds only one nozzle per equipment, so it cannot
+   yet distinguish a real recirculation loop from a resolution artifact. (See
+   `04-dexpi-semantics.md`.)
 
-Both cases argue for recording exact measurement conditions alongside every number.
+All four cases argue for recording exact measurement/spec conditions alongside every
+claim, not just the headline number.
