@@ -70,8 +70,18 @@ def _tag_name(shape: Shape, tag_lookup: dict[str, list[str]]) -> str | None:
 
 def _build_equipment(shape: Shape, mapping: MappingResult, tag_name: str | None):
     cls = _EQUIPMENT_CLASSES[mapping.dexpi_class_name]
-    nozzle = eq.Nozzle(subTagName="N1", nodes=[piping.PipingNode()])
-    kwargs = {"nozzles": [nozzle]}
+    # Equipment is built with ZERO nozzles up front - nozzles are allocated lazily, one
+    # per edge that actually connects to this equipment, in wire_edges' pass (see
+    # _allocate_nozzle). Building a single shared nozzle here (the original approach)
+    # meant every edge touching the same vessel collided on that one nozzle, making a
+    # real two-nozzle connection (e.g. a recirculation/kickback loop returning to the
+    # same vessel through a different nozzle) structurally indistinguishable from two
+    # edges both hitting the vessel's single generic attachment point - and, per DEXPI's
+    # own type system (PipingSourceItem/PipingTargetItem exclude Equipment entirely -
+    # see research/04-dexpi-semantics.md), the ONLY correct way to represent "this
+    # equipment connects to itself" is via two distinct Nozzles, never a literal
+    # equipment-level self-reference.
+    kwargs = {"nozzles": []}
     if tag_name:
         kwargs["tagName"] = tag_name
     # "Custom*" classes are DEXPI's fallback for symbols with no dedicated class (e.g.
@@ -79,6 +89,16 @@ def _build_equipment(shape: Shape, mapping: MappingResult, tag_name: str | None)
     if "typeName" in cls.model_fields and cls.model_fields["typeName"].is_required():
         kwargs["typeName"] = shape.shape_token or "unknown"
     return cls(**kwargs)
+
+
+def _allocate_nozzle(equipment) -> "eq.Nozzle":
+    """Add and return a brand-new Nozzle on this equipment - called once per edge
+    endpoint that resolves to this equipment, so distinct connections always get
+    distinct attachment points (see _build_equipment's docstring for why this matters
+    for recirculation loops)."""
+    nozzle = eq.Nozzle(subTagName=f"N{len(equipment.nozzles) + 1}", nodes=[piping.PipingNode()])
+    equipment.nozzles.append(nozzle)
+    return nozzle
 
 
 def _build_piping_item(shape: Shape, mapping: MappingResult):
@@ -150,15 +170,25 @@ def build_shapes(diagram: ParsedDiagram) -> BuildResult:
 def _connector_item(obj):
     """Resolve the piping-network endpoint for a built DEXPI object.
 
-    Equipment connects via its first nozzle; piping items (valves) connect directly.
-    Instrumentation objects are not valid piping endpoints (a discInst bubble reading a
-    process value is a sensing relationship, not a pipe) - return None so the caller
-    reports it as an unsupported edge kind rather than attempting a doomed connection.
+    Equipment connects via a FRESH nozzle allocated for this specific edge (see
+    _allocate_nozzle/_build_equipment) - never a shared/reused one, so two different
+    edges touching the same equipment always get two distinct attachment points. This
+    is what makes a real recirculation/kickback loop (two connections to the same
+    vessel) representable at all: per DEXPI's own type system, Equipment can never be a
+    PipingConnection's source/target directly (see research/04-dexpi-semantics.md), only
+    a Nozzle can - so "this equipment connects to itself" MUST be two distinct nozzles,
+    and allocating a fresh one per edge is what makes that the natural outcome instead of
+    requiring special-case detection.
+
+    Piping items (valves) connect directly. Instrumentation objects are not valid piping
+    endpoints (a discInst bubble reading a process value is a sensing relationship, not a
+    pipe) - return None so the caller reports it as an unsupported edge kind rather than
+    attempting a doomed connection.
     """
     if isinstance(obj, inst.ProcessInstrumentationFunction):
         return None
     if isinstance(obj, eq.Equipment):
-        return obj.nozzles[0] if obj.nozzles else None
+        return _allocate_nozzle(obj)
     return obj
 
 
@@ -259,29 +289,64 @@ def wire_edges(diagram: ParsedDiagram, build_result: BuildResult) -> None:
             )
             continue
 
-        if edge.source == edge.target:
-            # Both endpoints resolved to the same shape - always wrong data, never a
-            # real connection. Confirmed cause: resolve_floating_edge_endpoints'
-            # nearest-shape search (parser_drawio.py) can match BOTH ends of a very
-            # short line segment (e.g. one dash-mark of a hand-drawn dashed line) to the
-            # same nearby shape, producing a nonsense self-loop in the DEXPI model
-            # itself, not just the picture - confirmed on the gramflow reactor file
-            # (e.g. "TIC 203 -> TIC 203"). Skip rather than build a corrupt connection.
+        if (
+            edge.source_point is not None
+            and edge.target_point is not None
+            and edge.source_point == edge.target_point
+        ):
+            # A genuinely zero-length edge (identical raw coordinates on both ends) -
+            # not a recirculation loop (which is drawn with real pipe length between two
+            # distinct nozzle positions), just a degenerate mxCell. Confirmed on the
+            # gramflow reactor file: h17LKkp3DZ7R27TqlmPq-62 has source_point ==
+            # target_point exactly. Reject regardless of which shape(s) it resolved to.
             build_result.records.append(
                 BuildRecord(
                     edge.id,
                     "edge",
                     "skipped",
                     None,
-                    "both endpoints resolved to the same shape (self-loop, invalid) - "
-                    "likely a fragment of a multi-segment dashed line that couldn't be "
-                    "distinguished from a real short connection",
+                    "zero-length edge (identical source/target coordinates) - a "
+                    "degenerate artifact, not a real connection",
                 )
             )
             continue
 
+        # NOTE: edge.source == edge.target (both ends resolving to the same SHAPE) is no
+        # longer rejected here - per research/04-dexpi-semantics.md, a real recirculation/
+        # kickback/reflux loop legitimately connects back to the same equipment, and
+        # DEXPI requires that to be modelled as two distinct Nozzles on that equipment,
+        # never a literal equipment-level self-reference. _connector_item allocates a
+        # FRESH nozzle per call for Equipment (see _allocate_nozzle), so a same-shape
+        # edge naturally produces two distinct connector objects here - exactly the
+        # correct DEXPI representation - rather than needing to be specially detected.
+        # The only thing that must still be rejected is the genuinely degenerate case:
+        # both ends resolving to the literal SAME connector OBJECT (checked below, after
+        # allocation) - which can only happen for non-equipment endpoints (e.g. the same
+        # valve/off-page-connector object on both sides), since equipment always gets a
+        # fresh nozzle and so can never collide with itself here.
         source_connector = _connector_item(source_obj)
         target_connector = _connector_item(target_obj)
+
+        if source_connector is target_connector and source_connector is not None:
+            # A valve or off-page connector object referenced as both ends of the same
+            # edge - always wrong data (a single component can't be piped to itself),
+            # unlike the same-EQUIPMENT case above, which is legitimate. Confirmed cause:
+            # resolve_floating_edge_endpoints' nearest-shape search can match BOTH ends
+            # of a very short line segment (e.g. one dash-mark of a hand-drawn dashed
+            # line) to the same nearby valve.
+            build_result.records.append(
+                BuildRecord(
+                    edge.id,
+                    "edge",
+                    "skipped",
+                    None,
+                    "both endpoints resolved to the same non-equipment object "
+                    "(self-loop, invalid) - likely a fragment of a multi-segment "
+                    "dashed line that couldn't be distinguished from a real short "
+                    "connection",
+                )
+            )
+            continue
 
         if source_connector is None or target_connector is None:
             build_result.records.append(

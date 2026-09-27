@@ -56,16 +56,74 @@ def test_resolving_floating_edges_meaningfully_increases_built_count():
     assert built >= 75
 
 
-def test_no_self_loop_connections_in_model():
-    """Regression test: resolve_floating_edge_endpoints' nearest-shape search can match
-    BOTH endpoints of a very short edge segment (e.g. one dash-mark of a hand-drawn
-    dashed line) to the same nearby shape, producing a nonsense self-loop connection in
-    the actual DEXPI model - not just a rendering issue. Confirmed on this file: 36 such
-    edges (e.g. "TIC 203 -> TIC 203", "P101 -> P101") before build_model.py's wire_edges
-    started rejecting edge.source == edge.target explicitly.
+def test_no_true_self_loop_connections_in_model():
+    """Regression test, UPDATED after research/04-dexpi-semantics.md: a segment must
+    never have the literal SAME connector object as both sourceItem and targetItem (that
+    is always degenerate - a component piped to itself), but a same-EQUIPMENT connection
+    via two DIFFERENT nozzles is legitimate (a real recirculation/kickback/reflux loop)
+    and must be preserved, not rejected. See test_same_shape_edges_build_via_distinct_nozzles
+    below for the positive case this test's sibling checks.
     """
     diagram = parse_drawio_file(GRAMFLOW)
     result = build_model(diagram)
     for system in result.model.conceptualModel.pipingNetworkSystems:
         for segment in system.segments:
             assert segment.sourceItem is not segment.targetItem or segment.sourceItem is None
+
+
+def test_same_shape_edges_build_via_distinct_nozzles():
+    """A real recirculation/kickback loop connects back to the SAME equipment shape -
+    per research/04-dexpi-semantics.md, DEXPI's PipingSourceItem/PipingTargetItem type
+    system excludes Equipment entirely, so this must be modelled as two distinct Nozzles
+    on that equipment, never a literal equipment-level self-reference. Confirmed on this
+    file: "safe location, V205" (a vessel) has two separate edges both resolving to it,
+    and both must build as real segments with two DIFFERENT Nozzle objects - not be
+    thrown away as a false self-loop (the original, overly broad rejection this session
+    started with), and not collide on one shared nozzle (the original one-nozzle-per-
+    equipment construction, which would make this structurally unrepresentable at all).
+    """
+    diagram = parse_drawio_file(GRAMFLOW)
+    result = build_model(diagram)
+
+    same_shape_edges = [
+        e for e in diagram.edges if e.source and e.target and e.source == e.target
+    ]
+    assert len(same_shape_edges) > 0, "fixture no longer exercises this case"
+
+    built_segments = []
+    for system in result.model.conceptualModel.pipingNetworkSystems:
+        built_segments.extend(system.segments)
+
+    same_shape_ids = {e.source for e in same_shape_edges}
+    matched_any = False
+    for equipment in result.model.conceptualModel.taggedPlantItems:
+        shape_id_for_equipment = next(
+            (sid for sid, obj in result.shape_objects.items() if obj is equipment), None
+        )
+        if shape_id_for_equipment not in same_shape_ids:
+            continue
+        nozzles_used_by_this_equipment = [
+            nozzle for nozzle in equipment.nozzles
+            for segment in built_segments
+            if segment.sourceItem is nozzle or segment.targetItem is nozzle
+        ]
+        if len(nozzles_used_by_this_equipment) >= 2:
+            matched_any = True
+            assert len(set(id(n) for n in nozzles_used_by_this_equipment)) >= 2
+
+    assert matched_any, "expected at least one equipment to have 2+ distinct nozzles used by segments"
+
+
+def test_zero_length_edges_are_rejected_not_built_as_recirculation():
+    """A genuinely zero-length edge (identical source_point/target_point) is a degenerate
+    artifact, not a recirculation loop - a real loop has actual pipe length between two
+    distinct nozzle positions. Confirmed on this file: h17LKkp3DZ7R27TqlmPq-62 has
+    source_point == target_point exactly.
+    """
+    diagram = parse_drawio_file(GRAMFLOW)
+    result = build_model(diagram)
+    zero_length_record = next(
+        r for r in result.records if r.element_id == "h17LKkp3DZ7R27TqlmPq-62"
+    )
+    assert zero_length_record.status == "skipped"
+    assert "zero-length" in zero_length_record.reason
