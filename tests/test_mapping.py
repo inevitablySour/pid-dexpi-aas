@@ -7,11 +7,16 @@ def test_reactor_maps_to_vessel():
     assert result.dexpi_class_name == "Vessel"
 
 
-def test_gas_bottle_is_unmapped_discrepancy():
+def test_gas_bottle_maps_via_custom_vessel_fallback():
+    """DEXPI has no dedicated gas-bottle class, but its own answer for "no exact class"
+    is the Custom* family (CustomVessel etc, each requiring only a free-text typeName),
+    not silently dropping the shape - the user's own question ("aren't we supposed to
+    make classifications of them for ourselves?") is exactly what DEXPI's Custom*
+    fallback classes exist for.
+    """
     result = map_shape("mxgraph.pid.vessels.gas_bottle", "")
-    assert result.category == Category.UNMAPPED
-    assert result.dexpi_class_name is None
-    assert result.reason
+    assert result.category == Category.EQUIPMENT
+    assert result.dexpi_class_name == "CustomVessel"
 
 
 def test_generic_valve_dispatches_on_tag_prefix():

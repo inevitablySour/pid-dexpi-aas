@@ -67,6 +67,18 @@ def draw_tank() -> list[GraphicalPrimitive]:
     return [_polygon((10, 15), (90, 15), (90, 90), (10, 90))]
 
 
+def draw_custom_vessel() -> list[GraphicalPrimitive]:
+    """Generic cylindrical container: covers CustomVessel's two current uses (a gas
+    bottle, a piston) - both are pressure/volume-holding chambers with no dedicated
+    DEXPI class, so a plain rounded-top cylinder is a fair, honest generic symbol
+    rather than picking either shape's specific look."""
+    return [
+        _polygon((15, 20), (85, 20), (85, 90), (15, 90)),
+        Ellipse(center=_p(50, 20), horizontalSemiAxis=35, verticalSemiAxis=8,
+                rotation=0.0, stroke=_STROKE, fillStyle=_NO_FILL),
+    ]
+
+
 def draw_pressure_vessel() -> list[GraphicalPrimitive]:
     return [
         _line((25, 10), (75, 10)),
@@ -176,6 +188,7 @@ def draw_signal_off_page_connector() -> list[GraphicalPrimitive]:
 SYMBOL_BUILDERS = {
     "Tank": draw_tank,
     "PressureVessel": draw_pressure_vessel,
+    "CustomVessel": draw_custom_vessel,
     "Vessel": draw_vessel,
     # jacketed vessels map to plain "Vessel" in mapping.py today; kept as a distinct
     # builder here in case that mapping is refined later to a dedicated class.

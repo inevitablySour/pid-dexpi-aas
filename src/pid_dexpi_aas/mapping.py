@@ -37,7 +37,13 @@ class MappingResult:
 EQUIPMENT_SHAPE_MAP: dict[str, str | None] = {
     "mxgraph.pid.vessels.container,_tank,_cistern": "Tank",
     "mxgraph.pid.vessels.pressurized_vessel": "PressureVessel",
-    "mxgraph.pid.vessels.gas_bottle": None,  # no DEXPI equivalent; flag as discrepancy
+    # No dedicated DEXPI class for a gas bottle; DEXPI's own answer for "equipment with
+    # no matching concrete class" is the Custom* family (see CustomPump below), not a
+    # None/discrepancy - a gas bottle is a pressure vessel in function, so CustomVessel
+    # (which requires only a free-text typeName) is the correct DEXPI-native fallback,
+    # not an unmapped gap. Confirmed against pydexpi.dexpi_classes.equipment: 25
+    # Custom* subclasses exist precisely for this "no exact class" case.
+    "mxgraph.pid.vessels.gas_bottle": "CustomVessel",
     "mxgraph.pid.vessels.jacketed_mixing_vessel": "Vessel",  # + Agitator composition, see build_model
     "mxgraph.pid.vessels.reactor": "Vessel",  # DEXPI has no dedicated Reactor class
     "mxgraph.pid.heat_exchangers.shell_and_tube_heat_exchanger_2": "TubularHeatExchanger",
@@ -142,7 +148,10 @@ def map_shape(shape_token: str | None, tag_text: str) -> MappingResult:
         return MappingResult(Category.NOT_PROCESS_EQUIPMENT, None, "decorative/non-process shape")
 
     if shape_token == CYLINDER_SHAPE:
-        return MappingResult(Category.UNMAPPED, None, "cylinder3 (e.g. piston) has no DEXPI equivalent")
+        # A piston has no dedicated DEXPI class; CustomVessel (a chamber owner, matching
+        # a piston's function as a pressure/volume-displacing chamber) is the correct
+        # DEXPI-native fallback, same reasoning as gas_bottle above.
+        return MappingResult(Category.EQUIPMENT, "CustomVessel", "cylinder3 (e.g. piston), mapped via CustomVessel fallback")
 
     if shape_token in EQUIPMENT_SHAPE_MAP:
         dexpi_class = EQUIPMENT_SHAPE_MAP[shape_token]
