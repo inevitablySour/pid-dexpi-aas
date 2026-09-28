@@ -1,0 +1,118 @@
+DATA:
+  DIM: 2
+  BATCH_SIZE: 1            # single 12GB 4070 - 1500x1500 patches are memory-heavy for a
+                            # deformable-DETR-style encoder; raise once a real run confirms
+                            # headroom (see ml/README.md's benchmark-first instructions).
+  DATA_PATH: '../../data/PID2Graph'   # extracted PID2Graph/ dir - see pid-dexpi-aas/data/
+  # Which PID2Graph subsets to train/val on. Starting on the Patched subsets only (not
+  # Complete) because Relationformer's own road_network precedent and drawing2's roadmap
+  # both treat full multi-thousand-pixel sheets as needing patching first - Complete
+  # OPEN100 sheets are reserved as a separate, unpatched real-world eval set instead (see
+  # ml/README.md). PID2Graph Synthetic patches (14,708) + Dataset PID patches (19,462)
+  # give a large synthetic pretraining pool; Patched OPEN100 (1,629) is real-world signal
+  # mixed into the same split so the model sees some real patches during training too.
+  PID2GRAPH_SUBSETS:
+    - 'Patched/PID2Graph Synthetic'
+    - 'Patched/Dataset PID'
+    - 'Patched/PID2Graph OPEN100'
+  BG_EDGE_PER_IMG: 75
+  FG_EDGE_PER_IMG: 25
+  SORT_ONLY_BY_REL: True
+  USE_GT_FILTER: True
+  MEAN_RECALL: True
+  MULTI_PRED: True
+  NUM_WORKERS: 4            # single-machine, not a cluster - keep modest
+  PIN_MEMORY: True
+  SEED: 10
+
+MODEL:
+  RESUME: ''
+  PRETRAIN: ''
+  # 7 real PID2Graph symbol classes (arrow, general, inlet/outlet, instrumentation,
+  # pump, tank, valve) - confirmed against the downloaded dataset, see
+  # pid2graph_data/dataset_pid2graph.py's PID2GRAPH_CLASSES. +1 background is added
+  # automatically by visual_genome_loader-style code elsewhere; NUM_OBJ_CLS itself is
+  # the real-class count only.
+  NUM_OBJ_CLS: 7
+  # 1 real predicate ("connected" - PID2Graph doesn't have multiple relation TYPES the
+  # way Visual Genome does, e.g. "riding"/"holding"; solid vs non-solid is carried as
+  # edge_label metadata on the target instead, not folded into this class count - see
+  # dataset_pid2graph.py's module docstring for why).
+  NUM_REL_CLS: 1
+  LABEL_SMOOTHING: 0.1
+
+  ENCODER:
+    TYPE: deformable_transformer_backbone
+    NAME: deformable_transformer_backbone
+    HIDDEN_DIM: 256           # halved from the VG config's 512 - fits a 12GB card at
+                               # this image scale; raise only after confirming headroom.
+    POSITION_EMBEDDING: sine
+    LR_BACKBONE: 2e-5
+    NUM_FEATURE_LEVELS: 3
+    BACKBONE: resnet50        # resnet101 (the paper's own choice) is heavier than a
+                               # single 4070 comfortably fits alongside a transformer
+                               # decoder at this resolution - resnet50 first, upgrade
+                               # once real memory headroom is measured.
+    MASKS: False
+    DILATION: False
+    PATCH_SIZE: [4, 4, 4]
+    IN_CHANS: 3
+    DEPTHS: [4, 4, 8, 8]
+
+  DECODER:
+    TYPE: deformable_transformer
+    NAME: deformable_transformer
+    HIDDEN_DIM: 256
+    NHEADS: 8
+    ENC_LAYERS: 4              # halved from VG's 6 - same VRAM-budget reasoning
+    DEC_LAYERS: 4
+    DIM_FEEDFORWARD: 1024
+    DROPOUT: 0.15
+    ACTIVATION: relu
+    NUM_FEATURE_LEVELS: 4
+    DEC_N_POINTS: 4
+    ENC_N_POINTS: 4
+    NUM_QUERIES: 100           # P&ID patches (1500x1500) have far fewer objects per
+                               # image than VG's up-to-199 - patches like the sample
+                               # this config was validated against had 3-88 real nodes,
+                               # so 100 is a safe cap with room to raise later.
+    TWO_STAGE: False
+    INTERMEDIATE: True
+    AUX_LOSS: True
+    WITH_BOX_REFINE: True
+    # No VG-style relation frequency-prior file exists for PID2Graph - must stay False,
+    # train_pid2graph.py asserts this rather than silently ignoring a True value.
+    FREQ_BIAS: False
+    FREQ_DR: 0.2
+    LOGSOFTMAX_FREQ: False
+    ADD_EMB_REL: True
+    DROPOUT_REL: True
+    NORM_REL_EMB: True
+
+TRAIN:
+  EPOCHS: 150              # matches the SynthPID paper's reported schedule
+  LR: 1e-4
+  LR_BACKBONE: 3e-5
+  WEIGHT_DECAY: 1e-4
+  LR_DROP: 120              # matches the paper's "decayed at epoch 120"
+  CLIP_MAX_NORM: 0.1
+  START_EPOCH: 0
+  FOCAL_LOSS_ALPHA: ''
+  OPTIMIZER.NAME: 'adamw'
+  OPTIMIZER.EPS: 1e-8
+  OPTIMIZER.BETAS: (0.9, 0.999)
+  OPTIMIZER.MOMENTUM: 0.9
+  EDGE_W_WARMUP: True
+  SAVE_PATH: "./trained_weights/"
+  VAL_INTERVAL: 1
+  SAVE_VAL: True
+  LOSSES: ['boxes', 'class', 'cards', 'nodes', 'edges']
+  W_BBOX: 2.0
+  W_CLASS: 2.0
+  W_CARD: 1.0
+  W_NODE: 4.0
+  W_EDGE: 3.0
+
+log:
+  exp_name: "PID2Graph Experiment"
+  message: "Relationformer (scene_graph branch, multi-class node/edge head) on PID2Graph"

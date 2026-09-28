@@ -1,0 +1,132 @@
+diff --git a/losses.py b/losses.py
+index e2580a3..47d94e5 100644
+--- a/losses.py
++++ b/losses.py
+@@ -252,13 +252,29 @@ class SetCriterion(nn.Module):
+ 
+         relation_pred = self.relation_embed(relation_feature)
+ 
+-        if len(freq_dist)>0: # add frequeny distribution wd predicted one
++        # Upstream bug: the cross_entropy call and `return loss` were both nested inside
++        # this `if len(freq_dist)>0` block, so with FREQ_BIAS disabled (freq_dist stays
++        # empty) loss_edges fell off the end and returned None - making the *edge* loss,
++        # the whole point of Relationformer, silently never compute, and then crashing in
++        # forward() at `losses[key] * self.weight_dict[key]` with None * float. The
++        # frequency prior is an optional additive term on the logits, not a precondition
++        # for having an edge loss at all, so the return is unconditional now.
++        if len(freq_dist) > 0:  # add frequency distribution to the predicted one
+             batch_freq_dist = torch.cat(freq_dist, 0)
+-            relation_pred += batch_freq_dist
+-
+-            loss =  F.cross_entropy(relation_pred, all_edge_lbl, reduction='mean')
+-
+-            return loss
++            relation_pred = relation_pred + batch_freq_dist
++
++        if all_edge_lbl.numel() == 0:
++            # No candidate edges at all in this batch. Happens on a real and reasonably
++            # common class of PID2Graph patch (~6.75% measured): a tile covering only a
++            # pipe run between equipment, so the graph holds border_node/crossing
++            # waypoints and no symbols. Those patches have genuine image content and are
++            # useful negatives (pipe present, no symbol to detect), so they are kept
++            # rather than filtered - but cross_entropy over an empty set with
++            # reduction='mean' is 0/0 = nan, and one nan step propagates through AdamW
++            # and destroys every weight. Return a real differentiable zero instead.
++            return relation_pred.sum() * 0.0
++
++        return F.cross_entropy(relation_pred, all_edge_lbl, reduction='mean')
+ 
+     def _get_src_permutation_idx(self, indices):
+         # permute predictions following indices
+diff --git a/util/misc.py b/util/misc.py
+index cfe8681..031483f 100644
+--- a/util/misc.py
++++ b/util/misc.py
+@@ -26,7 +26,15 @@ from torch import Tensor
+ 
+ # needed due to empty tensor bug in pytorch and torchvision 0.5
+ import torchvision
+-if float(torchvision.__version__[:3]) < 0.5:
++# Original version checks here used float(torchvision.__version__[:3]) < 0.5 / < 0.7,
++# which silently breaks on any torchvision >= 0.20 - "0.20.1"[:3] is "0.2", and
++# float("0.2") = 0.2 is still < 0.5/0.7, so the ancient pre-0.5 branch (importing the
++# long-removed _NewEmptyTensorOp) was being taken on every modern torchvision instead
++# of the intended "recent enough, use the real implementation" branch. Parsing the
++# actual major.minor as a tuple instead of truncating the version string fixes both
++# checks (this one and the matching one in interpolate() below) at once.
++_TV_VERSION = tuple(int(p) for p in torchvision.__version__.split('+')[0].split('.')[:2])
++if _TV_VERSION < (0, 5):
+     import math
+     from torchvision.ops.misc import _NewEmptyTensorOp
+     def _check_size_scale_factor(dim, size, scale_factor):
+@@ -53,7 +61,7 @@ if float(torchvision.__version__[:3]) < 0.5:
+         return [
+             int(math.floor(input.size(i + 2) * scale_factors[i])) for i in range(dim)
+         ]
+-elif float(torchvision.__version__[:3]) < 0.7:
++elif _TV_VERSION < (0, 7):
+     from torchvision.ops import _new_empty_tensor
+     from torchvision.ops.misc import _output_size
+ 
+@@ -486,7 +494,7 @@ def interpolate(input, size=None, scale_factor=None, mode="nearest", align_corne
+     This will eventually be supported natively by PyTorch, and this
+     class can go away.
+     """
+-    if float(torchvision.__version__[:3]) < 0.7:
++    if _TV_VERSION < (0, 7):
+         if input.numel() > 0:
+             return torch.nn.functional.interpolate(
+                 input, size, scale_factor, mode, align_corners
+@@ -494,11 +502,14 @@ def interpolate(input, size=None, scale_factor=None, mode="nearest", align_corne
+ 
+         output_shape = _output_size(2, input, size, scale_factor)
+         output_shape = list(input.shape[:-2]) + list(output_shape)
+-        if float(torchvision.__version__[:3]) < 0.5:
++        if _TV_VERSION < (0, 5):
+             return _NewEmptyTensorOp.apply(input, output_shape)
+         return _new_empty_tensor(input, output_shape)
+     else:
+-        return torchvision.ops.misc.interpolate(input, size, scale_factor, mode, align_corners)
++        # torchvision.ops.misc.interpolate was removed in modern torchvision (folded
++        # into torch.nn.functional.interpolate, which has supported empty batches for
++        # years now) - use it directly rather than a function that no longer exists.
++        return torch.nn.functional.interpolate(input, size, scale_factor, mode, align_corners)
+ 
+ 
+ def get_total_grad_norm(parameters, norm_type=2):
+diff --git a/utils.py b/utils.py
+index 4c61e48..b5fd3ab 100644
+--- a/utils.py
++++ b/utils.py
+@@ -2,9 +2,28 @@
+ import torch
+ import numpy as np
+ import logging
+-from mmcv.utils import get_logger
+-import pyvista
+-from skimage.measure import marching_cubes_lewiner
++# mmcv and pyvista are only used by get_root_logger/save_input/save_output below (none
++# of which train_pid2graph.py's path calls - it uses image_graph_collate_scene_graph
++# only), and both are heavy, road-network/VTK-era dependencies that don't build
++# cleanly against a modern torch/Python without real version-pinning work. Imported
++# lazily inside the functions that actually need them instead of at module scope, so
++# importing this module for the PID2Graph training path doesn't require installing
++# either package.
++try:
++    from mmcv.utils import get_logger
++except ImportError:
++    get_logger = None
++try:
++    import pyvista
++except ImportError:
++    pyvista = None
++# marching_cubes_lewiner is 3D-volume-specific (used only by this file's 3D vessel-graph
++# helpers, irrelevant to 2D P&ID work) and was removed from modern scikit-image (renamed
++# to marching_cubes) - same lazy-import treatment as mmcv/pyvista above.
++try:
++    from skimage.measure import marching_cubes_lewiner
++except ImportError:
++    marching_cubes_lewiner = None
+ 
+ 
+ def get_total_grad_norm(parameters, norm_type=2):
