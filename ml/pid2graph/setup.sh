@@ -37,9 +37,10 @@ fi
 # 3. Copy in our own files. They live outside the clone in git because
 #    relationformer's own .gitignore has a '*data' rule that swallows pid2graph_data/.
 mkdir -p "$RF_DIR/pid2graph_data"
-cp "$MINE/dataset_pid2graph.py" "$RF_DIR/pid2graph_data/"
-cp "$MINE/train_pid2graph.py"   "$RF_DIR/"
-cp "$MINE/pid2graph_2d.yaml"    "$RF_DIR/configs/"
+cp "$MINE/dataset_pid2graph.py"    "$RF_DIR/pid2graph_data/"
+cp "$MINE/train_pid2graph.py"      "$RF_DIR/"
+cp "$MINE/evaluator_pid2graph.py"  "$RF_DIR/"
+cp "$MINE/pid2graph_2d.yaml"       "$RF_DIR/configs/"
 
 # 4. Virtualenv.
 if [ ! -d "$RF_DIR/.venv" ]; then
@@ -59,7 +60,11 @@ PY="$RF_DIR/.venv/bin/python"
 # and break the extension compile - pin an older monai and install it with --no-deps.
 "$PY" -m pip install -q "monai==1.3.2" --no-deps
 "$PY" -m pip install -q ignite pytorch_ignite numpy scipy matplotlib PyYAML \
-    scikit-image tensorboardX timm einops networkx pillow ninja
+    scikit-image tensorboardX timm einops networkx pillow ninja \
+    tensorboard loguru pycocotools
+# tensorboard: torch.utils.tensorboard.SummaryWriter needs it at import time.
+# loguru + pycocotools: pulled in by metrics/coco.py, which the mAP evaluator uses.
+# None of these three are in the repo's own requirements.txt.
 
 # mmcv / pyvista / skimage.marching_cubes_lewiner from requirements.txt are deliberately
 # NOT installed: they're imported at module scope in utils.py but only used by

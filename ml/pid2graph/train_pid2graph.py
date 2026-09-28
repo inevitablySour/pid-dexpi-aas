@@ -211,7 +211,10 @@ def main(rank, args):
     else:
         writer = None
 
-    from evaluator_sg import build_evaluator
+    # Not evaluator_sg: that one reports VG scene-graph recall@K and needs
+    # config.DATA.LABEL_DATA_DIR (a Visual Genome idx_to_predicate json). This one
+    # reports COCO node mAP + edge mAP, comparable to the published P&ID baselines.
+    from evaluator_pid2graph import build_evaluator
 
     evaluator = build_evaluator(
         val_loader, model, optimizer, scheduler, writer, config, device,

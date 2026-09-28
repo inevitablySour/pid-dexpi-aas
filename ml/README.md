@@ -5,21 +5,194 @@ drawio-parsing pipeline in `src/pid_dexpi_aas/`. The two tracks are independent.
 
 ## Status
 
-Working end to end on this laptop (RTX 3060, 6GB): data loads, model forward, all five
-losses, backward, optimizer step, 150 consecutive steps with no NaN and loss descending
-35.6 -> 15.9. **No model has actually been trained yet** - only that the pipeline runs.
+Working end to end on a 6GB RTX 3060: data loads, forward, all five losses, backward,
+optimizer step, evaluation. 150 consecutive steps with no NaN, loss 35.6 -> 15.9. A short
+`--debug` run (30 samples) had node mAP climbing 0.027 -> 0.071 over 5 epochs, so the
+loop and the metric both respond to learning.
 
-## Quick start
+**No real model has been trained yet** - only that the pipeline runs. No weights exist.
+
+---
+
+# Moving this to another machine
+
+The repo is self-contained except for two things that are deliberately gitignored and
+must be handled separately: the **14GB dataset** and the **vendored Relationformer
+clone + its venv**.
+
+## 1. Copy the repo
+
+Copy the whole `pid-dexpi-aas/` folder. If you want to skip the parts that get rebuilt
+anyway (saves ~22GB):
 
 ```bash
-./ml/pid2graph/setup.sh          # clone, patch, venv, compile CUDA op
+rsync -av --exclude data/ --exclude .venv/ --exclude ml/relationformer/ \
+      pid-dexpi-aas/ /path/on/new/machine/pid-dexpi-aas/
 ```
 
-Then from `ml/relationformer/`:
+Or just copy everything, including `data/` - then skip step 2.
+
+## 2. Get the dataset
+
+Only if you excluded `data/`. From the repo root on the new machine:
 
 ```bash
-.venv/bin/python train_pid2graph.py --config configs/pid2graph_2d.yaml --exp_name pid2graph_run1 -b 1
+mkdir -p data && cd data
+curl -L -o PID2Graph.zip "https://zenodo.org/api/records/14803338/files/PID2Graph.zip/content"
+unzip -q PID2Graph.zip && rm PID2Graph.zip
 ```
+
+9.3GB download, ~14GB extracted. Verify: `ls "data/PID2Graph/Complete/PID2Graph OPEN100"`
+should list `0.graphml` through `11.png`.
+
+## 3. Rebuild the Relationformer environment
+
+```bash
+./ml/pid2graph/setup.sh
+```
+
+This clones the repo, checks out `scene_graph`, applies
+`ml/pid2graph/upstream-fixes.patch`, copies in our loader/config/train/eval files, makes
+a venv, and compiles the CUDA op.
+
+**Check `nvcc --version` first.** The script installs `torch==2.5.1+cu121`, which needs a
+CUDA 12.x toolkit. If your toolkit is a different major version, change the
+`--index-url` line in `setup.sh` to the matching wheel (`cu124`, `cu128`, ...), or the
+CUDA op won't compile. If `nvcc` is missing entirely, install the CUDA toolkit - the
+driver alone is not enough.
+
+Verify:
+
+```bash
+cd ml/relationformer
+.venv/bin/python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+.venv/bin/python -c "from models import build_model; print('model ok')"
+```
+
+## 4. Optional: the DEXPI pipeline's own venv
+
+Independent of the ML track. From the repo root:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -e .
+.venv/bin/python -m pytest tests/ -q     # expect 74 passed
+```
+
+---
+
+# Running the training loop
+
+All commands run from `ml/relationformer/`.
+
+## Smoke test first (~2 min)
+
+```bash
+.venv/bin/python train_pid2graph.py \
+  --config configs/pid2graph_2d.yaml --exp_name smoke -b 1 --debug
+```
+
+`--debug` cuts to 30 train / 30 val samples and disables dataloader workers. You should
+see parameter count (~39.7M), a loss that decreases, and a
+`=== PID2Graph validation, epoch N ===` block after each epoch. Kill it with Ctrl-C once
+you have seen a couple of epochs - it will otherwise run all 150.
+
+Then delete the run folder before reusing the name:
+`rm -rf trained_weights/runs/smoke_10`
+
+## Find your batch size
+
+Start at 4 on a 12GB card and raise until it OOMs, then drop one step:
+
+```bash
+.venv/bin/python train_pid2graph.py \
+  --config configs/pid2graph_2d.yaml --exp_name bs4 -b 4 --debug
+```
+
+Watch `nvidia-smi` in another terminal. Reference: batch size 1 used 2.3GB on the 3060.
+With headroom to spare you can also raise `HIDDEN_DIM` back to 512 and `ENC/DEC_LAYERS`
+to 6 in `configs/pid2graph_2d.yaml` (closer to the paper's model), but change one thing
+at a time and re-check memory.
+
+## The real run
+
+```bash
+nohup .venv/bin/python train_pid2graph.py \
+  --config configs/pid2graph_2d.yaml --exp_name pid2graph_run1 -b 4 \
+  > train_run1.log 2>&1 &
+```
+
+`nohup ... &` matters - this runs for days and you do not want it dying with the
+terminal. Follow it with `tail -f train_run1.log`.
+
+Expect **~3.5-6.5 days** for the configured 150 epochs on a 4070 (see the timing table
+below). To finish sooner, lower `TRAIN.EPOCHS` - the LR drops at `LR_DROP: 120`, so if
+you shorten the schedule, scale that down proportionally (e.g. 50 epochs -> `LR_DROP: 40`).
+
+## Monitoring
+
+```bash
+tensorboard --logdir trained_weights/runs
+```
+
+Or grep the log:
+
+```bash
+grep -E "node_mAP_IoU_0.50_0.95_0.05_MaxDet_100|edge_mAP:" train_run1.log
+```
+
+Checkpoints land in `trained_weights/runs/<exp_name>_10/models/`, keeping the 3 best by
+node mAP.
+
+## Resuming
+
+```bash
+.venv/bin/python train_pid2graph.py \
+  --config configs/pid2graph_2d.yaml --exp_name pid2graph_run1 -b 4 \
+  --resume trained_weights/runs/pid2graph_run1_10/models/<checkpoint>.pt
+```
+
+## Evaluating a checkpoint
+
+```bash
+.venv/bin/python train_pid2graph.py \
+  --config configs/pid2graph_2d.yaml --exp_name pid2graph_run1 -b 4 \
+  --resume trained_weights/runs/pid2graph_run1_10/models/<checkpoint>.pt --eval
+```
+
+## What the metrics mean
+
+Each validation epoch prints COCO-style node mAP (overall + per class) and edge mAP:
+
+```
+=== PID2Graph validation, epoch 5 ===
+  edge_mAP: 0.0000
+  node_mAP_IoU_0.50_0.95_0.05_MaxDet_100: 0.0710
+  node_valve_mAP_IoU_0.50_0.95_0.05_MaxDet_100: 0.0216
+  ...
+```
+
+`node_mAP_IoU_0.50_0.95_0.05_MaxDet_100` and `edge_mAP` are the two headline numbers,
+directly comparable to the published baselines (multiply by 100):
+
+| | node mAP | edge mAP |
+|---|---|---|
+| Stürmer et al. 2025 (OPEN100) | 52.14 | 45.89 |
+| SynthPID E2, synth-only | 64.2 | 63.8 |
+| SynthPID E3, mixed | 71.3 | 72.6 |
+
+Caveat on comparability: those are reported on the 12 **Complete** OPEN100 sheets, while
+this config trains and validates on **Patched** data. Same metric, different split - so
+treat it as indicative until you evaluate on the held-out Complete sheets directly.
+
+Edge mAP stays near zero for a long time. An edge needs *both* endpoint boxes matched at
+IoU >= 0.5 before it can score at all, so it lags node mAP by a wide margin early on.
+That is expected, not a bug - the metric returns exactly 1.0 on synthetic perfect input
+and 0.0 on wrong edges (unit-tested).
+
+---
+
+# Reference
 
 ## Dataset
 
@@ -146,12 +319,38 @@ planning around them:
 
 12GB should allow a larger batch and/or `HIDDEN_DIM: 512`, which changes these numbers.
 
+## Evaluator
+
+`pid2graph/evaluator_pid2graph.py` replaces the upstream `evaluator_sg.py`, which is
+unusable here for three reasons: it reports Visual-Genome scene-graph recall@K rather than
+mAP, it requires `config.DATA.LABEL_DATA_DIR` (a VG `idx_to_predicate` json that does not
+exist for PID2Graph), and although it wires `MeanBoxAP` as its key metric it feeds that
+metric *normalized cxcywh* boxes while the underlying `box_iou_np` expects absolute xyxy -
+so its AP figure is not comparable to anything.
+
+Ours reports:
+
+- **Node mAP** - COCO mAP@[.5:.95] over the 7 symbol classes, plus per-class AP/AR, which
+  is the same breakdown SynthPID's Table 4 gives.
+- **Edge mAP** - a predicted edge is a true positive only if both endpoint boxes match
+  distinct GT boxes at the IoU threshold *and* the GT has an edge between those two
+  matched nodes, scored by predicted relation probability. Endpoint matching is greedy by
+  descending IoU, one prediction per GT node, mirroring COCO's assignment. Class labels
+  are deliberately not required to match, since node mAP already scores classification;
+  edge mAP measures topology.
+
+The papers describe edge mAP only in prose, so the exact matching rule above is our
+interpretation. It is unit-tested against hand-built cases: 1.0 on perfect input, 0.0 on a
+wrong edge, 0.0 when endpoint boxes miss, and NaN (excluded from the mean) when a sample
+has no GT edges.
+
 ## Not done yet
 
-- No training run. No weights. No mAP numbers.
-- Evaluation against the paper's baseline (Stürmer et al. report 52.14 node / 45.89 edge
-  mAP on OPEN100) is not wired up - `evaluator_sg.py` computes VG-style recall@K, not
-  detection mAP, so scoring against that baseline needs work.
+- No real training run. No weights. The only mAP numbers so far are from an untrained or
+  30-sample-overfit model and mean nothing.
+- Evaluation is on the **Patched** split. The published baselines are on the 12 unpatched
+  **Complete** OPEN100 sheets, so a like-for-like comparison still needs a config pointing
+  `PID2GRAPH_SUBSETS` at `Complete/PID2Graph OPEN100` for validation.
 - The team's own 7 P&IDs are exported as PID2Graph-schema GraphML in
   `exports/pid2graph_export/` but are **graph-only** - no rendered PNGs, so they can't be
   used as image-based eval yet. `subprojects/MEM4CHEM` (pptx) has no parser at all.
