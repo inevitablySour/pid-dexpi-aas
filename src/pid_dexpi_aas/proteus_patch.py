@@ -176,14 +176,14 @@ class PipingNetworkSegmentExporter(ExporterModule):
         super().__init__(context)
         self.segment = segment
         self.segment_element: ET.Element | None = None
+        # the segment's own attributes (build_model's FlowDirectionBasis note)
+        self.generic_attribute_exporter = GenericAttributeExporter(context, segment)
 
-        if len(segment.items) > 1:
-            raise NotImplementedError(
-                f"PipingNetworkSegmentExporter only supports 0 or 1 items per segment "
-                f"(got {len(segment.items)}); multi-item segments need interleaved "
-                f"item/CenterLine export not yet implemented in this local patch."
-            )
-
+        # Items are written in segment order with no CenterLine between them; the
+        # Proteus reader infers a DirectPipingConnection between consecutive items
+        # (PipingNetworkSegmentParser), which is exactly what build_model produces:
+        # nozzle -> valve -> tee -> valve -> nozzle. Round-trip tested (items, order and
+        # both ends - including a branch segment ending on a tee in another segment).
         self.item_exporters = [PipingComponentExporter(context, item) for item in segment.items]
 
         # A segment's sourceItem/targetItem is usually an equipment Nozzle (registered
@@ -197,8 +197,15 @@ class PipingNetworkSegmentExporter(ExporterModule):
         # returns None - confirmed via a failing round-trip test (targetItem came back
         # None after reload) before this fix.
         self.endpoint_exporters = []
+        # Export each standalone end item ONCE per model. An in-line valve ends two
+        # segments (one per side) and a tee ends three; exporting it per segment wrote the
+        # same element - same ID - several times (LightUp: 12 duplicated IDs, up to 4x),
+        # which is invalid DEXPI. Later segments just reference it by ID.
+        exported = context.__dict__.setdefault("_pid_dexpi_exported_endpoints", set())
         for endpoint in (segment.sourceItem, segment.targetItem):
-            if isinstance(endpoint, piping.PipingNetworkSegmentItem) and endpoint not in segment.items:
+            if (isinstance(endpoint, piping.PipingNetworkSegmentItem) and endpoint not in segment.items
+                    and endpoint.id not in exported):
+                exported.add(endpoint.id)
                 self.endpoint_exporters.append(PipingComponentExporter(context, endpoint))
 
         self.register_submodule_list(self.item_exporters)
@@ -207,6 +214,7 @@ class PipingNetworkSegmentExporter(ExporterModule):
     def compositional_pass(self) -> ET.Element:
         elem = ET.Element("PipingNetworkSegment")
         elem.set("ID", self.make_id_attribute(self.segment))
+        self.generic_attribute_exporter.compose_and_add_attributes(elem)
 
         for item_exporter in self.item_exporters:
             elem.append(item_exporter.compositional_pass())
@@ -232,6 +240,10 @@ class PipingNetworkSegmentExporter(ExporterModule):
     def reference_pass(self) -> None:
         super().reference_pass()
 
+        # NOTE (measured 2026-10-05): a segment ending in a pipe off-page connector item
+        # does not get its ends back from pyDEXPI's reader whether or not the connector's
+        # ID is written here - a reader limitation, present since the first version. The
+        # XML itself carries the information; kept as originally written.
         source_id = _resolve_connector_proteus_id(self.module_context, self.segment.sourceItem)
         target_id = _resolve_connector_proteus_id(self.module_context, self.segment.targetItem)
 
@@ -251,6 +263,11 @@ class PipingNetworkSystemExporter(ExporterModule):
     def __init__(self, context: ModuleContext, system: piping.PipingNetworkSystem) -> None:
         super().__init__(context)
         self.system = system
+        # Items that sit INSIDE some segment are exported there; a branch segment that
+        # starts or ends on one of them (a tee) must only reference it, not export it a
+        # second time as a standalone end item.
+        exported = context.__dict__.setdefault("_pid_dexpi_exported_endpoints", set())
+        exported.update(item.id for segment in system.segments for item in segment.items)
         self.segment_exporters = [
             PipingNetworkSegmentExporter(context, segment) for segment in system.segments
         ]

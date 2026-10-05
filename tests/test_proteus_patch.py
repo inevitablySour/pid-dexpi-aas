@@ -158,23 +158,35 @@ def test_single_item_segment_round_trips(tmp_path):
     assert type(reloaded_segment.targetItem).__name__ == "Nozzle"
 
 
-def test_multi_item_segment_raises_not_implemented(tmp_path):
-    """The exporter patch explicitly refuses (rather than silently mis-exports) segments
-    with 2+ items, since that needs the full interleaved item/CenterLine ordering logic
-    documented in proteus_patch.py's module docstring, not implemented here.
-    """
-    valve_a = piping.GateValve(nodes=[piping.PipingNode(), piping.PipingNode()])
-    valve_b = piping.CheckValve(nodes=[piping.PipingNode(), piping.PipingNode()])
-    segment = piping.PipingNetworkSegment(items=[valve_a, valve_b], connections=[])
+def test_multi_item_segment_with_tee_branch_round_trips(tmp_path):
+    """Valves and tees must sit INSIDE segments: pyDEXPI's reader resolves a segment's
+    ends only to nozzles or to items inside some segment, so a segment that merely ended
+    on a valve lost that end on reload (43 of 43 on LightUp). Run: nozzle -> gate valve
+    -> tee -> check valve -> nozzle; branch: tee -> nozzle."""
+    from pydexpi.dexpi_classes import equipment
+    from pydexpi.toolkits import piping_toolkit as pt
 
+    def vessel(tag):
+        n = equipment.Nozzle(subTagName="N1", nodes=[piping.PipingNode()])
+        return equipment.Vessel(tagName=tag, nozzles=[n]), n
+
+    (a, na), (b, nb), (c, nc) = vessel("A"), vessel("B"), vessel("C")
+    gate = piping.GateValve(nodes=[piping.PipingNode(), piping.PipingNode()])
+    check = piping.CheckValve(nodes=[piping.PipingNode(), piping.PipingNode()])
+    tee = piping.PipeTee(nodes=[piping.PipingNode(), piping.PipingNode(), piping.PipingNode()])
+    run = pt.construct_new_segment(segment_items=[gate, tee, check], segment_connections=[piping.PipingConnection() for _ in range(4)],
+                                   source_connector_item=na, target_connector_item=nb,
+                                   connectivity_convention=pt.PipingConnectionConvention.USE_ITEMS)
+    branch = pt.construct_new_segment(segment_items=[], segment_connections=[piping.PipingConnection()],
+                                      source_connector_item=tee, target_connector_item=nc,
+                                      connectivity_convention=pt.PipingConnectionConvention.USE_ITEMS)
     model = _bare_model()
-    model.conceptualModel.pipingNetworkSystems.append(
-        piping.PipingNetworkSystem(segments=[segment])
-    )
+    model.conceptualModel.taggedPlantItems.extend([a, b, c])
+    model.conceptualModel.pipingNetworkSystems.append(piping.PipingNetworkSystem(segments=[run, branch]))
 
-    serializer = PatchedProteusSerializer()
-    try:
-        serializer.save(model, tmp_path, "multi_item.xml")
-        assert False, "expected NotImplementedError for a multi-item segment"
-    except NotImplementedError:
-        pass
+    from pid_dexpi_aas.serialize import save_and_verify
+    reloaded = save_and_verify(model, tmp_path, "multi_item")
+    seg_run, seg_branch = reloaded.conceptualModel.pipingNetworkSystems[0].segments
+    assert [type(i).__name__ for i in seg_run.items] == ["GateValve", "PipeTee", "CheckValve"]
+    assert type(seg_run.sourceItem).__name__ == "Nozzle" and type(seg_run.targetItem).__name__ == "Nozzle"
+    assert type(seg_branch.sourceItem).__name__ == "PipeTee" and type(seg_branch.targetItem).__name__ == "Nozzle"

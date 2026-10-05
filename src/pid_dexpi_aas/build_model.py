@@ -14,6 +14,7 @@ list fields directly. This module encodes the exact working pattern:
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -21,7 +22,7 @@ from pydexpi.dexpi_classes import equipment as eq
 from pydexpi.dexpi_classes import instrumentation as inst
 from pydexpi.dexpi_classes import piping
 from pydexpi.dexpi_classes.dexpiModel import ConceptualModel, DexpiModel
-from pydexpi.dexpi_classes.pydantic_classes import MetaData
+from pydexpi.dexpi_classes.pydantic_classes import CustomStringAttribute, MetaData
 from pydexpi.toolkits import piping_toolkit as pt
 
 from pid_dexpi_aas.mapping import Category, MappingResult, map_shape
@@ -64,6 +65,10 @@ class BuildResult:
 
 
 def _tag_name(shape: Shape, tag_lookup: dict[str, list[str]]) -> str | None:
+    # A plain box whose own text holds a tag ("V201") keeps it: a caption below it
+    # ("Injection point") was winning the nearest-label lookup.
+    if (shape.shape_token or "").startswith("plain:") and re.search(r"\b[A-Z]{1,4}-?\d{2,4}[A-Z]?\b", shape.text or ""):
+        return shape.text
     tags = tag_lookup.get(shape.id) or []
     return tags[0] if tags else None
 
@@ -87,7 +92,8 @@ def _build_equipment(shape: Shape, mapping: MappingResult, tag_name: str | None)
     # "Custom*" classes are DEXPI's fallback for symbols with no dedicated class (e.g.
     # peristaltic pump) and require a free-text typeName describing what it actually is.
     if "typeName" in cls.model_fields and cls.model_fields["typeName"].is_required():
-        kwargs["typeName"] = shape.shape_token or "unknown"
+        plain = (shape.shape_token or "").startswith("plain:")
+        kwargs["typeName"] = (shape.text or "unknown") if plain else (shape.shape_token or "unknown")
     return cls(**kwargs)
 
 
@@ -114,8 +120,19 @@ def _build_instrumentation_item(shape: Shape, mapping: MappingResult, tag_name: 
     return cls(**kwargs)
 
 
-def build_shapes(diagram: ParsedDiagram) -> BuildResult:
-    """Pass 1: map + construct one DEXPI object per shape. Does not wire edges yet."""
+def build_shapes(
+    diagram: ParsedDiagram,
+    mapping_overrides: dict[str, MappingResult] | None = None,
+    tag_overrides: dict[str, str | None] | None = None,
+) -> BuildResult:
+    """Pass 1: map + construct one DEXPI object per shape. Does not wire edges yet.
+
+    mapping_overrides / tag_overrides (keyed by shape id) let a reviewed diagram (see
+    review.py) dictate the DEXPI class and tagName instead of recomputing them from the
+    draw.io shape token - that is how a reviewer's edits reach the DEXPI model.
+    """
+    mapping_overrides = mapping_overrides or {}
+    tag_overrides = tag_overrides or {}
     # ProteusExporter crashes on several of DexpiModel/ConceptualModel's own documented
     # Optional[...] = None defaults (exportDateTime, conceptualModel.metaData,
     # originatingSystem*) rather than handling them, so all are set explicitly here -
@@ -133,9 +150,18 @@ def build_shapes(diagram: ParsedDiagram) -> BuildResult:
     result = BuildResult(model=model)
 
     for shape in diagram.shapes:
-        mapping = map_shape(shape.shape_token, shape.text)
-        tag_name = _tag_name(shape, tag_lookup) or (shape.text or None)
+        if shape.id in tag_overrides:
+            tag_name = tag_overrides[shape.id]
+        else:
+            tag_name = _tag_name(shape, tag_lookup) or (shape.text or None)
+        # Valve/instrument subtypes come from the tag (GV -> GateValve, PSV -> safety
+        # valve). In the team's drawings the tag is a SEPARATE text label next to the
+        # symbol - the symbol's own text is empty on all 123 valves across the 7 files -
+        # so classify from the associated tag, not shape.text. (Classifying from
+        # shape.text silently made every valve a generic StraightwayValve.)
+        mapping = mapping_overrides.get(shape.id) or map_shape(shape.shape_token, shape.text or tag_name or "")
 
+        obj = None
         if mapping.category == Category.EQUIPMENT:
             obj = _build_equipment(shape, mapping, tag_name)
             model.conceptualModel.taggedPlantItems.append(obj)
@@ -163,6 +189,9 @@ def build_shapes(diagram: ParsedDiagram) -> BuildResult:
             result.records.append(
                 BuildRecord(shape.id, "shape", "skipped", mapping.dexpi_class_name, mapping.reason)
             )
+        if obj is not None and diagram.specs.get(shape.id):
+            from pid_dexpi_aas.spec_labels import apply_specs
+            apply_specs(obj, diagram.specs[shape.id])
 
     return result
 
@@ -238,6 +267,301 @@ def _get_or_build_off_page_connector(
     return connector
 
 
+@dataclass
+class _Link:
+    """One validated process connection between two built objects (equipment, piping
+    component, off-page connector or tee) - the edges it came from carry its record."""
+    edge_ids: list
+    a: object
+    b: object
+    edge: object = None
+    reason: str = ""
+    dir: int = 0  # flow: +1 a -> b, -1 b -> a, 0 unknown (flow_direction.py)
+    basis: str = ""
+
+
+def _is_instrument(obj) -> bool:
+    return isinstance(obj, inst.ProcessInstrumentationFunction)
+
+
+_OFF_PAGE = (piping.FlowInPipeOffPageConnector, piping.FlowOutPipeOffPageConnector)
+
+
+_PIPE_TWIN: dict[tuple[int, bool, str], object] = {}
+
+
+def _as_pipe_end(obj, as_source: bool, ctx: str = ""):
+    """draw.io's offPageConnector shape maps to a SIGNAL off-page connector, but the team
+    also uses it on process pipes (V102/V204 inlets). A pipe can only end on a PIPE
+    off-page connector, so on a process line use one (one per drawn connector)."""
+    if isinstance(obj, _OFF_PAGE) and ctx:
+        # A text-label destination ("Fume hood [atm]") with several lines: same rule as below.
+        key = (id(obj), as_source, ctx)
+        twin = _PIPE_TWIN.get(key)
+        if twin is None:
+            twin = _PIPE_TWIN[key] = type(obj)(nodes=[piping.PipingNode()])
+        return twin
+    if isinstance(obj, inst.SignalOffPageConnector):
+        # One per line (or per pipe network) and direction: an off-page connector has a
+        # single connection point, so two pipes leaving the same drawn box are two
+        # connectors in DEXPI (sharing one made pyDEXPI reject the second segment).
+        key = (id(obj), as_source, ctx)
+        twin = _PIPE_TWIN.get(key)
+        if twin is None:
+            cls = piping.FlowInPipeOffPageConnector if as_source else piping.FlowOutPipeOffPageConnector
+            twin = _PIPE_TWIN[key] = cls(nodes=[piping.PipingNode()])
+        return twin
+    return obj
+
+
+
+
+def _add_network_links(diagram, build_result, shapes_by_id, links) -> None:
+    """Pipe networks (lines joined at junctions, parser_drawio.join_pipe_networks) arrive as
+    pairwise "net" edges. Build each network ONCE: 2 items -> one link; k >= 3 items ->
+    k - 2 PipeTee fittings in a chain, one link per leg - instead of k(k-1)/2 parallel
+    segments, which wrote every item into several segments."""
+    groups: dict[str, list] = {}
+    for e in diagram.edges:
+        if e.id.startswith("net") and e.style == "pipe network":
+            groups.setdefault(e.id.split(":", 1)[0], []).append(e)
+    member_sense = getattr(diagram.flow, "member_sense", {}) if diagram.flow else {}
+    for net_id, edges in groups.items():
+        members, sensing = [], []
+        for e in edges:
+            for end, as_src in ((e.source, True), (e.target, False)):
+                obj = _get_or_build_off_page_connector(end, build_result, shapes_by_id, as_source=as_src)
+                if obj is None:
+                    continue
+                if _is_instrument(obj):
+                    sensing.append(end)
+                    continue
+                obj = _as_pipe_end(obj, as_src, net_id)
+                if not any(m is obj for m, _ in members):
+                    members.append((obj, member_sense.get((net_id, end), (0, ""))))
+        # feeders first, fed last: the tee chain then carries flow from one end to the other
+        members.sort(key=lambda m: -m[1][0])
+        k = len(members)
+        tees = [piping.PipeTee(nodes=[piping.PipingNode(), piping.PipingNode(), piping.PipingNode()])
+                for _ in range(max(0, k - 2))]
+        ids = [e.id for e in edges]
+        if k == 2:
+            (m0, (s0, b0)), (m1, (s1, b1)) = members
+            d = 1 if (s0 == 1 or s1 == -1) else -1 if (s0 == -1 or s1 == 1) else 0
+            links.append(_Link(ids, m0, m1, reason=f"pipe network {net_id}", dir=d, basis=b0 or b1))
+        elif k >= 3:
+            # chain of k-2 tees, three legs each: tee0 = m0, m1, tee1; tee_i = tee_i-1,
+            # m_i+1, tee_i+1; last tee = previous tee, m_k-2, m_k-1
+            reason = f"pipe network {net_id}: {k} items joined by {len(tees)} tee(s)"
+            for j, (m, (sense, basis)) in enumerate(members):
+                tee = tees[max(0, min(j - 1, len(tees) - 1))]
+                links.append(_Link(ids if j == 0 else [], m, tee, reason=reason, dir=sense, basis=basis))
+            for i in range(len(tees) - 1):
+                links.append(_Link([], tees[i], tees[i + 1], reason=reason))
+        if k < 2:
+            for e in edges:
+                build_result.records.append(BuildRecord(
+                    e.id, "edge", "skipped", None,
+                    "pipe network with fewer than two pipe items (the rest are instruments - "
+                    "sensing connections, not yet mapped to DEXPI)" if sensing else
+                    "pipe network endpoints not built"))
+        else:
+            # every pairwise net edge is represented by the network's segments
+            for e in edges:
+                both_pipe = all(not _is_instrument(o) for o in (
+                    _get_or_build_off_page_connector(e.source, build_result, shapes_by_id, True),
+                    _get_or_build_off_page_connector(e.target, build_result, shapes_by_id, False)) if o is not None)
+                build_result.records.append(BuildRecord(
+                    e.id, "edge", "built" if both_pipe else "skipped", "PipingNetworkSegment" if both_pipe else None,
+                    f"via pipe network {net_id} ({k} items, {len(tees)} tee(s))" if both_pipe else
+                    "equipment/instrument sensing edge - not a piping connection, not yet handled "
+                    "(needs a SensingLocation/measuring-line mapping)",
+                    confidence=e.source_resolution if both_pipe else ""))
+
+
+def _propagate_link_flow(links) -> None:
+    """Carry known flow directions across the built links (through in-line items and the
+    tee fittings of pipe networks) - same rules as on the drawing, flow_direction.py."""
+    from pid_dexpi_aas.flow_direction import Leg, propagate
+
+    legs = [Leg(ln.a, ln.b, ln.dir, ln.basis) for ln in links]
+    propagate(legs, passes=lambda o: not _is_instrument(o), junction=lambda o: isinstance(o, piping.PipeTee))
+    for ln, leg in zip(links, legs):
+        ln.dir, ln.basis = leg.dir, leg.basis
+
+
+def _with_class(o, cls):
+    """The same off-page connector as the other flow class (FlowIn <-> FlowOut)."""
+    if isinstance(o, cls):
+        return o
+    return cls(**{k: getattr(o, k) for k in cls.model_fields if k not in ("id",) and hasattr(o, k)})
+
+
+def _build_segments(build_result, links, system) -> None:
+    """Chain links into DEXPI segments so every in-line piping component (valve, tee) sits
+    INSIDE exactly one segment. Segments run between equipment nozzles, off-page
+    connectors and branch points; a component with more than two legs (a tee) is inside
+    the segment of its first two legs and is the end point of the others.
+
+    Why: a segment that merely ENDS on a valve loses that end when the DEXPI file is read
+    back (pyDEXPI resolves segment ends only to nozzles or to items inside segments) -
+    measured: 43 of 43 valve ends lost on LightUp before this - so valves must be items.
+    """
+    adj: dict[int, list[int]] = {}
+    for i, ln in enumerate(links):
+        for o in (ln.a, ln.b):
+            adj.setdefault(id(o), []).append(i)
+
+    def is_component(o) -> bool:
+        return isinstance(o, piping.PipingNetworkSegmentItem) and not isinstance(o, _OFF_PAGE)
+
+    def passes_through(o, via: int) -> int | None:
+        """The link to continue on if `o` is entered via link `via` on its run, else None."""
+        legs = adj.get(id(o), [])
+        if is_component(o) and len(legs) >= 2 and via in legs[:2]:
+            return legs[1] if via == legs[0] else legs[0]
+        return None
+
+    used: set[int] = set()
+    flow_score = [0]
+
+    def walk(start, first: int):
+        """Follow links from `start` through pass-through components; returns (items in
+        order, end object, indices of the links walked)."""
+        items, path, cur, prev = [], [], first, start
+        while True:
+            used.add(cur)
+            path.append(cur)
+            ln = links[cur]
+            flow_score[0] += ln.dir if ln.a is prev else -ln.dir  # >0: flow runs start -> end
+            nxt = ln.b if ln.a is prev else ln.a
+            cont = passes_through(nxt, cur)
+            if cont is None or cont in used:
+                return items, nxt, path
+            items.append(nxt)
+            prev, cur = nxt, cont
+
+    def starts():
+        for i, ln in enumerate(links):
+            for o in (ln.a, ln.b):
+                if passes_through(o, i) is None:  # equipment, off-page, branch leg, dead end
+                    yield o, i
+        for i, ln in enumerate(links):  # leftover: closed loops of components only
+            yield ln.a, i
+
+    plans = []  # [items, start, end, link indices] - constructed after the loop fix-up below
+    for start, first in starts():
+        if first in used:
+            continue
+        flow_score[0] = 0
+        items, end, seg_links = walk(start, first)
+        # Orientation: source -> target in the flow direction (drawn arrows, carried along
+        # by flow_direction.py); unknown -> an inflow off-page connector is the source, an
+        # outflow one the target, else the drawing order.
+        score = flow_score[0]
+        if score < 0 or (score == 0 and (isinstance(end, piping.FlowInPipeOffPageConnector)
+                                         or isinstance(start, piping.FlowOutPipeOffPageConnector))):
+            start, end, items = end, start, items[::-1]
+        # An off-page connector's class follows the flow: where it enters the sheet it is a
+        # FlowIn (the source), where it leaves a FlowOut (the target).
+        if isinstance(end, _OFF_PAGE):
+            end = _with_class(end, piping.FlowOutPipeOffPageConnector)
+        if isinstance(start, _OFF_PAGE):
+            start = _with_class(start, piping.FlowInPipeOffPageConnector)
+        bases = {links[i].basis for i in seg_links if links[i].dir}
+        basis = "unknown - drawing order" if not score else "arrow" if bases == {"arrow"} else "implied from neighbouring arrows"
+        plans.append([list(items), start, end, seg_links, basis])
+
+    # A component that ended up inside no segment (a tee or valve on a closed loop of
+    # pipes, reached only as an end point) is placed inside the first segment ending on
+    # it - otherwise every segment ending there loses that end on reload.
+    inside = {id(o) for p in plans for o in p[0]}
+    for p in plans:
+        for pos in (1, 2):
+            o = p[pos]
+            if is_component(o) and id(o) not in inside:
+                p[0] = [o] + p[0] if pos == 1 else p[0] + [o]
+                p[pos] = None
+                inside.add(id(o))
+
+    for items, start, end, seg_links, basis in plans:
+        seg_items = list(items)
+        src = _endpoint(start) if start is not None else None
+        tgt = _endpoint(end) if end is not None else None
+        if isinstance(start, _OFF_PAGE):
+            seg_items.insert(0, start)
+        if isinstance(end, _OFF_PAGE):
+            seg_items.append(end)
+        if start is not None and is_component(start) and len(adj.get(id(start), [])) == 1:  # dead end
+            seg_items.insert(0, start); src = None
+        if end is not None and is_component(end) and len(adj.get(id(end), [])) == 1:
+            seg_items.append(end); tgt = None
+        # A connector that is also an item must be the first (source) / last (target) item;
+        # anything else (a loop back onto an item) is left unconnected on that end.
+        if src is not None and any(src is i for i in seg_items) and seg_items[0] is not src:
+            src = None
+        if tgt is not None and any(tgt is i for i in seg_items) and seg_items[-1] is not tgt:
+            tgt = None
+        # pyDEXPI: one connection per gap - between items, plus one to each end that is
+        # NOT itself an item (an off-page connector end is both connector and item).
+        n_conn = len(seg_items) + 1 - (src is not None and any(src is i for i in seg_items)) \
+            - (tgt is not None and any(tgt is i for i in seg_items))
+        edge_ids = [e for i in seg_links for e in links[i].edge_ids]
+        try:
+            segment = pt.construct_new_segment(
+                segment_items=seg_items,
+                segment_connections=[piping.PipingConnection() for _ in range(max(n_conn, 1))],
+                source_connector_item=src, target_connector_item=tgt,
+                connectivity_convention=pt.PipingConnectionConvention.USE_ITEMS,
+            )
+        except Exception as exc:  # pyDEXPI raises DexpiConnectionException & friends
+            try:
+                segment = _segment_by_hand(seg_items, src, tgt)
+            except Exception:
+                for eid in edge_ids:
+                    build_result.records.append(BuildRecord(eid, "edge", "skipped", None, f"piping_toolkit error: {exc}"))
+                continue
+        segment.customAttributes = list(segment.customAttributes or []) + [CustomStringAttribute(
+            attributeName="FlowDirectionBasis", attributeURI="urn:pid-dexpi-aas:flow-direction-basis", value=basis)]
+        system.segments.append(segment)
+        for i in seg_links:
+            ln = links[i]
+            if ln.edge is not None:
+                e = ln.edge
+                confidence = e.source_resolution if e.source_resolution == e.target_resolution else "mixed"
+                build_result.records.append(BuildRecord(e.id, "edge", "built", "PipingNetworkSegment", confidence=confidence))
+
+
+def _segment_by_hand(items, src, tgt):
+    """Build a segment without pyDEXPI's toolkit, for the one shape it rejects: an inflow
+    off-page connector as first item (and source) followed by two or more items - a
+    toolkit bug (it then makes the connector the TARGET of a connection; with one item it
+    works). Chain: [src ->] item0 -> item1 -> ... [-> tgt], each connection from the
+    previous object's outlet node (its last node) to the next one's inlet node (node 0).
+    """
+    chain = list(items)
+    if src is not None and not (chain and chain[0] is src):
+        chain.insert(0, src)
+    if tgt is not None and not (chain and chain[-1] is tgt):
+        chain.append(tgt)
+    connections = [
+        piping.PipingConnection(sourceItem=a, sourceNode=a.nodes[-1], targetItem=b, targetNode=b.nodes[0])
+        for a, b in zip(chain, chain[1:])
+    ]
+    return piping.PipingNetworkSegment(
+        items=list(items), connections=connections,
+        sourceItem=src, sourceNode=src.nodes[-1] if src is not None else None,
+        targetItem=tgt, targetNode=tgt.nodes[0] if tgt is not None else None,
+    )
+
+
+def _endpoint(o):
+    """Segment connector for an end object: a fresh nozzle for equipment, else itself."""
+    if isinstance(o, eq.Equipment):
+        return _allocate_nozzle(o)
+    return o
+
+
 def wire_edges(diagram: ParsedDiagram, build_result: BuildResult) -> None:
     """Pass 2: for every edge whose endpoints both mapped to piping-capable objects,
     build a PipingNetworkSegment connecting them. Valve-shaped endpoints become segment
@@ -245,8 +569,19 @@ def wire_edges(diagram: ParsedDiagram, build_result: BuildResult) -> None:
     """
     system = piping.PipingNetworkSystem(segments=[])
     shapes_by_id = {shape.id: shape for shape in diagram.shapes}
+    _PIPE_TWIN.clear()
+    links: list[_Link] = []  # validated process connections, chained into segments below
 
     for edge in diagram.edges:
+        if edge.id.startswith("net") and edge.style == "pipe network":
+            continue  # a pipe network's derived connections - handled by _add_network_links
+        if edge.merged_into is not None:
+            build_result.records.append(
+                BuildRecord(edge.id, "edge", "skipped", None,
+                            f"part of pipe network {edge.merged_into} (lines joined at a junction) - "
+                            "built as that network's derived connections")
+            )
+            continue
         if edge.is_decorative:
             # Classified by parser_drawio.classify_decorative_edges: a cluster of tiny
             # edges hugging one shape's boundary, almost certainly hand-drawn symbol
@@ -348,10 +683,7 @@ def wire_edges(diagram: ParsedDiagram, build_result: BuildResult) -> None:
         # allocation) - which can only happen for non-equipment endpoints (e.g. the same
         # valve/off-page-connector object on both sides), since equipment always gets a
         # fresh nozzle and so can never collide with itself here.
-        source_connector = _connector_item(source_obj)
-        target_connector = _connector_item(target_obj)
-
-        if source_connector is target_connector and source_connector is not None:
+        if source_obj is target_obj and not isinstance(source_obj, eq.Equipment):
             # A valve or off-page connector object referenced as both ends of the same
             # edge - always wrong data (a single component can't be piped to itself),
             # unlike the same-EQUIPMENT case above, which is legitimate. Confirmed cause:
@@ -372,7 +704,7 @@ def wire_edges(diagram: ParsedDiagram, build_result: BuildResult) -> None:
             )
             continue
 
-        if source_connector is None or target_connector is None:
+        if _is_instrument(source_obj) or _is_instrument(target_obj):
             build_result.records.append(
                 BuildRecord(
                     edge.id,
@@ -393,40 +725,22 @@ def wire_edges(diagram: ParsedDiagram, build_result: BuildResult) -> None:
         # sourceItem/targetItem is legal at the pydantic level but has no schema-correct
         # export path (confirmed: <PlantModel>/<PipingNetworkSystem> both have closed,
         # enumerated child-tag lists with no slot for a standalone connector reference).
-        segment_items = []
-        if isinstance(source_obj, piping.FlowInPipeOffPageConnector):
-            segment_items.append(source_connector)
-        if isinstance(target_obj, piping.FlowOutPipeOffPageConnector):
-            segment_items.append(target_connector)
+        links.append(_Link([edge.id], _as_pipe_end(source_obj, True, edge.id), _as_pipe_end(target_obj, False, edge.id), edge,
+                           dir=edge.flow, basis=edge.flow_basis))
 
-        try:
-            segment = pt.construct_new_segment(
-                segment_items=segment_items,
-                segment_connections=[piping.PipingConnection()],
-                source_connector_item=source_connector,
-                target_connector_item=target_connector,
-                connectivity_convention=pt.PipingConnectionConvention.USE_ITEMS,
-            )
-        except Exception as exc:  # pyDEXPI raises DexpiConnectionException & friends
-            build_result.records.append(
-                BuildRecord(edge.id, "edge", "skipped", None, f"piping_toolkit error: {exc}")
-            )
-            continue
-
-        system.segments.append(segment)
-        if edge.source_resolution == edge.target_resolution:
-            confidence = edge.source_resolution
-        else:
-            confidence = "mixed"
-        build_result.records.append(
-            BuildRecord(edge.id, "edge", "built", "PipingNetworkSegment", confidence=confidence)
-        )
+    _add_network_links(diagram, build_result, shapes_by_id, links)
+    _propagate_link_flow(links)
+    _build_segments(build_result, links, system)
 
     if system.segments:
         build_result.model.conceptualModel.pipingNetworkSystems.append(system)
 
 
-def build_model(diagram: ParsedDiagram) -> BuildResult:
-    result = build_shapes(diagram)
+def build_model(
+    diagram: ParsedDiagram,
+    mapping_overrides: dict[str, MappingResult] | None = None,
+    tag_overrides: dict[str, str | None] | None = None,
+) -> BuildResult:
+    result = build_shapes(diagram, mapping_overrides, tag_overrides)
     wire_edges(diagram, result)
     return result

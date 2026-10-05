@@ -54,7 +54,9 @@ def test_valid_piping_segments_are_built():
 
 
 def test_equipment_to_instrument_edge_is_reported_not_silently_dropped():
-    diagram = parse_drawio_file(FIXTURE)
+    # LightUp, not FIXTURE: the PFD's only instrument edge ran to "BPR", which is now
+    # (correctly) a back-pressure regulator VALVE in the line, so it has none left.
+    diagram = parse_drawio_file(FIXTURE.parent / "P&ID gramflow reactor V3__diagram0.xml")
     result = build_model(diagram)
     sensing_edges = [
         r for r in result.records if r.element_kind == "edge" and "sensing" in r.reason
