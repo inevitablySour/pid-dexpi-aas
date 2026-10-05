@@ -464,19 +464,28 @@ def map_markup(layers: Layers, highlight_rows: set | None = None, highlight_symb
 
 
 MAP_CSS = """
-.bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font:13px sans-serif;color:#333;padding:2px 0 6px}
-.bar button{min-width:34px;height:30px;border:1px solid #ccc;border-radius:6px;background:#fff;font:600 15px sans-serif;cursor:pointer}
-.bar button:hover{background:#f2f2f2}
-.bar label{display:flex;align-items:center;gap:4px}
-.bar select{height:28px;border:1px solid #ccc;border-radius:6px;background:#fff}
-.bar .sep{width:1px;height:22px;background:#ddd;margin:0 4px}
-.bar .hint{color:#888;margin-left:auto;font-size:12px}
-.chips{display:flex;flex-wrap:wrap;gap:4px 6px;padding:0 0 6px;font:12px sans-serif}
-.chip{display:inline-flex;align-items:center;gap:5px;border:1px solid #ddd;border-radius:12px;padding:2px 8px;background:#fff;color:#333;font:12px sans-serif}
-.chip i{display:inline-block;width:16px;height:4px;border-radius:2px}
+/* Colours follow the Streamlit theme (light or dark); the drawing itself stays on white. */
+.mapwrap{--fg:var(--st-text-color,#31333f);--bg2:var(--st-secondary-background-color,#f0f2f6);
+  --line:var(--st-border-color,rgba(49,51,63,.2));--accent:var(--st-primary-color,#ff4b4b);
+  font-family:var(--st-font,sans-serif);color:var(--fg)}
+.bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:13px;padding:2px 0 6px}
+.bar button{min-width:34px;height:30px;border:1px solid var(--line);border-radius:6px;background:var(--bg2);
+  color:var(--fg);font:600 15px var(--st-font,sans-serif);cursor:pointer}
+.bar button:hover{border-color:var(--accent);color:var(--accent)}
+.bar label{display:flex;align-items:center;gap:4px;color:var(--fg)}
+.bar select{height:28px;border:1px solid var(--line);border-radius:6px;background:var(--bg2);color:var(--fg);
+  font:13px var(--st-font,sans-serif)}
+.bar input[type=checkbox]{accent-color:var(--accent)}
+.bar .sep{width:1px;height:22px;background:var(--line);margin:0 4px}
+.bar .hint{opacity:.6;margin-left:auto;font-size:12px}
+.chips{display:flex;flex-wrap:wrap;gap:4px 6px;padding:0 0 6px;font-size:12px}
+.chip{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:12px;padding:2px 8px;
+  background:var(--bg2);color:var(--fg);font:12px var(--st-font,sans-serif)}
+.chip i{display:inline-block;width:16px;height:4px;border-radius:2px;box-shadow:0 0 0 1px var(--line)}
 button.chip{cursor:pointer}
+button.chip:hover{border-color:var(--accent)}
 button.chip.off{opacity:.4;text-decoration:line-through}
-.frame{border:1px solid #ddd;border-radius:6px;overflow:hidden;background:#fff}
+.frame{border:1px solid var(--line);border-radius:6px;overflow:hidden;background:#fff}
 svg.map{width:100%;height:100%;display:block;cursor:grab;user-select:none}
 svg.map.dragging{cursor:grabbing}
 .item{cursor:pointer}
