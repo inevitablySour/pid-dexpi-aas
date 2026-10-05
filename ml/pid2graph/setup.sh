@@ -57,11 +57,18 @@ PY="$RF_DIR/.venv/bin/python"
 #    torch's cpp_extension refuses a major-version mismatch. cu121 wheels build fine
 #    against a CUDA 12.0 toolkit. Adjust this line if your nvcc is a different major
 #    version (e.g. cu124/cu128 wheels for a CUDA 12.4/12.8 toolkit).
-# No CUDA toolkit (a laptop, or CPU_ONLY=1): CPU wheels and no compiled op - enough to run
-# the review app's image/hybrid modes (infer_sheet.py falls back to a PyTorch op), not to train.
+# Without the CUDA toolkit (nvcc) the op in step 6 can't be compiled - that only matters for
+# training. The review app's image/hybrid modes run without it (infer_sheet.py falls back to
+# a PyTorch op): on an NVIDIA GPU with just the driver (CUDA wheels bundle the runtime), or
+# on the CPU (CPU_ONLY=1, or no NVIDIA driver at all).
 CPU_ONLY="${CPU_ONLY:-}"
-if [ -z "$CPU_ONLY" ] && ! command -v nvcc >/dev/null 2>&1; then
-  echo "nvcc not found - CPU-only install (inference only)"; CPU_ONLY=1
+NO_COMPILE=""
+if [ -z "$CPU_ONLY" ] && ! command -v nvidia-smi >/dev/null 2>&1; then
+  echo "no NVIDIA driver - CPU-only install (inference only)"; CPU_ONLY=1
+fi
+if [ -n "$CPU_ONLY" ] || ! command -v nvcc >/dev/null 2>&1; then
+  NO_COMPILE=1
+  [ -z "$CPU_ONLY" ] && echo "NVIDIA GPU but no CUDA toolkit (nvcc) - GPU inference without the compiled op (no training)"
 fi
 if [ -n "$CPU_ONLY" ]; then
   "$PY" -m pip install -q torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
@@ -91,7 +98,7 @@ fi
 # 6. Compile the deformable-attention CUDA op.
 #    -fuse-ld=gold is required: GNU ld 2.42 fails to link against torch's large
 #    libtorch_cpu.so with "file too short". The gold linker handles it.
-if [ -z "$CPU_ONLY" ]; then
+if [ -z "$NO_COMPILE" ]; then
   cd "$RF_DIR/models/ops"
   CFLAGS="-fuse-ld=gold" LDFLAGS="-fuse-ld=gold" "$PY" setup.py install
   cd "$RF_DIR"

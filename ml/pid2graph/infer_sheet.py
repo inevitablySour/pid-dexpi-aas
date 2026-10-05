@@ -241,10 +241,11 @@ def main() -> None:
     ap.add_argument("--no-ocr", action="store_true")
     args = ap.parse_args()
 
-    if args.device == "cpu":
-        # The compiled deformable-attention op is CUDA-only; fall back to the repo's
-        # pure-PyTorch reference implementation (slow, but correct).
-        import models.ops.functions.ms_deform_attn_func as f
+    import models.ops.functions.ms_deform_attn_func as f
+    if args.device == "cpu" or f.MSDA is None:
+        # The compiled deformable-attention op is CUDA-only and only built where the CUDA
+        # toolkit is installed (setup.sh); otherwise use the repo's pure-PyTorch reference
+        # implementation - on CPU, or on an NVIDIA GPU with just the driver (a laptop).
         import models.ops.modules.ms_deform_attn as m
 
         class _CPUFallback:

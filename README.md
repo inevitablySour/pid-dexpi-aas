@@ -23,7 +23,13 @@ gh auth login && ./ml/get_model.sh   # trained model (GitHub release asset) -> m
 ```
 
 Without draw.io the parser still works, but lines that end on other lines (tees) are not
-joined and there is no flow map. CPU inference takes a few minutes per sheet.
+joined and there is no flow map.
+
+GPU: `setup.sh` picks the build from what it finds. An NVIDIA GPU with its normal driver
+(`nvidia-smi` works) gets GPU PyTorch, and the app's "Device" defaults to `cuda` - no
+CUDA toolkit needed to run the model. The CUDA toolkit (`nvcc`) is only needed to train.
+No NVIDIA GPU (Apple Silicon, AMD, Intel graphics): CPU, a few minutes per sheet.
+`setup.sh` is a bash script: on Windows run it in WSL2.
 
 ## Review app: draw.io, image, or both -> reviewed DEXPI
 
