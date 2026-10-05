@@ -179,6 +179,11 @@ if review.alignment:
     a = review.alignment
     st.caption(f"draw.io aligned to the image using {a['pairs_used']} shared tags "
                f"(median error {a['median_error_px']:.1f} px).")
+if review.moved:
+    st.warning(f"The image and the draw.io file look like different versions of the drawing: "
+               f"{', '.join(review.moved)} {'is' if len(review.moved) == 1 else 'are'} drawn at a different place in "
+               f"each. Boxes there won't line up - use matching files, or treat the image checks around them "
+               f"with care.")
 if image_file is not None and drawio_file is None:
     st.warning("Image-only mode: connections come from the current model and are unreliable "
                "(known label issue, fix pending) - review them carefully or rebuild them by hand.")

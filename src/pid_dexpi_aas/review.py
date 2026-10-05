@@ -99,6 +99,7 @@ class ReviewDiagram:
     drawio: ParsedDiagram | None = None  # kept so draw.io-only details (labels) survive building
     unattached_tags: list[dict] = field(default_factory=list)  # OCR tags no symbol claimed
     alignment: dict | None = None  # both-inputs mode: draw.io -> image pixel transform + fit quality
+    moved: list = field(default_factory=list)  # both-inputs mode: tags drawn at different places in the two
 
     def symbol_rows(self) -> list[dict]:
         return [asdict(s) for s in self.symbols]
@@ -316,11 +317,22 @@ def cross_check(drawio_review: ReviewDiagram, image_review: ReviewDiagram, infer
         s.image_check = f"model agrees ({best.detected_as})" if ok else f"model sees '{best.detected_as}' here"
         if best.tag and s.tag and _norm_tag(best.tag) != _norm_tag(s.tag):
             s.image_check += f"; OCR reads '{best.tag}'"
+    # A tag the drawing has at one place and the image at another: the two are different
+    # versions of the sheet (LightUp's PNG predates moving V204 and P201). Say so on both
+    # rows rather than leaving a "not detected" + "only in image" pair to puzzle over.
+    missing = {_norm_tag(s.tag): s for s in review.symbols
+               if s.image_check == "not detected by model" and s.tag and len(_norm_tag(s.tag)) >= 3}
+    review.moved = []
     for m in model_syms:
         if m.id not in used:
             extra = copy.deepcopy(m)
             extra.include = False
             extra.image_check = "only in image - missing from draw.io?"
+            twin = missing.get(_norm_tag(m.tag)) if m.tag else None
+            if twin is not None:
+                extra.image_check = f"only in image - the image draws {twin.tag} here, draw.io elsewhere (different versions?)"
+                twin.image_check = f"not at this spot in the image - the image draws {twin.tag} elsewhere (different versions?)"
+                review.moved.append(twin.tag)
             review.symbols.append(extra)
     return review
 
