@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import html
+import io
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -284,7 +285,7 @@ def image_layers(image_path: str | Path, connections: list, boxes: list[Box]) ->
 
 # ------------------------------------------------------------------------ raster ---
 def rasterize(layers: Layers, max_side: int | None = 3200) -> Image.Image:
-    im = Image.open(layers.background).convert("RGB")
+    im = _flatten(Image.open(layers.background))
     im = Image.blend(im, Image.new("RGB", im.size, "white"), 0.6)  # fade the drawing under the overlay
     canvas = Image.new("RGB", (im.width, im.height + LEGEND_BAND), "white")
     canvas.paste(im, (0, LEGEND_BAND))
@@ -345,6 +346,23 @@ def _rgb(c, a=None):
     return f"rgb({c[0]},{c[1]},{c[2]})" if a is None else f"rgba({c[0]},{c[1]},{c[2]},{a})"
 
 
+def _flatten(im: Image.Image) -> Image.Image:
+    """Dark ink on white, as the model saw it (sheet_image.to_dark_on_white)."""
+    from pid_dexpi_aas.sheet_image import to_dark_on_white
+    return to_dark_on_white(im)
+
+
+def _background_b64(path: Path) -> tuple[str, str]:
+    with Image.open(path) as im:
+        fixed = _flatten(im)
+        if im.mode not in ("RGBA", "LA", "P") and fixed.tobytes() == im.convert("RGB").tobytes():
+            mime = "image/jpeg" if path.suffix.lower() in (".jpg", ".jpeg") else "image/png"
+            return mime, base64.b64encode(path.read_bytes()).decode()  # already dark on white
+        buf = io.BytesIO()
+        fixed.save(buf, "PNG")
+    return "image/png", base64.b64encode(buf.getvalue()).decode()
+
+
 def map_markup(layers: Layers, highlight_rows: set | None = None, highlight_symbols: set | None = None,
                zoom_to_highlight: bool = True, key: str = "map", height: int = 720,
                names: str = "auto") -> dict:
@@ -362,8 +380,7 @@ def map_markup(layers: Layers, highlight_rows: set | None = None, highlight_symb
     hs |= {s for ln in lit_lines for s in ln.ends}  # a selected connection lights its ends too
     any_lit = bool(lit_lines or hs)
     W, H = layers.size
-    mime = "image/jpeg" if layers.background.suffix.lower() in (".jpg", ".jpeg") else "image/png"
-    bg = base64.b64encode(layers.background.read_bytes()).decode()
+    mime, bg = _background_b64(layers.background)
     parts = [f'<image href="data:{mime};base64,{bg}" x="0" y="0" width="{W}" height="{H}"/>',
              f'<rect x="0" y="0" width="{W}" height="{H}" fill="white" opacity="0.55"/>']
     NS = ' vector-effect="non-scaling-stroke"'

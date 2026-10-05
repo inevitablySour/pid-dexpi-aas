@@ -236,3 +236,33 @@ def test_map_markup_selects_by_row(lightup):
     assert m["view"] is not None and m["view"][2] < m["full"][2]
     assert f'data-rows="{"|".join(sorted(net_line.rows))}"' in m["html"]
     assert map_markup(layers)["view"] is None  # nothing selected: keep the user's zoom
+
+
+# ----------------------------------------------------------------- picture input ---
+def _sheet(ink, fill, bg_alpha=0):
+    """A tiny transparent 'drawing': a filled box with a long line through it."""
+    from PIL import Image, ImageDraw
+
+    im = Image.new("RGBA", (200, 120), (0, 0, 0, bg_alpha))
+    d = ImageDraw.Draw(im)
+    d.rectangle((60, 30, 120, 90), fill=fill + (255,), outline=ink + (255,), width=2)
+    d.line((0, 60, 199, 60), fill=ink + (255,), width=2)
+    return im
+
+
+def test_dark_theme_export_keeps_its_lines():
+    # draw.io dark theme: white lines on transparent. Laid on white they vanished and the
+    # model drew giant boxes around the remaining fills.
+    import numpy as np
+    from pid_dexpi_aas.sheet_image import to_dark_on_white
+
+    out = np.asarray(to_dark_on_white(_sheet((255, 255, 255), (40, 40, 40))).convert("L"))
+    assert out[60, 10] < 80 and out[5, 5] > 200  # the pipe is dark, the background white
+
+
+def test_normal_export_with_white_fills_is_not_inverted():
+    import numpy as np
+    from pid_dexpi_aas.sheet_image import to_dark_on_white
+
+    out = np.asarray(to_dark_on_white(_sheet((0, 0, 0), (255, 255, 255))).convert("L"))
+    assert out[60, 10] < 80 and out[5, 5] > 200

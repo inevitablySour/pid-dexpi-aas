@@ -31,6 +31,7 @@ from PIL import Image
 
 RF_DIR = Path(__file__).resolve().parent.parent / "relationformer"
 sys.path.insert(0, str(RF_DIR))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))  # pid_dexpi_aas.sheet_image
 
 from inference import graph_infer  # noqa: E402
 from models import build_model  # noqa: E402
@@ -43,14 +44,10 @@ CLASS_NAMES = ["arrow", "general", "inlet/outlet", "instrumentation", "pump", "t
 
 
 def load_sheet(path: str) -> Image.Image:
-    raw = Image.open(path)
-    if raw.mode in ("RGBA", "LA", "P"):
-        # Transparent backgrounds (draw.io PNG exports) must become white, not black.
-        raw = raw.convert("RGBA")
-        bg = Image.new("RGBA", raw.size, "white")
-        bg.alpha_composite(raw)
-        raw = bg
-    return raw.convert("RGB")
+    # Dark ink on white, whatever came in: transparent exports, and draw.io dark-theme
+    # exports / dark screenshots (light lines - laid on white they vanished).
+    from pid_dexpi_aas.sheet_image import to_dark_on_white
+    return to_dark_on_white(Image.open(path))
 
 
 def tile_starts(total: int, tile: int, stride: int) -> list[int]:

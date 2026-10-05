@@ -99,9 +99,14 @@ def _digest(*parts: bytes) -> str:
     return h.hexdigest()[:16]
 
 
+# Bump when the model's input handling changes, so results cached by an older version
+# are redone (v2: dark-theme exports keep their light lines - sheet_image.py).
+INFER_VERSION = b"v2"
+
+
 @st.cache_data(show_spinner=False)
 def run_image_model(image_bytes: bytes, image_name: str, checkpoint: str, device: str) -> dict:
-    key = _digest(image_bytes, checkpoint.encode(), device.encode())
+    key = _digest(image_bytes, checkpoint.encode(), device.encode(), INFER_VERSION)
     img_path = WORK / f"{key}_{Path(image_name).name}"
     out_path = WORK / f"{key}.json"
     img_path.write_bytes(image_bytes)
