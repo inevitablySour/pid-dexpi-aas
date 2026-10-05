@@ -6,3 +6,6 @@ __pycache__/
 *.egg-info/
 /research/
 /data/
+
+# review images from ml/pid2graph/render_labels.py
+/label_check/

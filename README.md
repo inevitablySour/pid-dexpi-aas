@@ -6,6 +6,56 @@ an AAS Type 1 submodel (IDTA 02012-1-0).
 
 See `handoff/HANDOFF.md` for full project context, decisions, and literature.
 
+## Setting up on another machine
+
+```bash
+git clone https://github.com/inevitablySour/pid-dexpi-aas.git && cd pid-dexpi-aas
+./launch_app.sh              # creates .venv, installs, opens the app (draw.io mode works now)
+./scripts/get_drawio.sh      # Linux: draw.io AppImage for line routes, tees and the flow map
+                             # (macOS/Windows: install draw.io normally - found automatically)
+```
+
+For image and hybrid (draw.io + image) mode, also:
+
+```bash
+./ml/pid2graph/setup.sh      # ML venv; without an NVIDIA GPU it installs a CPU-only build
+gh auth login && ./ml/get_model.sh   # trained model (GitHub release asset) -> ml/models/
+```
+
+Without draw.io the parser still works, but lines that end on other lines (tees) are not
+joined and there is no flow map. CPU inference takes a few minutes per sheet.
+
+## Review app: draw.io, image, or both -> reviewed DEXPI
+
+```bash
+.venv/bin/streamlit run app.py
+```
+
+Upload a draw.io file, a P&ID image, or both (sidebar):
+
+| input | where symbols/connections come from |
+|---|---|
+| draw.io | the file (same DEXPI output as the plain pipeline - tested on all 7 team files) |
+| image | trained model (`ml/`) + EasyOCR tags + tag-prefix classifier |
+| both | draw.io is the truth; the image checks it (`image check` column) and adds model-only detections as unticked rows |
+
+Every symbol is a row showing its tag, DEXPI class, and **how it was identified** (draw.io
+shape, tag prefix, or model class). Edit tag/class/include, add missed symbols or
+connections, then **Build & validate DEXPI** (export + re-load round trip) and download
+the XML. Reviews can be saved as JSON and resumed.
+
+- Image mode needs the ML env (`ml/pid2graph/setup.sh`) and a checkpoint; set
+  `PID_MODEL_CHECKPOINT` to override the default path. ~15 s per sheet on GPU.
+- Tag prefixes -> classes live in `mapping.py` (`VALVE_TAG_PREFIX_MAP`,
+  `EQUIPMENT_TAG_PREFIX_MAP`, ISA letters). Team-specific guesses (GV, XV, X, H, ...) are
+  marked "confirm with team".
+- Connections from the image model are currently unreliable (edge-label bug in
+  training, see `ml/README.md`) - the app warns about this in image-only mode.
+
+Code: `src/pid_dexpi_aas/review.py` (review rows, cross-check, -> DEXPI),
+`ocr_tags.py` (OCR tokens -> tags -> symbols), `ml/pid2graph/infer_sheet.py` (model + OCR,
+runs in the ML venv).
+
 ## Known limitation: pyDEXPI 1.2.0's Proteus exporter is equipment-only
 
 **Confirmed by direct testing and by reading `process-intelligence-research/pyDEXPI` on

@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "pid-dexpi-aas"
 version = "0.1.0"
@@ -5,8 +9,20 @@ requires-python = ">=3.10"
 dependencies = [
     "pydexpi==1.2.0",
     "python-pptx",
-    "streamlit",
+    "streamlit>=1.55",  # st.components.v2: the clickable map
+    "numpy",
+    "pandas",
+    "pillow",
+    "openpyxl",
+    "cairosvg",  # check sheet "after" drawing; needs the cairo library (macOS: brew install cairo)
+    "networkx",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

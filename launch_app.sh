@@ -4,11 +4,16 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-if [ ! -d .venv ]; then
+if [ ! -x .venv/bin/python ]; then
     echo "First run: setting up the app (this only happens once, may take a minute)..."
+    rm -rf .venv
     python3 -m venv .venv
     .venv/bin/pip install --quiet --upgrade pip
-    .venv/bin/pip install --quiet pydexpi==1.2.0 python-pptx streamlit
+fi
+# (re)install when pyproject.toml changed since the last install - e.g. after a git pull
+if [ ! -f .venv/.installed ] || [ pyproject.toml -nt .venv/.installed ]; then
+    .venv/bin/pip install --quiet -e ".[dev]"
+    touch .venv/.installed
 fi
 
 # Streamlit prompts for an email on first run unless this file already exists - skip it
