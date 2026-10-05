@@ -97,6 +97,12 @@ class ParsedDiagram:
     unassigned_specs: list = field(default_factory=list)
     # flow_direction.FlowSummary: how many connections got a direction, and how
     flow: object = None
+    # {edge id: drawn route in draw.io coordinates} when the draw.io app was available
+    # (line_routes.py) - the re-drawn "after" picture follows these instead of guessing
+    routes: dict | None = None
+    # the drawing's own lines, kept when a reviewed diagram is rebuilt from table rows
+    # (review.to_dexpi), so the "after" picture can still draw each pipe as drawn
+    drawn_edges: list | None = None
 
 
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -564,6 +570,7 @@ def parse_drawio_xml_resolved(xml_text: str, source_file: str, drawio_path: str 
         join_pipe_networks(diagram, routes)
     from pid_dexpi_aas.flow_direction import infer_flow
     diagram.flow = infer_flow(diagram)
+    diagram.routes = routes or None
     return diagram
 
 

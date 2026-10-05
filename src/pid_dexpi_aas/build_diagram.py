@@ -19,6 +19,8 @@ uninitialized-looking viewBox).
 """
 from __future__ import annotations
 
+import math
+
 from pydexpi.dexpi_classes.graphics import (
     Color,
     ConnectorLine,
@@ -123,6 +125,50 @@ def _polygon_from_points(*points: tuple[float, float]) -> Polygon:
         stroke=_SOLID_LINE_STROKE,
         fillStyle=FillStyle.Solid,
     )
+
+
+def _arrow_any(tip: tuple[float, float], from_point: tuple[float, float]) -> Polygon:
+    """An arrowhead at `tip` pointing away from `from_point`, at any angle."""
+    dx, dy = tip[0] - from_point[0], tip[1] - from_point[1]
+    n = math.hypot(dx, dy) or 1.0
+    ux, uy = dx / n, dy / n
+    bx, by = tip[0] - ux * _ARROW_LENGTH, tip[1] - uy * _ARROW_LENGTH
+    return _polygon_from_points(tip, (bx - uy * _ARROW_HALF_WIDTH, by + ux * _ARROW_HALF_WIDTH),
+                                (bx + uy * _ARROW_HALF_WIDTH, by - ux * _ARROW_HALF_WIDTH))
+
+
+def _routed_edge_elements(diagram: ParsedDiagram, result: BuildResult) -> list:
+    """Pipes as DRAWN (line_routes.py), for every line that made it into the DEXPI model:
+    a direct line whose segment was built, or a piece of a pipe network that was built.
+    A network is drawn as its own pieces with a dot at each tee - not as a line between
+    every pair of its ends. Arrowheads follow the flow direction (flow_direction.py).
+    Signal lines are not drawn: they are not in the DEXPI file yet."""
+    built = {r.element_id for r in result.records if r.element_kind == "edge" and r.status == "built"}
+    built_nets = {eid.split(":", 1)[0] for eid in built if eid.startswith("net")}
+    ends = {eid: (r[0], r[-1]) for eid, r in diagram.routes.items()}
+    D = lambda p: (p[0], -p[1])  # draw.io y grows down, DEXPI y up
+    current = {e.id: e for e in diagram.edges}  # reviewed rows: their own From -> To and flow
+    out = []
+    for e in diagram.drawn_edges or diagram.edges:
+        r = diagram.routes.get(e.id)
+        if e.is_decorative or e.is_dashed or not r or len(r) < 2 or e.style in ("pipe network", "adjacent"):
+            continue
+        if not (e.id in built or (e.merged_into and e.merged_into in built_nets)):
+            continue
+        pts = [D(p) for p in r]
+        out.append(ConnectorLine(innerPoints=[Point(x=x, y=y) for x, y in pts], stroke=_SOLID_LINE_STROKE))
+        row = current.get(e.id)
+        flow = e.flow
+        if row is not None and row is not e:  # a reviewed row: flow +1 runs its From -> To
+            flow = row.flow if row.source == e.source else -row.flow
+        if flow:
+            run = pts if flow > 0 else pts[::-1]
+            out.append(_arrow_any(run[-1], run[-2]))
+        for end, junction in ((r[0], e.source_junction), (r[-1], e.target_junction)):
+            if junction and junction in ends and min(math.dist(end, q) for q in ends[junction]) > 10:
+                x, y = D(end)
+                out.append(_polygon_from_points((x - 3, y - 3), (x + 3, y - 3), (x + 3, y + 3), (x - 3, y + 3)))
+    return out
 
 
 def build_diagram(diagram: ParsedDiagram, result: BuildResult, model: DexpiModel) -> Diagram:
@@ -234,7 +280,13 @@ def build_diagram(diagram: ParsedDiagram, result: BuildResult, model: DexpiModel
         max_y = max(max_y, -shape.y)
 
     edge_elements = []
-    for edge in diagram.edges:
+    if diagram.routes:
+        edge_elements = _routed_edge_elements(diagram, result)
+        for el in edge_elements:  # the picture must hold the pipes too, not only the symbols
+            for pt in getattr(el, "innerPoints", None) or getattr(el, "points", None) or []:
+                min_x, max_x = min(min_x, pt.x - 10), max(max_x, pt.x + 10)
+                min_y, max_y = min(min_y, pt.y - 10), max(max_y, pt.y + 10)
+    for edge in ([] if diagram.routes else diagram.edges):
         source_box = shape_boxes.get(edge.source) if edge.source else None
         target_box = shape_boxes.get(edge.target) if edge.target else None
         if source_box is None or target_box is None:

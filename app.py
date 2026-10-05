@@ -768,7 +768,8 @@ if build_clicked:
         else:
             st.info("No picture uploaded - compare with your draw.io drawing.")
     with after_col:
-        st.caption("After: re-drawn only from the DEXPI file")
+        st.caption("After: what the DEXPI file contains, drawn at the drawing's positions and pipe routes. "
+                   "Signal lines and instrument taps are not in the DEXPI file yet, so they are not drawn.")
         try:
             st.image(Image.open(io.BytesIO(render_after_png(diagram, result))), width="stretch")
         except Exception as exc:

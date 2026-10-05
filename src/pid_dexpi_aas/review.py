@@ -407,5 +407,7 @@ def to_dexpi(review: ReviewDiagram) -> tuple[ParsedDiagram, BuildResult]:
         edges.append(edge)
     diagram = ParsedDiagram(source_file=review.source_name, shapes=shapes, edges=edges,
                             specs=dict(base.specs) if base is not None else {},
-                            flow=base.flow if base is not None else None)
+                            flow=base.flow if base is not None else None,
+                            routes=base.routes if base is not None else None,
+                            drawn_edges=list(base.edges) if base is not None else None)
     return diagram, build_model(diagram, overrides, tag_overrides)

@@ -294,9 +294,10 @@ def build_check_sheet(review: ReviewDiagram, result: BuildResult, mode: str,
         bws.cell(row + 1, 1, "No picture was given for this conversion - compare against your own copy of the "
                              "draw.io drawing.").font = Font(name=FONT, italic=True)
         row += 3
-    bws.cell(row, 1, "AFTER - the same P&ID re-drawn only from the DEXPI file the tool produced (standard symbols, "
-                     "not your drawing style). Everything here is what other software will see; anything missing "
-                     "here is missing from the DEXPI file.").font = Font(name=FONT, bold=True)
+    bws.cell(row, 1, "AFTER - what the DEXPI file the tool produced contains, drawn with standard symbols at the "
+                     "drawing's positions and pipe routes. An item or pipe missing here is missing from the DEXPI file. "
+                     "Signal lines and instrument taps are not in the DEXPI file yet, so they are not drawn."
+             ).font = Font(name=FONT, bold=True)
     bws.cell(row, 1).alignment = Alignment(wrap_text=True)
     bws.row_dimensions[row].height = 32
     if diagram is not None:
