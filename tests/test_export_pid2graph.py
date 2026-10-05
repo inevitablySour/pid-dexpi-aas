@@ -7,7 +7,7 @@ from pathlib import Path
 
 import networkx as nx
 
-from pid_dexpi_aas.export_pid2graph import export_pid2graph_graphml, _pid2graph_label
+from pid_dexpi_aas.export_pid2graph import export_pid2graph_graphml, labelled_symbols
 from pid_dexpi_aas.parser_drawio import parse_drawio_file
 
 DECODED_DIR = Path(__file__).parent.parent / "handoff" / "decoded_xml"
@@ -37,7 +37,7 @@ def test_exported_graphml_loads_via_networkx():
         g = nx.read_graphml(tmp_path)
     finally:
         tmp_path.unlink(missing_ok=True)
-    assert g.number_of_nodes() == len(diagram.shapes)
+    assert g.number_of_nodes() == len(labelled_symbols(diagram)[0])
 
 
 def test_node_labels_use_only_pid2graph_taxonomy():
@@ -46,8 +46,8 @@ def test_node_labels_use_only_pid2graph_taxonomy():
     by any model trained on PID2Graph's taxonomy."""
     real_symbol_labels = {"arrow", "general", "inlet/outlet", "instrumentation", "pump", "tank", "valve"}
     diagram = parse_drawio_file(PFD)
-    for shape in diagram.shapes:
-        assert _pid2graph_label(shape) in real_symbol_labels
+    for _, label, _, _ in labelled_symbols(diagram)[0]:
+        assert label in real_symbol_labels
 
 
 def test_decorative_and_unresolved_edges_are_excluded():
@@ -64,3 +64,35 @@ def test_decorative_and_unresolved_edges_are_excluded():
         tmp_path.unlink(missing_ok=True)
     real_edges = [e for e in diagram.edges if e.source and e.target and not e.is_decorative]
     assert g.number_of_edges() <= len(real_edges)
+
+
+LIGHTUP = DECODED_DIR / "P&ID gramflow reactor V3__diagram0.xml"
+
+
+def test_text_labels_are_not_exported_as_symbols():
+    """Regression: the first exporter labelled EVERY draw.io cell - tag labels like "GV204"
+    and notes like "18 bar" - as a "general" symbol (56 of LightUp's 113 nodes), which
+    would teach a model trained on these files to box text. Only real symbols count."""
+    diagram = parse_drawio_file(LIGHTUP)
+    exported = {orig for _, _, _, orig in labelled_symbols(diagram)[0]}
+    text_cells = [s for s in diagram.shapes if (s.style or "").startswith("text;")]
+    assert text_cells and not exported & {s.id for s in text_cells}
+    labels = [label for _, label, _, _ in labelled_symbols(diagram)[0]]
+    assert labels.count("valve") >= 20 and labels.count("general") < 10
+
+
+def test_rotated_shape_box_swaps_width_and_height():
+    from pid_dexpi_aas.export_pid2graph import rotated_box
+    from pid_dexpi_aas.parser_drawio import Shape
+    s = Shape(id="a", shape_token="x", text="", x=0, y=0, width=100, height=30, style="rotation=-90;")
+    assert rotated_box(s) == (35.0, -35.0, 65.0, 65.0)
+
+
+def test_compressed_drawio_file_exports_its_symbols(tmp_path):
+    """Regression: exporting a real (compressed) .drawio file read it as plain XML, found
+    no cells, and silently wrote an empty graph."""
+    from pid_dexpi_aas.export_pid2graph import export_drawio_file_to_pid2graph
+    src = Path(__file__).parent.parent / "subprojects" / "LightUp" / "P&ID gramflow reactor V3.drawio"
+    out = tmp_path / "x.graphml"
+    export_drawio_file_to_pid2graph(src, out)
+    assert nx.read_graphml(out).number_of_nodes() > 40

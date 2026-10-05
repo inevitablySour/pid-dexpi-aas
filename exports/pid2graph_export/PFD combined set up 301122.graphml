@@ -29,7 +29,7 @@
       <data key="d4">1876.5</data>
     </node>
     <node id="nvUNTiHrup1QF8gWxbp-t-4">
-      <data key="d0">instrumentation</data>
+      <data key="d0">valve</data>
       <data key="d1">991.0</data>
       <data key="d2">1080.0</data>
       <data key="d3">1732.9999999999998</data>
@@ -42,54 +42,12 @@
       <data key="d3">1645.0</data>
       <data key="d4">1695.0</data>
     </node>
-    <node id="nvUNTiHrup1QF8gWxbp-t-12">
-      <data key="d0">general</data>
-      <data key="d1">1090.0</data>
-      <data key="d2">1150.0</data>
-      <data key="d3">1530.0</data>
-      <data key="d4">1560.0</data>
-    </node>
-    <node id="nvUNTiHrup1QF8gWxbp-t-13">
-      <data key="d0">general</data>
-      <data key="d1">1346.5</data>
-      <data key="d2">1406.5</data>
-      <data key="d3">1600.0</data>
-      <data key="d4">1630.0</data>
-    </node>
-    <node id="nvUNTiHrup1QF8gWxbp-t-14">
-      <data key="d0">general</data>
-      <data key="d1">1346.5</data>
-      <data key="d2">1406.5</data>
-      <data key="d3">1710.0</data>
-      <data key="d4">1740.0</data>
-    </node>
-    <node id="nvUNTiHrup1QF8gWxbp-t-15">
-      <data key="d0">general</data>
-      <data key="d1">985.0</data>
-      <data key="d2">1075.0</data>
-      <data key="d3">1655.0</data>
-      <data key="d4">1685.0</data>
-    </node>
-    <node id="nvUNTiHrup1QF8gWxbp-t-17">
-      <data key="d0">general</data>
-      <data key="d1">910.0</data>
-      <data key="d2">970.0</data>
-      <data key="d3">1590.0</data>
-      <data key="d4">1620.0</data>
-    </node>
     <node id="nzOer7NoGn70tj_uYqi2R-6">
       <data key="d0">tank</data>
       <data key="d1">1230.0</data>
       <data key="d2">1290.0</data>
       <data key="d3">1310.0</data>
       <data key="d4">1430.0</data>
-    </node>
-    <node id="nzOer7NoGn70tj_uYqi2R-10">
-      <data key="d0">general</data>
-      <data key="d1">1280.0</data>
-      <data key="d2">1340.0</data>
-      <data key="d3">1260.0</data>
-      <data key="d4">1290.0</data>
     </node>
     <node id="nzOer7NoGn70tj_uYqi2R-12">
       <data key="d0">tank</data>
@@ -98,20 +56,6 @@
       <data key="d3">1400.0</data>
       <data key="d4">1530.0</data>
     </node>
-    <node id="nzOer7NoGn70tj_uYqi2R-13">
-      <data key="d0">general</data>
-      <data key="d1">680.0</data>
-      <data key="d2">800.0</data>
-      <data key="d3">1430.0</data>
-      <data key="d4">1460.0</data>
-    </node>
-    <node id="nzOer7NoGn70tj_uYqi2R-16">
-      <data key="d0">general</data>
-      <data key="d1">1005.5</data>
-      <data key="d2">1065.5</data>
-      <data key="d3">1560.0</data>
-      <data key="d4">1590.0</data>
-    </node>
     <node id="nzOer7NoGn70tj_uYqi2R-17">
       <data key="d0">general</data>
       <data key="d1">915.0</data>
@@ -119,43 +63,43 @@
       <data key="d3">1435.0</data>
       <data key="d4">1490.0</data>
     </node>
-    <edge source="nvUNTiHrup1QF8gWxbp-t-1" target="nvUNTiHrup1QF8gWxbp-t-2">
-      <data key="d9">solid</data>
-    </edge>
-    <edge source="nvUNTiHrup1QF8gWxbp-t-2" target="nvUNTiHrup1QF8gWxbp-t-3">
-      <data key="d9">solid</data>
-    </edge>
     <edge source="nvUNTiHrup1QF8gWxbp-t-3" target="nvUNTiHrup1QF8gWxbp-t-4">
       <data key="d9">solid</data>
     </edge>
     <edge source="nvUNTiHrup1QF8gWxbp-t-4" target="nvUNTiHrup1QF8gWxbp-t-8">
       <data key="d9">solid</data>
     </edge>
-    <edge source="nvUNTiHrup1QF8gWxbp-t-8" target="nvUNTiHrup1QF8gWxbp-t-8">
-      <data key="d9">solid</data>
-    </edge>
-    <edge source="nzOer7NoGn70tj_uYqi2R-17" target="nvUNTiHrup1QF8gWxbp-t-1">
-      <data key="d9">solid</data>
-    </edge>
-    <edge source="nvUNTiHrup1QF8gWxbp-t-1" target="nvUNTiHrup1QF8gWxbp-t-1">
-      <data key="d9">solid</data>
-    </edge>
-    <edge source="nvUNTiHrup1QF8gWxbp-t-2" target="nvUNTiHrup1QF8gWxbp-t-2">
-      <data key="d9">solid</data>
-    </edge>
-    <edge source="nzOer7NoGn70tj_uYqi2R-6" target="nzOer7NoGn70tj_uYqi2R-6">
-      <data key="d9">solid</data>
-    </edge>
-    <edge source="nzOer7NoGn70tj_uYqi2R-6" target="nzOer7NoGn70tj_uYqi2R-6">
-      <data key="d9">solid</data>
-    </edge>
-    <edge source="nzOer7NoGn70tj_uYqi2R-12" target="nzOer7NoGn70tj_uYqi2R-12">
-      <data key="d9">solid</data>
-    </edge>
-    <edge source="nvUNTiHrup1QF8gWxbp-t-1" target="nvUNTiHrup1QF8gWxbp-t-1">
-      <data key="d9">solid</data>
-    </edge>
     <edge source="nzOer7NoGn70tj_uYqi2R-12" target="nzOer7NoGn70tj_uYqi2R-17">
+      <data key="d9">solid</data>
+    </edge>
+    <edge source="nvUNTiHrup1QF8gWxbp-t-1" target="nvUNTiHrup1QF8gWxbp-t-2">
+      <data key="d9">solid</data>
+    </edge>
+    <edge source="nvUNTiHrup1QF8gWxbp-t-1" target="nvUNTiHrup1QF8gWxbp-t-3">
+      <data key="d9">solid</data>
+    </edge>
+    <edge source="nvUNTiHrup1QF8gWxbp-t-1" target="nzOer7NoGn70tj_uYqi2R-17">
+      <data key="d9">solid</data>
+    </edge>
+    <edge source="nvUNTiHrup1QF8gWxbp-t-1" target="nzOer7NoGn70tj_uYqi2R-6">
+      <data key="d9">solid</data>
+    </edge>
+    <edge source="nvUNTiHrup1QF8gWxbp-t-2" target="nvUNTiHrup1QF8gWxbp-t-3">
+      <data key="d9">solid</data>
+    </edge>
+    <edge source="nvUNTiHrup1QF8gWxbp-t-2" target="nzOer7NoGn70tj_uYqi2R-17">
+      <data key="d9">solid</data>
+    </edge>
+    <edge source="nvUNTiHrup1QF8gWxbp-t-2" target="nzOer7NoGn70tj_uYqi2R-6">
+      <data key="d9">solid</data>
+    </edge>
+    <edge source="nvUNTiHrup1QF8gWxbp-t-3" target="nzOer7NoGn70tj_uYqi2R-17">
+      <data key="d9">solid</data>
+    </edge>
+    <edge source="nvUNTiHrup1QF8gWxbp-t-3" target="nzOer7NoGn70tj_uYqi2R-6">
+      <data key="d9">solid</data>
+    </edge>
+    <edge source="nzOer7NoGn70tj_uYqi2R-17" target="nzOer7NoGn70tj_uYqi2R-6">
       <data key="d9">solid</data>
     </edge>
   </graph>

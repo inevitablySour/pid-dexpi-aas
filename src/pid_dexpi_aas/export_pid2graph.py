@@ -36,62 +36,98 @@ happens not to exercise it.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from xml.etree import ElementTree as ET
 from xml.dom import minidom
 
-from .mapping import Category, map_shape
-from .parser_drawio import Edge, ParsedDiagram, Shape, parse_drawio_file
+from .mapping import Category, classify_tag
+from .parser_drawio import ParsedDiagram, Shape, parse_drawio_file
+from .review import OFF_PAGE, SKIP, category_for_class, from_drawio
 
 GRAPHML_NS = "http://graphml.graphdrawing.org/xmlns"
 XSI_NS = "http://www.w3.org/2001/XMLSchema-instance"
 
-# DEXPI class name (mapping.py's output) -> PID2Graph's 7-class node taxonomy.
-# Anything not listed here (including every UNMAPPED/NOT_PROCESS_EQUIPMENT shape, and any
-# DEXPI class not yet enumerated) falls back to "general" - PID2Graph's own catch-all for
-# symbols that don't fit the other 6 classes, not a sign of a mapping gap on our side.
-_DEXPI_CLASS_TO_PID2GRAPH_LABEL: dict[str, str] = {
-    "Tank": "tank",
-    "PressureVessel": "tank",
-    "CustomVessel": "tank",
-    "Vessel": "tank",
-    "ProcessColumn": "tank",
-    "Pump": "pump",
-    "CustomPump": "pump",
-    "TubularHeatExchanger": "general",
-    "StraightwayValve": "valve",
-    "GateValve": "valve",
-    "CheckValve": "valve",
-    "OperatedValve": "valve",
-    "SafetyValveOrFitting": "valve",
-    "ProcessInstrumentationFunction": "instrumentation",
-    "SignalOffPageConnector": "inlet/outlet",
-}
+TANK_CLASSES = {"Tank", "PressureVessel", "CustomVessel", "Vessel", "ProcessColumn"}
+PUMP_CLASSES = {"Pump", "CustomPump"}
 
 
-def _pid2graph_label(shape: Shape) -> str:
-    if shape.shape_token and "arrow" in shape.shape_token.lower():
-        return "arrow"
-    result = map_shape(shape.shape_token, shape.text)
-    if result.category == Category.NOT_PROCESS_EQUIPMENT:
+def pid2graph_class(dexpi_class: str, shape_token: str | None) -> str | None:
+    """Review row (DEXPI class + draw.io shape token) -> PID2Graph 7-class label, or None
+    for things that are not symbols (text labels, decorative shapes)."""
+    token = shape_token or ""
+    if token.startswith("plain:"):
+        # plain-shape symbol (plain_shapes.py) - its PID2Graph label is in the token,
+        # and it is a symbol even when the reviewer/mapping skipped its DEXPI class
+        return token.rsplit(":", 1)[1]
+    if "arrows2.arrow" in token:
+        return "inlet/outlet"  # e.g. "Fume hood [atm]": an off-page destination
+    if "opto_electronics.lamp" in token:
         return "general"
-    if result.dexpi_class_name is None:
-        return "general"
-    return _DEXPI_CLASS_TO_PID2GRAPH_LABEL.get(result.dexpi_class_name, "general")
+    if dexpi_class in (SKIP, OFF_PAGE) or not shape_token:
+        return None
+    if dexpi_class == "SignalOffPageConnector":
+        return "inlet/outlet"
+    category = category_for_class(dexpi_class)
+    if category == Category.PIPING:
+        return "valve"
+    if category == Category.INSTRUMENTATION:
+        return "instrumentation"
+    if dexpi_class in TANK_CLASSES:
+        return "tank"
+    if dexpi_class in PUMP_CLASSES:
+        return "pump"
+    return "general"
+
+
+def rotated_box(shape: Shape) -> tuple[float, float, float, float]:
+    """draw.io stores geometry BEFORE rotation; a +-90 deg shape occupies the box with
+    width and height swapped around the same centre (off-page arrows, vertical valves,
+    heat exchangers). 180 deg leaves the box unchanged."""
+    m = re.search(r"(?:^|;)rotation=(-?[\d.]+)", shape.style or "")
+    angle = abs(float(m.group(1))) % 180 if m else 0.0
+    if 45 < angle < 135:
+        cx, cy = shape.x + shape.width / 2, shape.y + shape.height / 2
+        return (cx - shape.height / 2, cy - shape.width / 2, cx + shape.height / 2, cy + shape.width / 2)
+    return (shape.x, shape.y, shape.x + shape.width, shape.y + shape.height)
+
+
+def labelled_symbols(diagram: ParsedDiagram):
+    """The symbols and connections of a drawing in PID2Graph terms - the ONE labelling
+    used both for these exports and for the ML training data (make_team_data.py).
+
+    Returns (symbols, edges): symbols = [(node_id, label, (x1, y1, x2, y2), drawio_id)] in
+    draw.io coordinates; edges = [(node_id_a, node_id_b, "solid" | "non-solid")], one per
+    connected pair. Only real symbols are labelled - the original exporter labelled EVERY
+    draw.io cell, text labels included, as "general" (56 of LightUp's 113 nodes), which
+    would teach a model to box text as symbols.
+
+    Caveat: connections come from the draw.io lines via the parser; about half of them had
+    one loose end resolved to the nearest shape (not verified individually).
+    """
+    review = from_drawio(diagram)
+    rows = {r.id: r for r in review.symbols}
+    symbols = []
+    for shape in diagram.shapes:
+        row = rows.get(shape.id)
+        label = pid2graph_class(row.dexpi_class, shape.shape_token) if (row and shape.shape_token) else None
+        if label is not None:
+            symbols.append((_sanitize_id(shape.id), label, rotated_box(shape), shape.id))
+    id_map = {orig: sid for sid, _, _, orig in symbols}
+    edges, seen = [], set()
+    for c in review.connections:
+        if c.include and c.from_id in id_map and c.to_id in id_map and c.from_id != c.to_id:
+            a, b = sorted((id_map[c.from_id], id_map[c.to_id]))
+            if (a, b) not in seen:  # parallel lines between one pair -> one connection
+                seen.add((a, b))
+                edges.append((a, b, "non-solid" if c.line_type == "signal" else "solid"))
+    return symbols, edges
 
 
 def _sanitize_id(shape_id: str) -> str:
     """GraphML node/edge ids must be valid XML names; drawio ids are already alnum/-/_
     but are prefixed here to guarantee a non-numeric first character regardless."""
     return f"n{shape_id}"
-
-
-def _real_edges(diagram: ParsedDiagram) -> list[Edge]:
-    """Only edges with both endpoints resolved to a real shape, excluding decorative
-    linework - same filter build_model.py uses to decide what's a genuine connection,
-    so the exported graph's topology matches what this pipeline actually builds, not a
-    superset that includes rejected/ambiguous edges."""
-    return [e for e in diagram.edges if e.source and e.target and not e.is_decorative]
 
 
 def diagram_to_pid2graph_xml(diagram: ParsedDiagram) -> ET.Element:
@@ -116,32 +152,25 @@ def diagram_to_pid2graph_xml(diagram: ParsedDiagram) -> ET.Element:
     graph = ET.SubElement(root, f"{{{GRAPHML_NS}}}graph")
     graph.set("edgedefault", "undirected")
 
-    shapes_by_id = {shape.id: shape for shape in diagram.shapes}
-
     def add_data(parent: ET.Element, key_id: str, value: str) -> None:
         data = ET.SubElement(parent, f"{{{GRAPHML_NS}}}data")
         data.set("key", key_id)
         data.text = value
 
-    for shape in diagram.shapes:
+    symbols, edges = labelled_symbols(diagram)
+    for node_id, label, (x1, y1, x2, y2), _ in symbols:
         node = ET.SubElement(graph, f"{{{GRAPHML_NS}}}node")
-        node.set("id", _sanitize_id(shape.id))
-        add_data(node, "d0", _pid2graph_label(shape))
-        add_data(node, "d1", str(shape.x))
-        add_data(node, "d2", str(shape.x + shape.width))
-        add_data(node, "d3", str(shape.y))
-        add_data(node, "d4", str(shape.y + shape.height))
-
-    for edge in _real_edges(diagram):
-        if edge.source not in shapes_by_id or edge.target not in shapes_by_id:
-            # Resolved onto a shape id that (for whatever upstream reason) isn't in this
-            # diagram's own shape list - skip rather than emit a dangling edge reference,
-            # which would make the file fail to load as a graph at all.
-            continue
+        node.set("id", node_id)
+        add_data(node, "d0", label)
+        add_data(node, "d1", str(x1))
+        add_data(node, "d2", str(x2))
+        add_data(node, "d3", str(y1))
+        add_data(node, "d4", str(y2))
+    for a, b, line in edges:
         edge_el = ET.SubElement(graph, f"{{{GRAPHML_NS}}}edge")
-        edge_el.set("source", _sanitize_id(edge.source))
-        edge_el.set("target", _sanitize_id(edge.target))
-        add_data(edge_el, "d9", "non-solid" if edge.is_dashed else "solid")
+        edge_el.set("source", a)
+        edge_el.set("target", b)
+        add_data(edge_el, "d9", line)
 
     return root
 
@@ -153,6 +182,16 @@ def export_pid2graph_graphml(diagram: ParsedDiagram) -> str:
 
 
 def export_drawio_file_to_pid2graph(drawio_path: str | Path, output_path: str | Path) -> None:
-    diagram = parse_drawio_file(drawio_path)
+    """Accepts a real .drawio file (compressed diagram, decoded first) or already-decoded
+    mxGraph XML. Reading a .drawio directly as XML finds no cells and writes an empty
+    graph - which is exactly what happened when regenerating these exports."""
+    from .decode_drawio import decode_drawio
+    from .parser_drawio import parse_drawio_xml_resolved
+
+    path = Path(drawio_path)
+    if path.suffix == ".drawio":
+        diagram = parse_drawio_xml_resolved(decode_drawio(path)[0], source_file=path.name, drawio_path=path)
+    else:
+        diagram = parse_drawio_file(path)
     xml_text = export_pid2graph_graphml(diagram)
     Path(output_path).write_text(xml_text, encoding="utf-8")

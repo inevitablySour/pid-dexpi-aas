@@ -69,6 +69,9 @@ OFF_PAGE_CONNECTOR_SHAPE = "offPageConnector"
 # Order matters: check longer/more specific prefixes before short ones (e.g. "PSV" before "P").
 VALVE_TAG_PREFIX_MAP: list[tuple[str, str | None, str]] = [
     ("PSV", "SafetyValveOrFitting", ""),
+    # Back-pressure regulator: a self-acting pressure-control valve in the process line,
+    # even though the team draws it as an instrument bubble ("BPR 401").
+    ("BPR", "OperatedValve", "back-pressure regulator (self-acting pressure control valve)"),
     ("GV", "GateValve", "inferred from usage, not a legend; confirm with team"),
     ("CV", "CheckValve", ""),
     ("XV", "OperatedValve", "inferred as actuated on/off valve; confirm with team"),
@@ -132,11 +135,22 @@ def map_shape(shape_token: str | None, tag_text: str) -> MappingResult:
     if shape_token is None:
         return MappingResult(Category.UNMAPPED, None, "no shape token; likely a floating tag/label")
 
+    if shape_token.startswith("plain:"):
+        # A symbol drawn with a plain draw.io shape (see plain_shapes.py).
+        _, cat, cls, _label = shape_token.split(":", 3)
+        reason = ("plain draw.io shape - type unknown, please review" if cls == "CustomEquipment"
+                  else f"plain draw.io shape named {tag_text!r}")
+        return MappingResult(Category[cat], cls, reason)
+
     if shape_token == GENERIC_VALVE_SHAPE:
         dexpi_class, note = classify_valve_tag(tag_text)
         return MappingResult(Category.PIPING, dexpi_class, note)
 
     if shape_token == DISC_INST_SHAPE:
+        if classify_tag(tag_text)[0] == "valve":
+            # An instrument bubble carrying a valve tag (e.g. "BPR 401") is a line valve.
+            dexpi_class, note = classify_valve_tag(tag_text)
+            return MappingResult(Category.PIPING, dexpi_class, f"valve tag in an instrument bubble: {note}".strip(": "))
         dexpi_class, metadata = classify_instrument_tag(tag_text)
         note = f"loop={metadata['loop_letters']!r} measured={metadata['measured_variable']} function={metadata['function']}"
         return MappingResult(Category.INSTRUMENTATION, dexpi_class, note)
@@ -160,3 +174,93 @@ def map_shape(shape_token: str | None, tag_text: str) -> MappingResult:
         return MappingResult(Category.EQUIPMENT, dexpi_class, "")
 
     return MappingResult(Category.UNMAPPED, None, f"unrecognized shape token {shape_token!r}")
+
+
+# --- tag-prefix -> equipment class (image path: OCR tags, no draw.io shape token) -----------
+# Team convention as seen on the LightUp/Lumen drawings (V201 vessel, P101 pump, T201 gas
+# bottle/tank, R201 reactor, H201 heater, X101 column, LED 201 light source). Single-letter
+# prefixes only ever match EXACTLY ("P" not "PI"), so ISA instrument tags never land here.
+EQUIPMENT_TAG_PREFIX_MAP: dict[str, tuple[str, str]] = {
+    "P": ("Pump", ""),
+    "V": ("Vessel", ""),
+    "T": ("Tank", ""),
+    "R": ("Vessel", "reactor - DEXPI has no dedicated Reactor class"),
+    "H": ("Heater", "inferred heater/heat exchanger; confirm with team"),
+    "E": ("HeatExchanger", "ISA-style 'E' prefix; confirm with team"),
+    "X": ("ProcessColumn", "inferred from X101/X102 column drawings; confirm with team"),
+    "LED": ("CustomEquipment", "light source (photoreactor LED); no DEXPI class"),
+}
+_ISA_FOLLOW_LETTERS = set(ISA_FUNCTION_LETTER) | {"V", "Y", "Z", "E"}
+
+
+def tag_letters(tag_text: str) -> str:
+    match = _TAG_TOKEN_RE.match(tag_text.strip())
+    return match.group(1).upper() if match else ""
+
+
+def classify_tag(tag_text: str) -> tuple[str | None, str | None, str]:
+    """What a tag alone says: (kind, dexpi_class_name, note), kind in
+    "valve" | "instrument" | "equipment" | None. Valve prefixes first (PSV before the
+    ISA check, since P-S-V would otherwise read as pressure+switch+valve), then ISA
+    instrument letters, then exact equipment prefixes."""
+    letters = tag_letters(tag_text)
+    if not letters:
+        return None, None, ""
+    for prefix, dexpi_class, note in VALVE_TAG_PREFIX_MAP:
+        if prefix != "V" and letters == prefix:
+            return "valve", dexpi_class, note
+    if (
+        2 <= len(letters) <= 4
+        and letters[0] in ISA_MEASURED_VARIABLE
+        and all(c in _ISA_FOLLOW_LETTERS for c in letters[1:])
+    ):
+        return "instrument", "ProcessInstrumentationFunction", ""
+    if letters in EQUIPMENT_TAG_PREFIX_MAP:
+        dexpi_class, note = EQUIPMENT_TAG_PREFIX_MAP[letters]
+        return "equipment", dexpi_class, note
+    return None, None, f"tag prefix {letters!r} not in any lookup table"
+
+
+# Model (PID2Graph) broad class -> fallback when there is no usable tag.
+MODEL_CLASS_FALLBACK: dict[str, tuple[Category, str | None, str]] = {
+    "valve": (Category.PIPING, "StraightwayValve", "generic valve - no tag to pick a subtype"),
+    "instrumentation": (Category.INSTRUMENTATION, "ProcessInstrumentationFunction", ""),
+    "pump": (Category.EQUIPMENT, "Pump", ""),
+    "tank": (Category.EQUIPMENT, "Tank", ""),
+    "inlet/outlet": (Category.NOT_PROCESS_EQUIPMENT, None, "off-page inlet/outlet - becomes a connector if piped"),
+    "arrow": (Category.NOT_PROCESS_EQUIPMENT, None, "flow arrow - direction marker, not a DEXPI object"),
+    "general": (Category.UNMAPPED, None, "generic symbol with no tag - needs manual classification"),
+}
+_KIND_CATEGORY = {"valve": Category.PIPING, "instrument": Category.INSTRUMENTATION, "equipment": Category.EQUIPMENT}
+
+
+def classify_detection(model_class: str, tag_text: str | None) -> tuple[MappingResult, str]:
+    """Combine the image model's broad class with the OCR tag.
+
+    Returns (MappingResult, identified_by). The tag wins when it is unambiguous, because
+    P&ID tag conventions are more reliable than the model on real drawings (it calls
+    real pumps "general" and some instruments "tank"); disagreements are kept in the
+    reason so the reviewer sees them. "V" is the one genuinely ambiguous prefix
+    (vessel V201 vs manual valve), so the model's class decides that case.
+    """
+    kind, dexpi_class, note = classify_tag(tag_text) if tag_text else (None, None, "")
+    letters = tag_letters(tag_text) if tag_text else ""
+
+    if kind == "equipment" and letters == "V" and model_class == "valve":
+        cls, vnote = classify_valve_tag(tag_text or "")
+        return MappingResult(Category.PIPING, cls, vnote), "tag 'V' + model: valve"
+
+    if kind is not None:
+        if kind == "valve":
+            dexpi_class, note = classify_valve_tag(tag_text or "")
+        expected = {"valve": "valve", "instrument": "instrumentation"}.get(kind)
+        agrees = model_class == expected or (kind == "equipment" and model_class in ("pump", "tank", "general"))
+        reason = note if agrees else f"model said {model_class!r}, tag {letters!r} overrides. {note}".strip()
+        return MappingResult(_KIND_CATEGORY[kind], dexpi_class, reason), f"tag prefix {letters!r}"
+
+    category, dexpi_class, reason = MODEL_CLASS_FALLBACK.get(
+        model_class, (Category.UNMAPPED, None, f"unknown model class {model_class!r}")
+    )
+    if tag_text and note:
+        reason = f"{reason}; {note}"
+    return MappingResult(category, dexpi_class, reason), f"model class {model_class!r}"

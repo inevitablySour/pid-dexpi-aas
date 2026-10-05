@@ -73,6 +73,17 @@ class Edge:
     # "self-loop" (both ends resolve to the same shape) alongside GENUINELY corrupt
     # short segments, conflating two different things under one misleading label.
     is_decorative: bool = False
+    # Set when this line's loose end sits on another line's drawn route (line_routes.py):
+    # the id of that line. Such ends are junctions, never guessed onto a nearest shape.
+    source_junction: str | None = None
+    target_junction: str | None = None
+    # Lines joined at junctions form one pipe network; its symbols are connected by
+    # derived "net:" edges, and the member lines point here instead of being built alone.
+    merged_into: str | None = None
+    # Flow direction (flow_direction.infer_flow): +1 source -> target, -1 target -> source,
+    # 0 unknown; basis "arrow" (drawn on this line) | "implied" (from neighbouring arrows).
+    flow: int = 0
+    flow_basis: str = ""
 
 
 @dataclass
@@ -80,6 +91,12 @@ class ParsedDiagram:
     source_file: str
     shapes: list[Shape] = field(default_factory=list)
     edges: list[Edge] = field(default_factory=list)
+    # shape id -> specification notes attached to it ("17 bar", "Volume = 5 L"), see
+    # spec_labels.py; and notes that fitted no item (reported, never guessed)
+    specs: dict = field(default_factory=dict)
+    unassigned_specs: list = field(default_factory=list)
+    # flow_direction.FlowSummary: how many connections got a direction, and how
+    flow: object = None
 
 
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -165,7 +182,8 @@ def parse_drawio_xml(xml_text: str, source_file: str) -> ParsedDiagram:
                     source_resolution="explicit" if has_source else "unresolved",
                     target_resolution="explicit" if has_target else "unresolved",
                     is_dashed=_DASHED_RE.search(style) is not None,
-                    has_end_arrow=end_arrow_match is not None and end_arrow_match.group(1) != "none",
+                    # no endArrow in the style = draw.io's default edge, which draws a classic arrow
+                    has_end_arrow=end_arrow_match is None or end_arrow_match.group(1) != "none",
                     has_start_arrow=start_arrow_match is not None
                     and start_arrow_match.group(1) != "none",
                 )
@@ -340,6 +358,27 @@ def resolve_floating_edge_endpoints(diagram: ParsedDiagram) -> None:
             return best_shape_id
         return None
 
+    # Containers (a shape enclosing other real symbols - e.g. the reactor box around its
+    # Mixing/Heating/Cooling compartments): a loose line end inside one belongs to the
+    # container only if it sits on the container's BORDER. Counting "anywhere inside" as
+    # distance 0 made every line end near a compartment wall resolve to the reactor.
+    def _encloses(outer: Shape, inner: Shape) -> bool:
+        cx, cy = inner.x + inner.width / 2, inner.y + inner.height / 2
+        return (outer is not inner and outer.x <= cx <= outer.x + outer.width
+                and outer.y <= cy <= outer.y + outer.height and outer.width * outer.height > inner.width * inner.height)
+
+    # Only plain-shape containers (plain_shapes.py): a library symbol drawn from several
+    # cells (pump P101 with its base trapezoid) must not count as one, or a line end on
+    # the pump slides onto the decorative base.
+    containers = {s.id for s in real_shapes if (s.shape_token or "").startswith("plain:")
+                  and any(_encloses(s, o) for o in real_shapes)}
+
+    def _resolution_distance(shape: Shape, x: float, y: float) -> float:
+        d = _distance_to_shape(shape, x, y)
+        if d == 0 and shape.id in containers:
+            return min(x - shape.x, shape.x + shape.width - x, y - shape.y, shape.y + shape.height - y)
+        return d
+
     def resolve_by_nearest_shape(point: tuple[float, float]) -> tuple[str, str] | tuple[None, None]:
         """Returns (shape_id, resolution_tier) or (None, None). Two tiers: a confident
         short-distance match, or a wider-but-unambiguous margin-based match (see
@@ -349,15 +388,15 @@ def resolve_floating_edge_endpoints(diagram: ParsedDiagram) -> None:
         for candidates in (real_shapes, label_shapes):
             if not candidates:
                 continue
-            ranked = sorted(candidates, key=lambda s: _distance_to_shape(s, x, y))
+            ranked = sorted(candidates, key=lambda s: _resolution_distance(s, x, y))
             nearest = ranked[0]
-            nearest_distance = _distance_to_shape(nearest, x, y)
+            nearest_distance = _resolution_distance(nearest, x, y)
 
             if nearest_distance <= _MAX_RESOLUTION_DISTANCE:
                 return nearest.id, "nearest_shape"
 
             if nearest_distance <= _MARGIN_RESOLUTION_DISTANCE and len(ranked) > 1:
-                second_distance = _distance_to_shape(ranked[1], x, y)
+                second_distance = _resolution_distance(ranked[1], x, y)
                 if second_distance >= nearest_distance * _MARGIN_RATIO:
                     return nearest.id, "nearest_shape_by_margin"
         return None, None
@@ -369,7 +408,7 @@ def resolve_floating_edge_endpoints(diagram: ParsedDiagram) -> None:
             # proximity match. Left unresolved and reported distinctly downstream.
             continue
 
-        if edge.source is None and edge.source_point is not None:
+        if edge.source is None and edge.source_point is not None and edge.source_junction is None:
             if edge.exit_fraction is not None:
                 resolved = resolve_by_fraction(edge.source_point, edge.exit_fraction)
                 if resolved is not None:
@@ -381,7 +420,7 @@ def resolve_floating_edge_endpoints(diagram: ParsedDiagram) -> None:
                     edge.source = resolved_id
                     edge.source_resolution = tier
 
-        if edge.target is None and edge.target_point is not None:
+        if edge.target is None and edge.target_point is not None and edge.target_junction is None:
             if edge.entry_fraction is not None:
                 resolved = resolve_by_fraction(edge.target_point, edge.entry_fraction)
                 if resolved is not None:
@@ -394,17 +433,145 @@ def resolve_floating_edge_endpoints(diagram: ParsedDiagram) -> None:
                     edge.target_resolution = tier
 
 
-def parse_drawio_xml_resolved(xml_text: str, source_file: str) -> ParsedDiagram:
+def redirect_label_endpoints(diagram: ParsedDiagram) -> None:
+    """A line end attached to a TEXT LABEL belongs to the symbol that label names.
+
+    Measured on the team files: 15 line ends attach to a label lying INSIDE a symbol (the
+    line from XV201 snaps onto the text "X101" inside the X101 column drawing, not the
+    column), and others to a tag label next to its symbol. Redirect:
+      1. label inside a symbol's box -> the smallest such symbol;
+      2. label that is a real tag (GV204, PI 102 ...) associated with a symbol -> it.
+    Anything else ("Fume hood [atm]", "Product") stays: a genuine off-page destination.
+    """
+    from pid_dexpi_aas.mapping import classify_tag
+    from pid_dexpi_aas.tag_association import associate_tags
+
+    shapes = {sh.id: sh for sh in diagram.shapes}
+    symbols = [sh for sh in diagram.shapes if sh.shape_token]
+    owner = {a.label_shape_id: a.target_shape_id for a in associate_tags(diagram) if a.target_shape_id}
+
+    def target_for(label_id: str) -> str | None:
+        lab = shapes.get(label_id)
+        if lab is None or lab.shape_token:
+            return None
+        cx, cy = lab.x + lab.width / 2, lab.y + lab.height / 2
+        holders = [sh for sh in symbols if sh.x <= cx <= sh.x + sh.width and sh.y <= cy <= sh.y + sh.height]
+        if holders:
+            return min(holders, key=lambda sh: sh.width * sh.height).id
+        if lab.text.strip() and classify_tag(lab.text)[0] is not None:
+            return owner.get(label_id)
+        return None
+
+    for e in diagram.edges:
+        for attr in ("source", "target"):
+            end = getattr(e, attr)
+            new = target_for(end) if end else None
+            if new is not None:
+                setattr(e, attr, new)
+
+
+def join_pipe_networks(diagram: ParsedDiagram, routes: dict) -> None:
+    """Lines whose loose ends sit on other lines' routes form pipe networks. Every pair of
+    symbols at a network's ends is connected (a tee joins all its legs); the member lines
+    are marked merged_into and the connections added as derived "net:" edges."""
+    from pid_dexpi_aas.line_routes import find_junctions
+
+    joins = find_junctions(diagram.edges, routes)
+    if not joins:
+        return
+    by_id = {e.id: e for e in diagram.edges}
+    for (eid, end), other in joins.items():
+        if end == 0:
+            by_id[eid].source_junction = other
+        else:
+            by_id[eid].target_junction = other
+    parent = {e.id: e.id for e in diagram.edges}
+
+    def root(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for (eid, _), other in joins.items():
+        parent[root(eid)] = root(other)
+    networks: dict[str, list] = {}
+    for e in diagram.edges:
+        networks.setdefault(root(e.id), []).append(e)
+    return_edges = []
+    for k, members in enumerate(m for m in networks.values() if len(m) > 1):
+        net_id = f"net{k}"
+        ends: dict[str, str] = {}
+        for e in members:
+            e.merged_into = net_id
+            for sid, res in ((e.source, e.source_resolution), (e.target, e.target_resolution)):
+                if sid is not None:
+                    ends.setdefault(sid, res)
+        dashed = sum(e.is_dashed for e in members) > len(members) / 2
+        ids = sorted(ends)
+        for i, a in enumerate(ids):
+            for b in ids[i + 1:]:
+                guessed = any(ends[x] not in ("explicit", "adjacent") for x in (a, b))
+                return_edges.append(Edge(
+                    id=f"{net_id}:{a}:{b}", source=a, target=b, style="pipe network",
+                    source_resolution="junction" if not guessed else "junction+guess",
+                    target_resolution="junction" if not guessed else "junction+guess",
+                    is_dashed=dashed,
+                ))
+    diagram.edges.extend(return_edges)
+
+
+def parse_drawio_xml_resolved(xml_text: str, source_file: str, drawio_path: str | Path | None = None) -> ParsedDiagram:
     """parse_drawio_xml + classify_decorative_edges + resolve_floating_edge_endpoints in
     one call - the entry point build_model.py/run_pipeline.py/app.py should use, so
     floating (non-snapped) edges aren't silently dropped, and decorative symbol linework
     isn't wrongly resolved into a fake piping connection."""
+    from pid_dexpi_aas.plain_shapes import mark_plain_symbols  # local: plain_shapes imports this module
+
+    from pid_dexpi_aas.spec_labels import attach_specs
+
     diagram = parse_drawio_xml(xml_text, source_file=source_file)
+    mark_plain_symbols(diagram)  # reactor/compartment boxes etc. become real symbols first
+    # Spec notes ("17 bar") are data about an item, not tags or line ends: attach them,
+    # then blank pure-note cells so tag association and line-end guessing ignore them.
+    specs = attach_specs(diagram)
+    diagram.specs, diagram.unassigned_specs = specs.by_shape, specs.unassigned
+    for cell in diagram.shapes:
+        if cell.id in specs.spec_cells:
+            cell.text = ""
     classify_decorative_edges(diagram)
+    routes = None
+    if drawio_path is not None:
+        from pid_dexpi_aas.line_routes import find_junctions, routes_for
+        routes = routes_for(drawio_path, diagram.edges)
+        if routes:
+            from pid_dexpi_aas.line_routes import find_dash_chains
+            by_id = {e.id: e for e in diagram.edges}
+            for chain in find_dash_chains(diagram.edges, routes):
+                for eid in chain:  # a hand-drawn dashed line: signal, not decoration
+                    by_id[eid].is_decorative, by_id[eid].is_dashed = False, True
+            # Mark junction ends BEFORE guessing, so an end on a pipe is never guessed
+            # onto the nearest symbol.
+            for (eid, end), other in find_junctions(diagram.edges, routes).items():
+                e = next(x for x in diagram.edges if x.id == eid)
+                if end == 0:
+                    e.source_junction = other
+                else:
+                    e.target_junction = other
     resolve_floating_edge_endpoints(diagram)
+    redirect_label_endpoints(diagram)
+    if routes:
+        join_pipe_networks(diagram, routes)
+    from pid_dexpi_aas.flow_direction import infer_flow
+    diagram.flow = infer_flow(diagram)
     return diagram
 
 
 def parse_drawio_file(path: str | Path) -> ParsedDiagram:
+    """A decoded mxGraph XML file, or a real .drawio file (decoded, with line routes when
+    the draw.io app is available)."""
     path = Path(path)
+    if path.suffix == ".drawio":
+        from pid_dexpi_aas.decode_drawio import decode_drawio
+        return parse_drawio_xml_resolved(decode_drawio(path)[0], source_file=path.name, drawio_path=path)
     return parse_drawio_xml_resolved(path.read_text(encoding="utf-8"), source_file=path.name)

@@ -62,5 +62,9 @@ def test_decorative_edges_are_reported_distinctly_not_as_self_loops():
     self_loop_records = [r for r in result.records if "self-loop" in r.reason]
     assert len(decorative_records) >= 25
     # Self-loop count should have dropped sharply now that decorative clusters are
-    # correctly excluded from that classification (was 36 before this fix).
-    assert len(self_loop_records) < 10
+    # correctly excluded from that classification (was 36 before this fix). 11 since the
+    # segment rewrite: dash fragments looping on an INSTRUMENT are now (correctly) called
+    # self-loops instead of being filed as sensing edges. (Without line routes - this test
+    # parses decoded XML - one is an 83-unit TT 202 line whose far end is really a junction
+    # on the header; with routes that end resolves correctly.)
+    assert len(self_loop_records) < 12
