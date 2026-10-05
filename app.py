@@ -13,11 +13,10 @@ Every symbol and connection is then shown in editable tables - with how it was
 identified - so an operator can fix classes, tags and connections before the DEXPI XML
 is built and verified.
 
-Beside the tables, an interactive map (pid_dexpi_aas.flow_map): for a draw.io file every
-pipe along its drawn route with its flow direction; for an image the model's boxes and
-connections. Clicking a line or box ticks its row's "show" box and moves the row to the top
-of its table; ticking "show" in a table highlights that item (or a whole pipe network) on
-the map and zooms to it.
+The page: (1) the drawing as an interactive map - for a draw.io file every pipe along its
+drawn route with its flow direction, for an image the model's boxes and lines - with an
+edit panel beside it: click an item or line to edit it there, or step through the items to
+check; (2) all items and lines as tables for bulk edits; (3) build, verify and download.
 """
 from __future__ import annotations
 
@@ -48,8 +47,8 @@ from pid_dexpi_aas.decode_drawio import decode_drawio  # noqa: E402
 from pid_dexpi_aas.mapping import classify_detection  # noqa: E402
 from pid_dexpi_aas.parser_drawio import parse_drawio_xml_resolved  # noqa: E402
 from pid_dexpi_aas.review import (  # noqa: E402
-    DEXPI_CLASS_CHOICES, OFF_PAGE, SKIP, ReviewConnection, ReviewDiagram, ReviewSymbol,
-    _instrument_attributes, cross_check, from_drawio, from_image, to_dexpi, validate_rows,
+    DEXPI_CLASS_CHOICES, FLOW_KNOWN, OFF_PAGE, SKIP, ReviewConnection, ReviewDiagram, ReviewSymbol,
+    _instrument_attributes, _short_token, cross_check, from_drawio, from_image, to_dexpi, validate_rows,
 )
 from pid_dexpi_aas.serialize import save_and_verify  # noqa: E402
 from pid_dexpi_aas.validate_by_counting import report_for_diagram  # noqa: E402
@@ -64,9 +63,13 @@ HAS_GPU = shutil.which("nvidia-smi") is not None
 Image.MAX_IMAGE_PIXELS = None
 
 st.set_page_config(page_title="P&ID to DEXPI converter", layout="wide")
-st.title("P&ID to DEXPI converter")
-st.caption("Upload a draw.io file, an image of a P&ID, or both. Review and correct what was "
-           "detected, then build and download the DEXPI XML.")
+st.markdown("### P&ID to DEXPI converter")
+st.html("""<style>
+/* the edit panel stays in view while scrolling the page */
+div[data-testid="stColumn"]:has(.edit-panel) {position: sticky; top: 3.75rem; align-self: flex-start; z-index: 2;}
+div[data-testid="stMetric"] {padding: 0;}
+div[data-testid="stMetricValue"] {font-size: 1.6rem;}
+</style>""")
 
 # ------------------------------------------------------------------------------ inputs ---
 with st.sidebar:
@@ -174,11 +177,9 @@ if st.session_state.get("input_key") != input_key:
 review: ReviewDiagram = st.session_state["review"]
 
 mode = " + ".join(x for x, f in (("draw.io", drawio_file), ("image", image_file)) if f) or "saved review"
-st.subheader(f"Review: {review.source_name}  ·  mode: {mode}")
-if review.alignment:
-    a = review.alignment
-    st.caption(f"draw.io aligned to the image using {a['pairs_used']} shared tags "
-               f"(median error {a['median_error_px']:.1f} px).")
+st.caption(f"**{review.source_name}** · input: {mode}" + (
+    f" · drawing and picture matched on {review.alignment['pairs_used']} shared tags "
+    f"(off by {review.alignment['median_error_px']:.0f} px on average)" if review.alignment else ""))
 if review.moved:
     st.warning(f"The image and the draw.io file look like different versions of the drawing: "
                f"{', '.join(review.moved)} {'is' if len(review.moved) == 1 else 'are'} drawn at a different place in "
@@ -221,11 +222,10 @@ OCR_TAG = (120, 120, 120)
 
 
 def _symbol_tip(s: ReviewSymbol) -> str:
-    state = "excluded" if not s.include or s.dexpi_class == SKIP else "needs review" if needs_review(s) else "converted"
-    tip = f"{s.tag or '(no tag)'} - {s.dexpi_class} ({state})"
+    tip = f"{item_name(s.id)} ({refs.get(s.id, '')}): {friendly_class(s.dexpi_class)}, {status(s)}"
     if s.tag_source.startswith("OCR"):
-        tip += f"; tag read by OCR ({s.tag_source})"
-    return tip + (f"; image: {s.image_check}" if s.image_check else "")
+        tip += f"; tag read in the picture ({s.tag_source})"
+    return tip + (f"; picture check: {s.image_check}" if s.image_check else "")
 
 
 def _image_to_drawio(fit: dict):
@@ -242,7 +242,7 @@ def _image_to_drawio(fit: dict):
 def _ocr_boxes(review: ReviewDiagram, to_map=lambda b: tuple(b)) -> list[Box]:
     """OCR-read tags no symbol claimed (possible missed symbols), as unselectable boxes."""
     return [Box("", to_map(t["box"]), OCR_TAG, t["tag"], 2,
-                f"OCR read '{t['tag']}' (confidence {t.get('conf', 0):.2f}) - not attached to any symbol", True)
+                f"Text read in the picture: '{t['tag']}' (confidence {t.get('conf', 0):.0%}) - not on any item", True, "ocr")
             for t in review.unattached_tags or [] if t.get("box")]
 
 
@@ -255,20 +255,23 @@ def drawio_layers(review: ReviewDiagram) -> Layers | None:
         return None
     _, path = decode_drawio_bytes(drawio_file.getvalue(), drawio_file.name)
     shapes = {sh.id: sh for sh in review.drawio.shapes}
+    # names only on items in (or to check for) DEXPI; left-out shapes and picture-only finds
+    # keep theirs in the hover text, so labels don't pile up
     boxes = [Box(s.id, (sh.x, sh.y, sh.x + sh.width, sh.y + sh.height), symbol_color(s, set()),
-                 s.tag or s.id, 3, _symbol_tip(s))
+                 item_name(s.id) if status(s) != "left out" else "", 3, _symbol_tip(s))
              for s in review.symbols if (sh := shapes.get(s.id)) is not None]
     extra_legend = []
     if review.alignment:
         to_drawio = _image_to_drawio(review.alignment)
         model_only = [s for s in review.symbols if s.id not in shapes and s.source == "image model" and s.box]
-        boxes += [Box(s.id, to_drawio(s.box), MODEL_ONLY, f"model: {s.detected_as} {s.tag}".strip(), 3,
-                      _symbol_tip(s), True) for s in model_only]
+        boxes += [Box(s.id, to_drawio(s.box), MODEL_ONLY, "", 3,
+                      f"Found only in the picture: {s.tag or s.detected_as} - {_symbol_tip(s)}", True, "model")
+                  for s in model_only]
         ocr = _ocr_boxes(review, to_drawio)
         boxes += ocr
-        extra_legend = [(f"found only by the model ({len(model_only)})", MODEL_ONLY),
-                        (f"OCR tag not on any symbol ({len(ocr)})", OCR_TAG)]
-    names = {s.id: s.tag or s.dexpi_class for s in review.symbols}
+        extra_legend = [(f"found only in the picture ({len(model_only)})", MODEL_ONLY, "model"),
+                        (f"text read in the picture, not on any item ({len(ocr)})", OCR_TAG, "ocr")]
+    names = {s.id: item_name(s.id) for s in review.symbols}
     layers = build_layers(review.drawio, path, boxes=boxes, overrides=review_overrides(review), names=names)
     if layers is not None:
         layers.legend += extra_legend
@@ -281,48 +284,134 @@ def picture_layers(review: ReviewDiagram) -> Layers | None:
     claimed."""
     if not review.image_path or not Path(review.image_path).exists():
         return None
-    boxes = [Box(s.id, tuple(s.box), MODEL_ONLY if s.image_check.startswith("only in image") else symbol_color(s, set()),
-                 s.tag or (f"model: {s.detected_as}" if s.source == "image model" else s.dexpi_class), 3,
-                 _symbol_tip(s), s.image_check.startswith("only in image"))
+    only = lambda s: s.image_check.startswith("only in image")
+    boxes = [Box(s.id, tuple(s.box), MODEL_ONLY if only(s) else symbol_color(s, set()),
+                 "" if only(s) or status(s) == "left out" else item_name(s.id), 3,
+                 _symbol_tip(s), only(s), "model" if only(s) else "item")
              for s in review.symbols if s.box]
     ocr = _ocr_boxes(review)
-    name = {s.id: s.tag or s.id for s in review.symbols}
+    name = {s.id: item_name(s.id) for s in review.symbols}
     conns = [(c.id, c.from_id, c.to_id, c.line_type, c.include,
               f"{name.get(c.from_id, c.from_id)} - {name.get(c.to_id, c.to_id)}: {c.line_type} ({c.source})")
              for c in review.connections]
     layers = image_layers(review.image_path, conns, boxes + ocr)
-    layers.legend.append((f"OCR tag not on any symbol ({len(ocr)})", OCR_TAG))
+    layers.legend.append((f"text read in the picture, not on any item ({len(ocr)})", OCR_TAG, "ocr"))
     return layers
 
 
-# --------------------------------------------------------------------------- tables ---
-SYMBOL_COLS = ["show", "include", "id", "tag", "dexpi_class", "detected_as", "identified_by", "tag_source",
-               "confidence", "image_check", "attributes", "notes", "source"]
+# ------------------------------------------------------------------- names & refs ---
+# Short, stable references (#12 for items, L7 for lines) instead of draw.io's internal ids,
+# so the map, the edit panel and the tables can all say which thing they mean.
+refs: dict = st.session_state.setdefault("refs", {})
+for s in review.symbols:
+    refs.setdefault(s.id, f"#{sum(1 for r in refs.values() if r.startswith('#')) + 1}")
+for c in review.connections:
+    refs.setdefault(c.id, f"L{sum(1 for r in refs.values() if r.startswith('L')) + 1}")
+by_sym = {s.id: s for s in review.symbols}
+
+
+def friendly_class(cls: str) -> str:
+    return {SKIP: "not in DEXPI", OFF_PAGE: "off-page connector"}.get(cls, cls)
+
+
+def item_name(sid: str) -> str:
+    s = by_sym.get(sid)
+    if s is None:
+        return sid
+    return s.tag or f"{friendly_class(s.dexpi_class)} {refs.get(sid, '')}".strip()
+
+
+def item_option(sid: str) -> str:
+    """A unique, readable label for From/To pickers (an untagged item's name has its ref already)."""
+    s = by_sym.get(sid)
+    return f"{refs.get(sid, '?')} {s.tag}" if s is not None and s.tag else item_name(sid)
+
+
+def status(s: ReviewSymbol) -> str:
+    if not s.include or s.dexpi_class == SKIP:
+        return "left out"
+    return "needs review" if needs_review(s) else "in DEXPI"
+
+
+def found_as(s: ReviewSymbol) -> str:
+    if s.source == "manual":
+        return "added by you"
+    if s.source == "image model":
+        conf = f" ({s.confidence:.0%})" if s.confidence is not None else ""
+        return f"model: {s.detected_as}{conf}"
+    return f"draw.io: {_short_token(s.detected_as)}"
+
+
+FLOW_LABELS = {"drawn arrow": "arrow on the drawing", "implied": "implied by other arrows",
+               "reviewer": "set by you", "no flow between them": "no flow (same side of a tee)", "": "unknown"}
+FLOW_VALUES = {v: k for k, v in FLOW_LABELS.items()}
+LINE_LABELS = {"process": "process pipe", "signal": "signal line"}
+
+
+def found_by(c: ReviewConnection) -> str:
+    if c.source == "image model":
+        return f"model ({c.confidence})"
+    if c.source == "manual":
+        return "added by you"
+    return {"explicit": "draw.io: line snapped to both items", "junction": "draw.io: joined at a tee",
+            "adjacent": "draw.io: compartments touching",
+            "junction+guess": "draw.io: tee, one end guessed"}.get(c.confidence, "draw.io: one end guessed")
+
+
 def _keep_specs(old: dict, new: dict) -> dict:
     """Recomputed tag attributes, keeping the drawing's spec notes ("18 bar")."""
     return {**new, **({"specs": old["specs"]} if old and old.get("specs") else {})}
 
 
-CONN_COLS = ["show", "include", "id", "from_id", "to_id", "flow", "line_type", "source", "confidence", "notes"]
+# ------------------------------------------------------------------------- selection ---
+# The selection is what is ticked "selected" in the tables; a map click or the edit panel
+# sets it by re-creating the tables with those rows ticked and moved to the top.
+def select(syms=(), conns=(), zoom=False) -> None:
+    syms, conns = set(syms), set(conns)
+    review.symbols.sort(key=lambda s: s.id not in syms)
+    review.connections.sort(key=lambda c: c.id not in conns)
+    st.session_state["seed_show"] = (syms, conns)
+    st.session_state["map_click_zoom"] = zoom
+    st.session_state["editor_version"] += 1
 
-left, right = st.columns([3, 2])
-with right:
-    only_flagged = st.toggle("Show only rows that need review", value=False)
-    # "show" ticks highlight rows on the map. They are seeded only when the editors are
-    # re-created (a map click), so the editors' input stays put between reruns.
-    seed_syms, seed_conns = st.session_state.get("seed_show", (set(), set()))
-    sym_df = pd.DataFrame([{**asdict(s), "show": s.id in seed_syms,
-                            "attributes": json.dumps(s.attributes) if s.attributes else ""}
-                           for s in review.symbols], columns=SYMBOL_COLS + ["box"])
-    flagged_ids = {s.id for s in review.symbols if needs_review(s)}
-    st.metric("Symbols", len(review.symbols), help="rows below")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Included", sum(s.include and s.dexpi_class != SKIP for s in review.symbols))
-    c2.metric("Need review", len(flagged_ids))
-    c3.metric("Connections", sum(c.include for c in review.connections))
-    if st.button("Re-classify image symbols from their (edited) tags",
-                 help="Re-runs the tag-prefix classifier for model-detected rows. Rows you set to a class "
-                      "by hand are re-classified too - use before editing classes."):
+
+def refresh_tables() -> None:
+    """After an edit in the panel: rebuild the tables from `review`, keeping the selection."""
+    st.session_state["seed_show"] = st.session_state.get("current_show", (set(), set()))
+    st.session_state["editor_version"] += 1
+
+
+seed_syms, seed_conns = st.session_state.get("seed_show", (set(), set()))
+version = st.session_state["editor_version"]
+
+# ---------------------------------------------------------------------------- layout ---
+n_in = sum(status(s) == "in DEXPI" for s in review.symbols)
+n_check = sum(status(s) == "needs review" for s in review.symbols)
+n_out = sum(status(s) == "left out" for s in review.symbols)
+n_conn = sum(c.include for c in review.connections)
+fs = review.drawio.flow if review.drawio is not None and review.drawio.flow else None
+n_unknown = fs.unknown if fs else sum(c.include and c.line_type == "process" and not c.flow for c in review.connections)
+m = st.columns(5)
+m[0].metric("Items in DEXPI", n_in)
+m[1].metric("Items to check", n_check, help="Red on the map. Use 'Next to check' in the panel.")
+m[2].metric("Items left out", n_out, help="Decorative shapes, labels, or excluded by you")
+m[3].metric("Lines in DEXPI", n_conn)
+m[4].metric("Pipes with unknown flow", n_unknown, help="Pipes (not instrument taps) with no arrow on them or "
+            "their neighbours - grey on the map")
+
+st.markdown("##### 1 · Check the drawing")
+map_col, panel_col = st.columns([7, 3], gap="medium")
+st.markdown("##### 2 · All items and lines (bulk edits)")
+items_tab, lines_tab = st.tabs([f"Items ({len(review.symbols)})", f"Lines ({len(review.connections)})"])
+
+# ---------------------------------------------------------------------------- tables ---
+ITEM_FILTERS = ["All", "Selected", "To check", "In DEXPI", "Left out"]
+with items_tab:
+    f1, f2 = st.columns([3, 2])
+    item_filter = f1.segmented_control("Show", ITEM_FILTERS, default="All", key="item_filter")
+    if any(s.source == "image model" for s in review.symbols) and f2.button(
+            "Re-classify model items from their tags",
+            help="Re-runs the tag-prefix classifier (PI -> instrument, GV -> valve, ...) for items the model found."):
         for s in review.symbols:
             if s.source == "image model":
                 mapping, how = classify_detection(s.detected_as, s.tag or None)
@@ -330,139 +419,292 @@ with right:
                     else (mapping.dexpi_class_name or SKIP)
                 s.identified_by, s.notes = how, mapping.reason
                 s.attributes = _keep_specs(s.attributes, _instrument_attributes(s.dexpi_class, s.tag))
-        st.session_state["editor_version"] += 1
+        refresh_tables()
         st.rerun()
+    keep = {"All": lambda s: True, "Selected": lambda s: s.id in seed_syms,
+            "To check": lambda s: status(s) == "needs review", "In DEXPI": lambda s: status(s) == "in DEXPI",
+            "Left out": lambda s: status(s) == "left out"}[item_filter or "All"]
+    shown_syms = [s for s in review.symbols if keep(s)]
+    hybrid = any(s.image_check for s in review.symbols)
+    item_df = pd.DataFrame([{
+        "selected": s.id in seed_syms, "id": s.id, "ref": refs[s.id], "tag": s.tag, "dexpi_class": s.dexpi_class,
+        "include": s.include, "status": ("● " if s.id in seed_syms else "") + status(s), "found_as": found_as(s),
+        "why": s.identified_by, "image_check": s.image_check, "specs": (s.attributes or {}).get("specs", ""),
+        "notes": s.notes} for s in shown_syms],
+        columns=["selected", "id", "ref", "tag", "dexpi_class", "include", "status", "found_as", "why",
+                 "image_check", "specs", "notes"])
+    edited_items = st.data_editor(
+        item_df, key=f"items_{version}_{item_filter}", num_rows="dynamic", width="stretch", hide_index=True,
+        column_config={
+            "selected": st.column_config.CheckboxColumn("Select", width="small",
+                                                        help="Tick to select: highlighted on the map and opened in the panel"),
+            "id": None,
+            "ref": st.column_config.TextColumn("Ref", width="small", disabled=True,
+                                               help="Short reference, also shown on the map"),
+            "tag": st.column_config.TextColumn("Tag", help="The item's name on the drawing, e.g. GV201"),
+            "dexpi_class": st.column_config.SelectboxColumn("DEXPI type", options=DEXPI_CLASS_CHOICES, required=True),
+            "include": st.column_config.CheckboxColumn("In DEXPI", width="small",
+                                                       help="Untick to leave this item out of the DEXPI file"),
+            "status": st.column_config.TextColumn("Status", disabled=True),
+            "found_as": st.column_config.TextColumn("Found as", disabled=True),
+            "why": st.column_config.TextColumn("How the type was chosen", disabled=True),
+            "image_check": (st.column_config.TextColumn("Picture check", disabled=True) if hybrid else None),
+            "specs": st.column_config.TextColumn("Specs from the drawing", disabled=True),
+            "notes": st.column_config.TextColumn("Notes"),
+        },
+    )
 
-st.markdown("#### Symbols")
-st.caption("Edit tag, DEXPI class, notes or include. To add a symbol the model missed, add a row "
-           "at the bottom (id is generated if left empty; a position on the image is not needed for "
-           "DEXPI). Untick include to drop a false detection.")
-shown = sym_df[sym_df["id"].isin(flagged_ids)] if only_flagged else sym_df
-edited_syms = st.data_editor(
-    shown.drop(columns=["box"]),
-    key=f"sym_editor_{st.session_state['editor_version']}_{only_flagged}",
-    num_rows="dynamic", width="stretch", hide_index=True,
-    column_config={
-        "show": st.column_config.CheckboxColumn("show", width="small", help="Highlight on the map"),
-        "include": st.column_config.CheckboxColumn("include", width="small"),
-        "id": st.column_config.TextColumn("id", width="small"),
-        "tag": st.column_config.TextColumn("tag"),
-        "dexpi_class": st.column_config.SelectboxColumn("DEXPI class", options=DEXPI_CLASS_CHOICES, required=True),
-        "detected_as": st.column_config.TextColumn("detected as", disabled=True),
-        "identified_by": st.column_config.TextColumn("identified by", disabled=True),
-        "tag_source": st.column_config.TextColumn("tag from", disabled=True),
-        "confidence": st.column_config.NumberColumn("conf.", format="%.2f", disabled=True),
-        "image_check": st.column_config.TextColumn("image check", disabled=True),
-        "attributes": st.column_config.TextColumn("attributes (from tag)", disabled=True),
-        "notes": st.column_config.TextColumn("notes"),
-        "source": st.column_config.TextColumn("source", disabled=True),
-    },
-)
-
-st.markdown("#### Connections")
-symbol_ids = [s.id for s in review.symbols]
-conn_df = pd.DataFrame([{**r, "show": r["id"] in seed_conns} for r in review.connection_rows()], columns=CONN_COLS)
-edited_conns = st.data_editor(
-    conn_df, key=f"conn_editor_{st.session_state['editor_version']}", num_rows="dynamic",
-    width="stretch", hide_index=True,
-    column_config={
-        "show": st.column_config.CheckboxColumn("show", width="small", help="Highlight on the map"),
-        "include": st.column_config.CheckboxColumn("include", width="small"),
-        "id": st.column_config.TextColumn("id", width="small"),
-        "from_id": st.column_config.SelectboxColumn("from", options=symbol_ids),
-        "to_id": st.column_config.SelectboxColumn("to", options=symbol_ids),
-        "flow": st.column_config.SelectboxColumn(
-            "flow from -> to", options=["drawn arrow", "implied", "reviewer", "no flow between them", ""],
-            help="How the direction from -> to is known; to reverse a pipe swap from and to and pick 'reviewer'"),
-        "line_type": st.column_config.SelectboxColumn("line type", options=["process", "signal"]),
-        "source": st.column_config.TextColumn("source", disabled=True),
-        "confidence": st.column_config.TextColumn("confidence", disabled=True),
-        "notes": st.column_config.TextColumn("notes"),
-    },
-)
+LINE_FILTERS = ["All", "Selected", "Unknown flow", "Guessed end", "Left out"]
+with lines_tab:
+    line_filter = st.segmented_control("Show", LINE_FILTERS, default="All", key="line_filter")
+    keep_c = {"All": lambda c: True, "Selected": lambda c: c.id in seed_conns,
+              "Unknown flow": lambda c: c.line_type == "process" and not c.flow,
+              "Guessed end": lambda c: "guess" in found_by(c), "Left out": lambda c: not c.include}[line_filter or "All"]
+    shown_conns = [c for c in review.connections if keep_c(c)]
+    options = [item_option(s.id) for s in review.symbols]
+    option_id = {item_option(s.id): s.id for s in review.symbols}
+    line_df = pd.DataFrame([{
+        "selected": c.id in seed_conns, "id": c.id, "ref": refs.get(c.id, ""),
+        "from": item_option(c.from_id), "to": item_option(c.to_id), "flow": FLOW_LABELS.get(c.flow, "unknown"),
+        "line_type": LINE_LABELS.get(c.line_type, c.line_type), "include": c.include, "found_by": found_by(c),
+        "notes": c.notes} for c in shown_conns],
+        columns=["selected", "id", "ref", "from", "to", "flow", "line_type", "include", "found_by", "notes"])
+    edited_lines = st.data_editor(
+        line_df, key=f"lines_{version}_{line_filter}", num_rows="dynamic", width="stretch", hide_index=True,
+        column_config={
+            "selected": st.column_config.CheckboxColumn("Select", width="small",
+                                                        help="Tick to select: highlighted on the map and opened in the panel"),
+            "id": None,
+            "ref": st.column_config.TextColumn("Ref", width="small", disabled=True),
+            "from": st.column_config.SelectboxColumn("From", options=options, help="Upstream end when the flow is known"),
+            "to": st.column_config.SelectboxColumn("To", options=options),
+            "flow": st.column_config.SelectboxColumn("Flow From -> To", options=list(FLOW_VALUES),
+                                                     help="How the direction is known. To reverse a pipe, swap From "
+                                                          "and To and pick 'set by you' (or use the panel's Reverse)."),
+            "line_type": st.column_config.SelectboxColumn("Line", options=list(LINE_LABELS.values())),
+            "include": st.column_config.CheckboxColumn("In DEXPI", width="small"),
+            "found_by": st.column_config.TextColumn("Found by", disabled=True),
+            "notes": st.column_config.TextColumn("Notes"),
+        },
+    )
 
 
 def apply_edits() -> ReviewDiagram:
-    """Fold the editor tables back into the ReviewDiagram (rows not shown when filtering
-    are kept unchanged; new rows become manual symbols/connections)."""
-    by_id = {s.id: s for s in review.symbols}
-    shown_ids = set(shown["id"])
-    new_symbols, n_manual = [], 0
-    for row in edited_syms.to_dict("records"):
-        sid = str(row.get("id") or "").strip()
-        if not sid:
-            n_manual += 1
-            sid = f"manual{len(review.symbols) + n_manual}"
-        base = by_id.get(sid) or ReviewSymbol(id=sid, source="manual", box=None, detected_as="manual",
-                                               identified_by="manual", tag_source="manual")
-        base.include = bool(row.get("include", True))
-        base.tag = str(row.get("tag") or "").strip()
-        base.dexpi_class = row.get("dexpi_class") or SKIP
-        base.notes = str(row.get("notes") or "")
-        base.attributes = _keep_specs(base.attributes, _instrument_attributes(base.dexpi_class, base.tag))
-        new_symbols.append(base)
-    kept = [s for s in review.symbols if s.id not in shown_ids]  # filtered-out rows, unchanged
-    review.symbols = kept + new_symbols
-    conns = []
-    for n, row in enumerate(edited_conns.to_dict("records")):
-        if not row.get("from_id") or not row.get("to_id"):
-            continue
-        conns.append(ReviewConnection(
-            id=str(row.get("id") or f"manual_c{n}"), from_id=row["from_id"], to_id=row["to_id"],
-            line_type=row.get("line_type") or "process", source=row.get("source") or "manual",
-            confidence=str(row.get("confidence") or ""), notes=str(row.get("notes") or ""),
-            include=bool(row.get("include", True)), flow=str(row.get("flow") or ""),
-        ))
-    review.connections = conns
+    """Fold the tables back into the review: shown rows are updated (or dropped if deleted),
+    rows hidden by a filter stay as they are, new rows become manual items/lines."""
+    shown_ids = {s.id for s in shown_syms}
+    rows = {str(r["id"]): r for r in edited_items.to_dict("records") if r.get("id")}
+    out = []
+    for s in review.symbols:
+        if s.id not in shown_ids:
+            out.append(s)
+        elif s.id in rows:
+            r = rows[s.id]
+            s.include = bool(r.get("include", True))
+            s.tag = str(r.get("tag") or "").strip()
+            s.dexpi_class = r.get("dexpi_class") or SKIP
+            s.notes = str(r.get("notes") or "")
+            s.attributes = _keep_specs(s.attributes, _instrument_attributes(s.dexpi_class, s.tag))
+            out.append(s)
+    for n, r in enumerate(x for x in edited_items.to_dict("records") if not x.get("id")):
+        sid = f"manual{len(review.symbols) + n + 1}"
+        out.append(ReviewSymbol(id=sid, source="manual", box=None, detected_as="manual", identified_by="added by you",
+                                tag_source="manual", tag=str(r.get("tag") or "").strip(),
+                                dexpi_class=r.get("dexpi_class") or SKIP, include=bool(r.get("include", True)),
+                                notes=str(r.get("notes") or "")))
+    review.symbols = out
+    shown_cids = {c.id for c in shown_conns}
+    crows = {str(r["id"]): r for r in edited_lines.to_dict("records") if r.get("id")}
+    outc = []
+    for c in review.connections:
+        if c.id not in shown_cids:
+            outc.append(c)
+        elif c.id in crows:
+            r = crows[c.id]
+            c.from_id = option_id.get(r.get("from"), c.from_id)
+            c.to_id = option_id.get(r.get("to"), c.to_id)
+            c.flow = FLOW_VALUES.get(r.get("flow"), "")
+            c.line_type = {v: k for k, v in LINE_LABELS.items()}.get(r.get("line_type"), c.line_type)
+            c.include = bool(r.get("include", True))
+            c.notes = str(r.get("notes") or "")
+            outc.append(c)
+    for n, r in enumerate(x for x in edited_lines.to_dict("records") if not x.get("id")):
+        a, b = option_id.get(r.get("from")), option_id.get(r.get("to"))
+        if a and b:
+            outc.append(ReviewConnection(id=f"manual_c{len(review.connections) + n + 1}", from_id=a, to_id=b,
+                                         line_type={v: k for k, v in LINE_LABELS.items()}.get(r.get("line_type"), "process"),
+                                         source="manual", flow=FLOW_VALUES.get(r.get("flow"), ""),
+                                         include=bool(r.get("include", True)), notes=str(r.get("notes") or "")))
+    review.connections = outc
     return review
 
 
-def _shown(df) -> set[str]:
-    return {str(r["id"]) for r in df.to_dict("records") if r.get("show") and r.get("id")}
+edited = apply_edits()
+by_sym = {s.id: s for s in review.symbols}
+show_syms = {str(r["id"]) for r in edited_items.to_dict("records") if r.get("selected") and r.get("id")}
+show_conns = {str(r["id"]) for r in edited_lines.to_dict("records") if r.get("selected") and r.get("id")}
+# rows a filter hides keep their selection
+show_syms |= {sid for sid in seed_syms if sid not in {s.id for s in shown_syms}}
+show_conns |= {cid for cid in seed_conns if cid not in {c.id for c in shown_conns}}
+st.session_state["current_show"] = (show_syms, show_conns)
 
-
-def select_from_map(click: dict) -> None:
-    """A click on the map: tick exactly the clicked line's / box's rows, move them to the top
-    of their table and re-create the editors (the edits so far are already in `review`)."""
-    syms = {click["sym"]} if click.get("sym") else set()
-    conns = set(click.get("rows") or [])
-    review.symbols.sort(key=lambda s: s.id not in syms)
-    review.connections.sort(key=lambda c: c.id not in conns)
-    st.session_state["seed_show"] = (syms, conns)
-    st.session_state["map_click_zoom"] = False  # the user is looking right at it: keep the view
-    st.session_state["editor_version"] += 1
-    st.rerun()
-
-
-with left:
-    edited = apply_edits()
-    show_syms, show_conns = _shown(edited_syms), _shown(edited_conns)
+# ------------------------------------------------------------------------------- map ---
+with map_col:
     zoom = st.session_state.pop("map_click_zoom", True)
     with st.spinner("Tracing pipes and flow directions..."):
-        maps = [(name, layers) for name, layers in (("Flow map", drawio_layers(edited)),
-                                                     ("Picture", picture_layers(edited))) if layers]
+        maps = [(name, layers) for name, layers in (("Drawing (draw.io)", drawio_layers(edited)),
+                                                     ("Picture (image)", picture_layers(edited))) if layers]
     containers = st.tabs([n for n, _ in maps]) if len(maps) > 1 else [st.container()] * len(maps)
     for tab, (name, layers) in zip(containers, maps):
         with tab:
-            result = map_component(data=map_markup(layers, show_conns, show_syms, zoom_to_highlight=zoom),
+            result = map_component(data=map_markup(layers, show_conns, show_syms, zoom_to_highlight=zoom,
+                                                   key=name, height=620,
+                                                   names="off" if name.startswith("Drawing") else "auto"),
                                    key=f"map_{name}", on_clicked_change=lambda: None)
             if result.clicked:
-                select_from_map(json.loads(result.clicked))
-            st.caption("Boxes: green = converted · red = needs review · grey = excluded. "
-                       + ("Pipes follow their drawn route; colour and arrowheads give the flow direction and how "
-                          "it is known. " if name == "Flow map" else "Lines join box centres (the model has no "
-                          "pipe routes). ")
-                       + "Click anything to select its row in the tables; tick 'show' in a table to find it here.")
+                click = json.loads(result.clicked)
+                select({click["sym"]} if click.get("sym") else (), click.get("rows") or ())
+                st.rerun()
     if not maps:
-        st.info("No picture to show - upload an image, or a draw.io file with the draw.io app installed "
+        st.info("No picture to show - upload an image, or a draw.io file (with the draw.io app installed) "
                 "for the flow map.")
+    st.caption("Boxes: green = in DEXPI · red = to check · grey = left out · dashed orange = found only in the "
+               "picture. Pipe colour = how its flow direction is known (chips above the map).")
+
+# ---------------------------------------------------------------------- edit panel ---
+def _set_item(sid: str, field: str, key: str) -> None:
+    s = by_sym[sid]
+    setattr(s, field, st.session_state[key])
+    if field in ("tag", "dexpi_class"):
+        s.attributes = _keep_specs(s.attributes, _instrument_attributes(s.dexpi_class, s.tag))
+    refresh_tables()
+
+
+def _set_line(cid: str, field: str, key: str) -> None:
+    c = next(x for x in review.connections if x.id == cid)
+    v = st.session_state[key]
+    if field in ("from_id", "to_id"):
+        v = option_id.get(v, getattr(c, field))
+    elif field == "flow":
+        v = FLOW_VALUES.get(v, "")
+    elif field == "line_type":
+        v = {b: a for a, b in LINE_LABELS.items()}.get(v, c.line_type)
+    setattr(c, field, v)
+    refresh_tables()
+
+
+def _reverse(cid: str) -> None:
+    c = next(x for x in review.connections if x.id == cid)
+    c.from_id, c.to_id, c.flow = c.to_id, c.from_id, "reviewer"
+    refresh_tables()
+
+
+def _set_lines(cids: list, include: bool) -> None:
+    for c in review.connections:
+        if c.id in cids:
+            c.include = include
+    refresh_tables()
+
+
+with panel_col:
+    st.html('<span class="edit-panel"></span>')
+    with st.container(border=True):
+        k = f"{version}"
+        sel_items = [by_sym[i] for i in show_syms if i in by_sym]
+        sel_lines = [c for c in review.connections if c.id in show_conns]
+        if not sel_items and not sel_lines:
+            st.markdown("**Nothing selected**")
+            st.caption("Click an item or a line on the map to see and edit it here. "
+                       "Hover anything on the map for a quick description.")
+        elif len(sel_items) == 1 and not sel_lines:
+            s = sel_items[0]
+            st.markdown(f"**Item: {item_name(s.id)}** &nbsp; `{refs[s.id]}`")
+            st.caption(f"{found_as(s)} · status: {status(s)}")
+            st.text_input("Tag", s.tag, key=f"tag_{s.id}_{k}", on_change=_set_item, args=(s.id, "tag", f"tag_{s.id}_{k}"))
+            st.selectbox("DEXPI type", DEXPI_CLASS_CHOICES,
+                         index=DEXPI_CLASS_CHOICES.index(s.dexpi_class) if s.dexpi_class in DEXPI_CLASS_CHOICES else 0,
+                         key=f"cls_{s.id}_{k}", on_change=_set_item, args=(s.id, "dexpi_class", f"cls_{s.id}_{k}"))
+            st.toggle("In DEXPI", s.include, key=f"inc_{s.id}_{k}", on_change=_set_item,
+                      args=(s.id, "include", f"inc_{s.id}_{k}"))
+            st.text_input("Notes", s.notes, key=f"note_{s.id}_{k}", on_change=_set_item,
+                          args=(s.id, "notes", f"note_{s.id}_{k}"))
+            facts = [("How the type was chosen", s.identified_by), ("Picture check", s.image_check),
+                     ("Specs from the drawing", (s.attributes or {}).get("specs", ""))]
+            for label, value in facts:
+                if value:
+                    st.caption(f"**{label}:** {value}")
+            mine = [c for c in review.connections if s.id in (c.from_id, c.to_id) and c.include]
+            if mine:
+                st.markdown(f"**Connected to** ({len(mine)}) - click to open the line")
+                for c in mine[:12]:
+                    other = c.to_id if c.from_id == s.id else c.from_id
+                    arrow = ("→" if c.from_id == s.id else "←") if c.flow in FLOW_KNOWN else "–"
+                    if st.button(f"{arrow} {item_name(other)} · {LINE_LABELS.get(c.line_type, c.line_type)}",
+                                 key=f"go_{c.id}_{k}", type="tertiary"):
+                        select((), {c.id}, zoom=True)
+                        st.rerun()
+        elif len(sel_lines) == 1 and not sel_items:
+            c = sel_lines[0]
+            st.markdown(f"**Line: {item_name(c.from_id)} → {item_name(c.to_id)}** &nbsp; `{refs.get(c.id, '')}`")
+            st.caption(f"{LINE_LABELS.get(c.line_type, c.line_type)} · {found_by(c)}")
+            st.selectbox("From", options, index=options.index(item_option(c.from_id)) if item_option(c.from_id) in options else 0,
+                         key=f"from_{c.id}_{k}", on_change=_set_line, args=(c.id, "from_id", f"from_{c.id}_{k}"))
+            st.selectbox("To", options, index=options.index(item_option(c.to_id)) if item_option(c.to_id) in options else 0,
+                         key=f"to_{c.id}_{k}", on_change=_set_line, args=(c.id, "to_id", f"to_{c.id}_{k}"))
+            flows = list(FLOW_VALUES)
+            st.selectbox("Flow From → To", flows, index=flows.index(FLOW_LABELS.get(c.flow, "unknown")),
+                         key=f"flow_{c.id}_{k}", on_change=_set_line, args=(c.id, "flow", f"flow_{c.id}_{k}"))
+            st.button("⇄ Reverse direction", key=f"rev_{c.id}_{k}", on_click=_reverse, args=(c.id,), width="stretch")
+            types = list(LINE_LABELS.values())
+            st.selectbox("Line", types, index=types.index(LINE_LABELS.get(c.line_type, "process pipe")),
+                         key=f"lt_{c.id}_{k}", on_change=_set_line, args=(c.id, "line_type", f"lt_{c.id}_{k}"))
+            st.toggle("In DEXPI", c.include, key=f"cinc_{c.id}_{k}", on_change=_set_line,
+                      args=(c.id, "include", f"cinc_{c.id}_{k}"))
+            st.text_input("Notes", c.notes, key=f"cnote_{c.id}_{k}", on_change=_set_line,
+                          args=(c.id, "notes", f"cnote_{c.id}_{k}"))
+            for end in (c.from_id, c.to_id):
+                if st.button(f"Go to {item_name(end)} ›", key=f"end_{c.id}_{end}_{k}", type="tertiary"):
+                    select({end}, (), zoom=True)
+                    st.rerun()
+        else:
+            ends = sorted({e for c in sel_lines for e in (c.from_id, c.to_id)} | {s.id for s in sel_items})
+            if sel_lines and not sel_items and all(c.id.startswith("net") for c in sel_lines):
+                st.markdown(f"**Pipe network joining {len(ends)} items**")
+                st.caption("Lines that meet at tees. Every pair of its ends is a line in the table.")
+            else:
+                st.markdown(f"**{len(sel_items)} items and {len(sel_lines)} lines selected**")
+            st.caption(", ".join(item_name(e) for e in ends[:20]))
+            if sel_lines:
+                inc = all(c.include for c in sel_lines)
+                st.toggle("In DEXPI", inc, key=f"ninc_{k}", on_change=lambda ids=[c.id for c in sel_lines]:
+                          _set_lines(ids, st.session_state[f"ninc_{k}"]))
+            for e in ends[:12]:
+                if st.button(f"Go to {item_name(e)} ›", key=f"nend_{e}_{k}", type="tertiary"):
+                    select({e}, (), zoom=True)
+                    st.rerun()
+        st.divider()
+        b1, b2 = st.columns(2)
+        to_check = [s for s in review.symbols if status(s) == "needs review"]
+        current = next(iter(show_syms), None)
+        after = [s for s in to_check if s.id != current]
+        if b1.button(f"Next to check ▸ ({len(to_check)})", disabled=not to_check, width="stretch",
+                     help="Selects the next item marked red, and zooms to it"):
+            ids = [s.id for s in to_check]
+            nxt = ids[(ids.index(current) + 1) % len(ids)] if current in ids else ids[0]
+            select({nxt}, (), zoom=True)
+            st.rerun()
+        if b2.button("Clear selection", disabled=not (show_syms or show_conns), width="stretch"):
+            select()
+            st.rerun()
+
     if review.unattached_tags:
-        with st.expander(f"OCR tags not attached to any symbol ({len(review.unattached_tags)}) - "
-                         "possible missed symbols"):
-            st.dataframe(pd.DataFrame(review.unattached_tags), width="stretch", hide_index=True)
+        with st.expander(f"OCR tags not on any item ({len(review.unattached_tags)})"):
+            st.caption("Text the OCR read that no item claimed - possibly a missed symbol.")
+            st.dataframe(pd.DataFrame(review.unattached_tags)[["tag", "conf"]], width="stretch", hide_index=True)
+
 
 # ---------------------------------------------------------------------------- build ---
-st.divider()
+st.markdown("##### 3 · Build the DEXPI file")
 b1, b2 = st.columns([1, 1])
 with b2:
     st.download_button("Save review (.json) to continue later", review_to_json(review),
@@ -473,10 +715,21 @@ with b1:
 if build_clicked:
     problems = validate_rows(review)
     if problems:
-        st.error("Fix these before building:")
-        for p in problems:
-            st.write(f"- {p}")
-        st.stop()
+        st.session_state["build_problems"] = problems
+    else:
+        st.session_state.pop("build_problems", None)
+problems = st.session_state.get("build_problems")
+if problems:
+    st.error("Fix these before building (or untick 'In DEXPI' for the item):")
+    for n, p in enumerate(problems):
+        sid = next((s.id for s in review.symbols if p.startswith(f"{s.id}:")), None)
+        c1, c2 = st.columns([5, 1])
+        c1.write(f"- {item_option(sid)}: {p.split(':', 1)[1].strip()}" if sid else f"- {p}")
+        if sid and c2.button("Show on map", key=f"prob_{n}"):
+            select({sid}, (), zoom=True)
+            st.rerun()
+    build_clicked = False
+if build_clicked:
     with tempfile.TemporaryDirectory() as tmp:
         diagram, result = to_dexpi(review)
         stem = Path(review.source_name).stem

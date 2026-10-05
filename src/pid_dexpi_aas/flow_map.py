@@ -57,6 +57,7 @@ class Line:
     dots: list = field(default_factory=list)  # tee points
     guessed: list = field(default_factory=list)  # (line end, symbol edge) jumps
     ends: tuple = ()  # symbol ids at its ends (highlighted with the line)
+    kind: str = "pipe"  # pipe | signal | tap | excluded | compartment - the map toolbar toggles each
 
 
 @dataclass
@@ -68,6 +69,7 @@ class Box:
     width: int = 3
     tip: str = ""
     dashed: bool = False  # not from the drawing: a model-only detection or an OCR-read tag
+    kind: str = "item"  # item | model | ocr - the map toolbar toggles each
 
 
 @dataclass
@@ -77,7 +79,7 @@ class Layers:
     lines: list
     boxes: list
     stats: dict
-    legend: list  # (text, colour)
+    legend: list  # (text, colour, kind the map toolbar can hide | None)
 
 
 def font(size: int):
@@ -180,7 +182,7 @@ def build_layers(diagram: ParsedDiagram, drawio_path: str | Path, boxes: list | 
             if e.source in pbox and e.target in pbox:
                 lines.append(Line([ctr(pbox[e.source]), ctr(pbox[e.target])], COMPARTMENT, 5, {e.id},
                                   f"{name(e.source)} | {name(e.target)}: compartments sharing a wall",
-                                  ends=(e.source, e.target)))
+                                  ends=(e.source, e.target), kind="compartment"))
             continue
         r = routes.get(e.id)
         if e.is_decorative or not r or len(r) < 2:
@@ -196,15 +198,17 @@ def build_layers(diagram: ParsedDiagram, drawio_path: str | Path, boxes: list | 
             line_ends = tuple(x for x in (e.source, e.target) if x)
         include, flow, basis = overrides.get(e.id, (True, e.flow, e.flow_basis if e.flow else ""))
         if not include:
-            lines.append(Line(pts, EXCLUDED, 3, rows, f"{what}: excluded by the reviewer", dashed=True, ends=line_ends))
+            lines.append(Line(pts, EXCLUDED, 3, rows, f"{what}: left out of DEXPI", dashed=True, ends=line_ends,
+                              kind="excluded"))
             stats["excluded"] += 1
             continue
         if e.is_dashed:
-            lines.append(Line(pts, SIGNAL, 3, rows, f"{what}: signal line", dashed=True, ends=line_ends))
+            lines.append(Line(pts, SIGNAL, 3, rows, f"{what}: signal line", dashed=True, ends=line_ends, kind="signal"))
             stats["signal"] += 1
             continue
         if not flow and (e.source in instruments or e.target in instruments):
-            lines.append(Line(pts, TAP, 3, rows, f"{what}: instrument on the pipe (no process flow)", ends=line_ends))
+            lines.append(Line(pts, TAP, 3, rows, f"{what}: instrument on the pipe (no process flow)", ends=line_ends,
+                              kind="tap"))
             stats["tap"] += 1
             continue
         basis = basis if flow else ""
@@ -238,20 +242,21 @@ def build_layers(diagram: ParsedDiagram, drawio_path: str | Path, boxes: list | 
     for b in boxes:
         if isinstance(b, Box):
             out_boxes.append(Box(b.id, (b.box[0] + dx, b.box[1] + dy, b.box[2] + dx, b.box[3] + dy),
-                                 b.color, b.label, b.width, b.tip, b.dashed))
+                                 b.color, b.label, b.width, b.tip, b.dashed, b.kind))
         else:
             sid, (x1, y1, x2, y2), color, label, width = b
             out_boxes.append(Box(sid, (x1 + dx, y1 + dy, x2 + dx, y2 + dy), color, label, width, label))
-    legend = [(f"flow from an arrow drawn on the line ({stats['arrow']})", FLOW_COLORS["arrow"]),
-              (f"flow implied by neighbouring arrows ({stats['implied']})", FLOW_COLORS["implied"]),
-              (f"flow direction unknown ({stats['']})", FLOW_COLORS[""]),
-              (f"signal line ({stats['signal']})", SIGNAL),
-              (f"instrument tap, no process flow ({stats['tap']})", TAP), ("tee", (0, 0, 0)),
-              ("guessed line end", GUESSED), ("compartments sharing a wall", COMPARTMENT)]
+    legend = [(f"flow from an arrow drawn on the line ({stats['arrow']})", FLOW_COLORS["arrow"], None),
+              (f"flow implied by neighbouring arrows ({stats['implied']})", FLOW_COLORS["implied"], None),
+              (f"flow direction unknown ({stats['']})", FLOW_COLORS[""], None),
+              (f"signal line ({stats['signal']})", SIGNAL, "signal"),
+              (f"instrument on a pipe ({stats['tap']})", TAP, "tap"),
+              ("tee", (0, 0, 0), None), ("guessed line end", GUESSED, None),
+              ("compartments sharing a wall", COMPARTMENT, "compartment")]
     if stats["reviewer"]:
-        legend.insert(2, (f"direction set by the reviewer ({stats['reviewer']})", FLOW_COLORS["reviewer"]))
+        legend.insert(2, (f"direction set by you ({stats['reviewer']})", FLOW_COLORS["reviewer"], None))
     if stats["excluded"]:
-        legend.append((f"excluded by the reviewer ({stats['excluded']})", EXCLUDED))
+        legend.append((f"left out of DEXPI ({stats['excluded']})", EXCLUDED, "excluded"))
     return Layers(Path(png), size, lines, out_boxes, stats, legend)
 
 
@@ -269,11 +274,11 @@ def image_layers(image_path: str | Path, connections: list, boxes: list[Box]) ->
         n[key] = n.get(key, 0) + 1
         color = EXCLUDED if not include else SIGNAL if kind == "signal" else MODEL_LINE
         lines.append(Line([centre[a], centre[b]], color, 3, {rid}, tip, dashed=kind == "signal" or not include,
-                          ends=(a, b)))
-    legend = [(f"predicted pipe, centre to centre ({n['process']})", MODEL_LINE),
-              (f"predicted signal line ({n['signal']})", SIGNAL)]
+                          ends=(a, b), kind="excluded" if not include else "signal" if kind == "signal" else "pipe"))
+    legend = [(f"predicted pipe, centre to centre ({n['process']})", MODEL_LINE, None),
+              (f"predicted signal line ({n['signal']})", SIGNAL, "signal")]
     if n["excluded"]:
-        legend.append((f"excluded by the reviewer ({n['excluded']})", EXCLUDED))
+        legend.append((f"left out of DEXPI ({n['excluded']})", EXCLUDED, "excluded"))
     return Layers(Path(image_path), size, lines, boxes, n, legend)
 
 
@@ -314,7 +319,7 @@ def rasterize(layers: Layers, max_side: int | None = 3200) -> Image.Image:
         if b.label:
             d.text((x1, y1 - 24), b.label, fill=b.color, font=f)
     lx, ly = 10, 10
-    for name, c in layers.legend:
+    for name, c, *_ in layers.legend:
         w = 50 + 11 * len(name)
         if lx + w > im.width:
             lx, ly = 10, ly + 28
@@ -341,133 +346,211 @@ def _rgb(c, a=None):
 
 
 def map_markup(layers: Layers, highlight_rows: set | None = None, highlight_symbols: set | None = None,
-               zoom_to_highlight: bool = True) -> dict:
-    """The interactive map's content for MAP_JS (st.components.v2): {"html", "view", "full"}.
-    Every line and box carries its review-table rows (data-rows / data-sym), so a click can
-    select them; highlighted rows are drawn in magenta, everything else fades, and the view
-    starts zoomed to them (zoom_to_highlight)."""
+               zoom_to_highlight: bool = True, key: str = "map", height: int = 720,
+               names: str = "auto") -> dict:
+    """The interactive map's content for MAP_JS (st.components.v2): {"html", "view", "full", "key"}.
+
+    Every line and box carries its review-table rows (data-rows / data-sym) so a click can
+    select them, and a kind (k-pipe, k-signal, k-model, ...) the toolbar can hide. Selected
+    rows are drawn in magenta, the rest fades, and the view starts zoomed to them
+    (zoom_to_highlight). Names are drawn with a white halo; `names` is the toolbar's starting
+    choice: "auto" (once zoomed in far enough to read them), "on" or "off" - "off" suits a
+    draw.io drawing, which prints its own names. Selected items are always named. Line
+    widths stay constant on screen at any zoom."""
     hr, hs = set(highlight_rows or ()), set(highlight_symbols or ())
     lit_lines = [ln for ln in layers.lines if ln.rows & hr]
-    hs |= {s for ln in lit_lines for s in ln.ends}  # a highlighted connection lights its ends too
+    hs |= {s for ln in lit_lines for s in ln.ends}  # a selected connection lights its ends too
     any_lit = bool(lit_lines or hs)
     W, H = layers.size
     mime = "image/jpeg" if layers.background.suffix.lower() in (".jpg", ".jpeg") else "image/png"
     bg = base64.b64encode(layers.background.read_bytes()).decode()
     parts = [f'<image href="data:{mime};base64,{bg}" x="0" y="0" width="{W}" height="{H}"/>',
-             f'<rect class="bg" x="0" y="0" width="{W}" height="{H}" fill="white" opacity="0.6"/>']
+             f'<rect x="0" y="0" width="{W}" height="{H}" fill="white" opacity="0.55"/>']
+    NS = ' vector-effect="non-scaling-stroke"'
 
-    def line_svg(ln: Line, color=None, width=None):
+    def label_svg(x, y, text, col, size=20, cls="lbl"):
+        return (f'<text class="{cls}" x="{x:.1f}" y="{y:.1f}" fill="{col}" font-size="{size}" font-weight="600" '
+                f'paint-order="stroke" stroke="white" stroke-width="5" stroke-linejoin="round">{html.escape(text)}</text>')
+
+    def line_svg(ln: Line, color=None, width=None, lit=False):
         col = _rgb(color or ln.color)
         pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in ln.points)
-        dash = ' stroke-dasharray="14 10"' if ln.dashed else ""
-        out = [f'<polyline class="vis" points="{pts}" fill="none" stroke="{col}" stroke-width="{width or ln.width}" '
-               f'stroke-linejoin="round"{dash}/>',
+        dash = ' stroke-dasharray="7 5"' if ln.dashed else ""
+        w = width or max(1.5, ln.width * 0.5)
+        out = [f'<polyline class="vis" points="{pts}" fill="none" stroke="{col}" stroke-width="{w}" '
+               f'stroke-linejoin="round"{dash}{NS}/>',
                # a wide transparent copy, so the line is easy to hover and click
-               f'<polyline points="{pts}" fill="none" stroke="transparent" stroke-width="18"/>']
+               f'<polyline points="{pts}" fill="none" stroke="transparent" stroke-width="14"{NS}/>']
         for a, b in ln.guessed:
             out.append(f'<line x1="{a[0]:.1f}" y1="{a[1]:.1f}" x2="{b[0]:.1f}" y2="{b[1]:.1f}" '
-                       f'stroke="{_rgb(GUESSED)}" stroke-width="3" stroke-dasharray="6 6"/>')
+                       f'stroke="{_rgb(GUESSED)}" stroke-width="2" stroke-dasharray="4 4"{NS}/>')
         for x, y in ln.dots:
-            out.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="8" fill="black"/>')
+            out.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="6" fill="black"/>')
         for tip, u in ln.arrows:
-            poly = " ".join(f"{x:.1f},{y:.1f}" for x, y in _arrow_polygon(tip, u, 22 if width else 16))
+            poly = " ".join(f"{x:.1f},{y:.1f}" for x, y in _arrow_polygon(tip, u, 20 if lit else 15))
             out.append(f'<polygon points="{poly}" fill="{col}"/>')
-        if ln.word and not width:
+        if ln.word and not lit:
             x, y = ln.word[1]
-            out.append(f'<text x="{x:.1f}" y="{y + 14:.1f}" fill="{col}" font-size="17" font-weight="bold">'
-                       f'{html.escape(ln.word[0])}</text>')
+            out.append(label_svg(x, y + 14, ln.word[0], col, 15, "word"))
         rows = "|".join(sorted(ln.rows))
-        tip = html.escape(ln.tip + (f"  [click: select row {', '.join(sorted(ln.rows))}]" if ln.rows else ""))
-        return f'<g class="item" data-rows="{html.escape(rows)}"><title>{tip}</title>{"".join(out)}</g>'
+        tip = html.escape(ln.tip + ("  (click to select)" if ln.rows else ""))
+        return f'<g class="item k-{ln.kind}" data-rows="{html.escape(rows)}"><title>{tip}</title>{"".join(out)}</g>'
 
-    def box_svg(b: Box, color=None, width=None):
+    def box_svg(b: Box, color=None, width=None, lit=False):
         x1, y1, x2, y2 = b.box
         col = _rgb(color or b.color)
-        lab = (f'<text x="{x1:.1f}" y="{y1 - 6:.1f}" fill="{col}" font-size="20" font-weight="bold">'
-               f'{html.escape(b.label)}</text>') if b.label else ""
-        tip = html.escape(f"{b.tip or b.label or b.id}" + (f"  [click: select row {b.id}]" if b.id else ""))
-        dash = ' stroke-dasharray="8 6"' if b.dashed else ""
-        return (f'<g class="item" data-sym="{html.escape(b.id)}"><title>{tip}</title>'
+        dash = ' stroke-dasharray="6 4"' if b.dashed else ""
+        lab = label_svg(x1, y1 - 7, b.label, col, 22 if lit else 19, "lbl lit" if lit else "lbl") if b.label else ""
+        tip = html.escape(f"{b.tip or b.label or b.id}" + ("  (click to select)" if b.id else ""))
+        return (f'<g class="item k-{b.kind}" data-sym="{html.escape(b.id)}"><title>{tip}</title>'
                 f'<rect class="vis" x="{x1:.1f}" y="{y1:.1f}" width="{x2 - x1:.1f}" height="{y2 - y1:.1f}" '
-                f'fill="rgba(255,255,255,0.01)" stroke="{col}" stroke-width="{width or b.width}"{dash}/>{lab}</g>')
+                f'fill="rgba(255,255,255,0.01)" stroke="{col}" stroke-width="{width or 2}"{dash}{NS}/>{lab}</g>')
 
-    dim = ' opacity="0.3"' if any_lit else ""
+    dim = ' class="dim"' if any_lit else ""
     # boxes under lines: a line crossing a box stays clickable
     parts.append(f"<g{dim}>" + "".join(box_svg(b) for b in layers.boxes if b.id not in hs) +
                  "".join(line_svg(ln) for ln in layers.lines if not (ln.rows & hr)) + "</g>")
-    glow = _rgb(HIGHLIGHT, 0.35)
+    glow = _rgb(HIGHLIGHT, 0.3)
+    for ln in lit_lines:  # selected on top: a wide glow, then the line in magenta
+        pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in ln.points)
+        parts.append(f'<polyline points="{pts}" fill="none" stroke="{glow}" stroke-width="14" '
+                     f'stroke-linejoin="round"{NS}/>')
+        parts.append(line_svg(ln, HIGHLIGHT, 4, lit=True))
     for b in layers.boxes:
         if b.id in hs:
             x1, y1, x2, y2 = b.box
-            parts.append(f'<rect x="{x1 - 8:.1f}" y="{y1 - 8:.1f}" width="{x2 - x1 + 16:.1f}" height="{y2 - y1 + 16:.1f}" '
-                         f'fill="{_rgb(HIGHLIGHT, 0.12)}" stroke="{glow}" stroke-width="12"/>')
-            parts.append(box_svg(b, HIGHLIGHT, 6))
-    for ln in lit_lines:  # highlighted on top: a wide glow, then the line in magenta
-        pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in ln.points)
-        parts.append(f'<polyline points="{pts}" fill="none" stroke="{glow}" stroke-width="22" stroke-linejoin="round"/>')
-        parts.append(line_svg(ln, HIGHLIGHT, 7))
+            parts.append(f'<rect x="{x1 - 6:.1f}" y="{y1 - 6:.1f}" width="{x2 - x1 + 12:.1f}" height="{y2 - y1 + 12:.1f}" '
+                         f'fill="{_rgb(HIGHLIGHT, 0.1)}" stroke="{glow}" stroke-width="10"{NS}/>')
+            parts.append(box_svg(b, HIGHLIGHT, 3.5, lit=True))
 
     full = [0, 0, W, H]
     view = None  # None: keep the user's current zoom
-    if any_lit and zoom_to_highlight:
+    focus = None  # what +/- zoom towards: the selection
+    if any_lit:
         xs = [x for ln in lit_lines for x, _ in ln.points] + [v for b in layers.boxes if b.id in hs for v in (b.box[0], b.box[2])]
         ys = [y for ln in lit_lines for _, y in ln.points] + [v for b in layers.boxes if b.id in hs for v in (b.box[1], b.box[3])]
         x1, x2, y1, y2 = min(xs), max(xs), min(ys), max(ys)
-        w, h = max(x2 - x1, 700), max(y2 - y1, 450)
         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-        view = [cx - w * 0.65, cy - h * 0.65, w * 1.3, h * 1.3]
-    legend = "".join(f'<span class="lg" style="color:{_rgb(c)}"><b style="background:{_rgb(c)}"></b> '
-                     f'{html.escape(t)}</span>' for t, c in layers.legend)
-    note = ("Magenta = selected rows (the 'show' column). " if any_lit else "") + \
-        "Click a line or box to select its table row · click empty space to clear · hover for what it is · " \
-        "scroll to zoom · drag to pan · double-click: whole sheet"
-    markup = (f'<div class="legend">{legend}</div><div class="note">{note}</div>'
+        focus = [cx, cy]
+        if zoom_to_highlight:
+            w, h = max(x2 - x1, 700), max(y2 - y1, 450)
+            view = [cx - w * 0.65, cy - h * 0.65, w * 1.3, h * 1.3]
+
+    chips = []
+    for text, c, kind in layers.legend:
+        sw = f'<i style="background:{_rgb(c)}"></i>'
+        if kind:  # a layer the toolbar can hide
+            chips.append(f'<button class="chip" data-kind="{kind}" title="Show / hide">{sw}{html.escape(text)}</button>')
+        else:
+            chips.append(f'<span class="chip static">{sw}{html.escape(text)}</span>')
+    toolbar = (
+        '<div class="bar">'
+        '<button data-act="in" title="Zoom in (or scroll on the map)">+</button>'
+        '<button data-act="out" title="Zoom out">&minus;</button>'
+        '<button data-act="fit" title="Show the whole sheet">Fit</button>'
+        '<span class="sep"></span>'
+        '<label title="Names of items: shown when zoomed in far enough to read them">Names '
+        '<select data-opt="labels"><option value="auto">when zoomed in</option><option value="on">always</option>'
+        '<option value="off">never</option></select></label>'
+        '<label title="The words \'arrow\' / \'implied\' / \'?\' next to each pipe">'
+        '<input type="checkbox" data-opt="words"> Flow words</label>'
+        '<span class="hint">Scroll to zoom · drag to move · click an item or line to select it</span>'
+        '</div>'
+        f'<div class="chips">{"".join(chips)}</div>')
+    markup = (f'{toolbar}<div class="frame" style="height:{height}px">'
               f'<svg class="map" viewBox="{" ".join(map(str, view or full))}" preserveAspectRatio="xMidYMid meet">'
-              f'{"".join(parts)}</svg>')
-    return {"html": markup, "view": view, "full": full}
+              f'{"".join(parts)}</svg></div>')
+    return {"html": markup, "view": view, "full": full, "key": key, "focus": focus, "names": names}
 
 
 MAP_CSS = """
-.legend{font:12px sans-serif;line-height:20px;padding:4px 6px;color:#333}
-.lg{white-space:nowrap;margin-right:14px}
-.lg b{display:inline-block;width:22px;height:4px;vertical-align:middle}
-.note{font:12px sans-serif;color:#666;padding:0 6px 4px}
-svg.map{width:100%;height:640px;border:1px solid #ddd;cursor:grab;background:#fff;display:block}
+.bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font:13px sans-serif;color:#333;padding:2px 0 6px}
+.bar button{min-width:34px;height:30px;border:1px solid #ccc;border-radius:6px;background:#fff;font:600 15px sans-serif;cursor:pointer}
+.bar button:hover{background:#f2f2f2}
+.bar label{display:flex;align-items:center;gap:4px}
+.bar select{height:28px;border:1px solid #ccc;border-radius:6px;background:#fff}
+.bar .sep{width:1px;height:22px;background:#ddd;margin:0 4px}
+.bar .hint{color:#888;margin-left:auto;font-size:12px}
+.chips{display:flex;flex-wrap:wrap;gap:4px 6px;padding:0 0 6px;font:12px sans-serif}
+.chip{display:inline-flex;align-items:center;gap:5px;border:1px solid #ddd;border-radius:12px;padding:2px 8px;background:#fff;color:#333;font:12px sans-serif}
+.chip i{display:inline-block;width:16px;height:4px;border-radius:2px}
+button.chip{cursor:pointer}
+button.chip.off{opacity:.4;text-decoration:line-through}
+.frame{border:1px solid #ddd;border-radius:6px;overflow:hidden;background:#fff}
+svg.map{width:100%;height:100%;display:block;cursor:grab;user-select:none}
+svg.map.dragging{cursor:grabbing}
 .item{cursor:pointer}
-.item:hover .vis{filter:drop-shadow(0 0 5px #e600c8)}
+.item:hover .vis{filter:drop-shadow(0 0 4px #e600c8)}
+.dim{opacity:.45}
+svg.map.nolabels .lbl:not(.lit){display:none}
+svg.map.nowords .word{display:none}
 """
 
-# Zoom (wheel), pan (drag), whole sheet (double-click); a click that did not drag selects
-# the clicked line's or box's rows (trigger "clicked"), or clears on empty space. The
-# user's zoom survives re-renders unless Python sends a view to zoom to.
+# Toolbar (zoom, fit, names, flow words, layer chips), wheel zoom, drag to pan, and
+# click-to-select (trigger "clicked") - a click that dragged does not select. View and
+# toolbar settings survive re-renders per map (key); Python sends a view only to zoom to a
+# selection made in the tables.
 MAP_JS = """
-let savedView = null;
+const memory = {};
 export default function (component) {
   const { data, setTriggerValue, parentElement } = component;
+  const mem = memory[data.key] || (memory[data.key] = { view: null, hidden: [], labels: data.names || 'auto', words: false });
   let root = parentElement.querySelector('.mapwrap');
   if (!root) { root = document.createElement('div'); root.className = 'mapwrap'; parentElement.appendChild(root); }
   root.innerHTML = data.html;
   const s = root.querySelector('svg.map');
-  let vb = (data.view || savedView || data.full).slice();
-  const set = () => { s.setAttribute('viewBox', vb.join(' ')); savedView = vb.slice(); };
-  set();
+  let vb = (data.view || mem.view || data.full).slice();
+  const applyLod = () => {
+    const pxPerUnit = s.clientWidth / vb[2];
+    const show = mem.labels === 'on' || (mem.labels === 'auto' && pxPerUnit > 0.4);
+    s.classList.toggle('nolabels', !show);
+    s.classList.toggle('nowords', !mem.words);
+  };
+  const set = () => { s.setAttribute('viewBox', vb.join(' ')); mem.view = vb.slice(); applyLod(); };
+  const zoomAt = (k, px, py) => { vb = [px - (px - vb[0]) * k, py - (py - vb[1]) * k, vb[2] * k, vb[3] * k]; set(); };
+  const centre = () => data.focus || [vb[0] + vb[2] / 2, vb[1] + vb[3] / 2];
+  // layers
+  const applyHidden = () => {
+    root.querySelectorAll('button.chip').forEach((b) => b.classList.toggle('off', mem.hidden.includes(b.dataset.kind)));
+    s.querySelectorAll('.item').forEach((g) => {
+      const k = [...g.classList].find((c) => c.startsWith('k-'));
+      g.style.display = k && mem.hidden.includes(k.slice(2)) ? 'none' : '';
+    });
+  };
+  root.querySelectorAll('button.chip').forEach((b) => b.addEventListener('click', () => {
+    const k = b.dataset.kind;
+    mem.hidden = mem.hidden.includes(k) ? mem.hidden.filter((x) => x !== k) : mem.hidden.concat([k]);
+    applyHidden();
+  }));
+  // +/-: zoom towards the selection (centred on it), else around the middle of the view
+  const zoomBtn = (k) => { const [cx, cy] = centre(); vb = [cx - vb[2] * k / 2, cy - vb[3] * k / 2, vb[2] * k, vb[3] * k]; set(); };
+  root.querySelector('[data-act=in]').onclick = () => zoomBtn(1 / 1.4);
+  root.querySelector('[data-act=out]').onclick = () => zoomBtn(1.4);
+  root.querySelector('[data-act=fit]').onclick = () => { vb = data.full.slice(); set(); };
+  const sel = root.querySelector('[data-opt=labels]'); sel.value = mem.labels;
+  sel.onchange = () => { mem.labels = sel.value; applyLod(); };
+  const words = root.querySelector('[data-opt=words]'); words.checked = mem.words;
+  words.onchange = () => { mem.words = words.checked; applyLod(); };
+  // wheel zoom, drag pan, click select
   s.addEventListener('wheel', (e) => {
     e.preventDefault();
-    const r = s.getBoundingClientRect(), k = e.deltaY > 0 ? 1.15 : 1 / 1.15;
-    const px = vb[0] + (e.clientX - r.left) / r.width * vb[2], py = vb[1] + (e.clientY - r.top) / r.height * vb[3];
-    vb = [px - (px - vb[0]) * k, py - (py - vb[1]) * k, vb[2] * k, vb[3] * k]; set();
+    const r = s.getBoundingClientRect();
+    // the viewBox is letterboxed (meet): map the cursor through the scale actually used
+    const sc = Math.max(vb[2] / r.width, vb[3] / r.height);
+    const ox = vb[0] + vb[2] / 2 - (r.width / 2) * sc, oy = vb[1] + vb[3] / 2 - (r.height / 2) * sc;
+    zoomAt(e.deltaY > 0 ? 1.15 : 1 / 1.15, ox + (e.clientX - r.left) * sc, oy + (e.clientY - r.top) * sc);
   }, { passive: false });
   let drag = null, moved = false;
   s.addEventListener('mousedown', (e) => { drag = [e.clientX, e.clientY, vb[0], vb[1]]; moved = false; });
   s.addEventListener('mousemove', (e) => {
     if (!drag) return;
-    if (Math.abs(e.clientX - drag[0]) + Math.abs(e.clientY - drag[1]) > 4) moved = true;
-    const r = s.getBoundingClientRect();
-    vb[0] = drag[2] - (e.clientX - drag[0]) / r.width * vb[2];
-    vb[1] = drag[3] - (e.clientY - drag[1]) / r.height * vb[3]; set();
+    if (Math.abs(e.clientX - drag[0]) + Math.abs(e.clientY - drag[1]) > 4) { moved = true; s.classList.add('dragging'); }
+    const r = s.getBoundingClientRect(), sc = Math.max(vb[2] / r.width, vb[3] / r.height);
+    vb[0] = drag[2] - (e.clientX - drag[0]) * sc;
+    vb[1] = drag[3] - (e.clientY - drag[1]) * sc; set();
   });
   s.addEventListener('mouseup', (e) => {
-    const wasDrag = moved; drag = null;
+    const wasDrag = moved; drag = null; s.classList.remove('dragging');
     if (wasDrag) return;
     const item = e.target.closest('.item');
     if (!item) { setTriggerValue('clicked', JSON.stringify({ clear: true, t: Date.now() })); return; }
@@ -476,8 +559,9 @@ export default function (component) {
       rows: (item.dataset.rows || '').split('|').filter(Boolean),
       sym: item.dataset.sym || null, t: Date.now() }));
   });
-  s.addEventListener('mouseleave', () => { drag = null; });
+  s.addEventListener('mouseleave', () => { drag = null; s.classList.remove('dragging'); });
   s.addEventListener('dblclick', () => { vb = data.full.slice(); set(); });
+  set(); applyHidden();
 }
 """
 
