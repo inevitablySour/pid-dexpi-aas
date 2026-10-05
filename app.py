@@ -41,7 +41,7 @@ from PIL import Image  # noqa: E402
 
 from pid_dexpi_aas.check_sheet import build_check_sheet, number_items, numbered_overlay, render_after_png  # noqa: E402
 from pid_dexpi_aas.flow_map import (  # noqa: E402
-    MAP_CSS, MAP_JS, Box, Layers, build_layers, image_layers, map_markup, review_overrides,
+    MAP_CSS, MAP_JS, Box, Layers, build_layers, hide, image_layers, map_markup, review_overrides,
 )
 from pid_dexpi_aas.decode_drawio import decode_drawio  # noqa: E402
 from pid_dexpi_aas.mapping import classify_detection  # noqa: E402
@@ -562,6 +562,8 @@ with map_col:
     containers = st.tabs([n for n, _ in maps]) if len(maps) > 1 else [st.container()] * len(maps)
     for tab, (name, layers) in zip(containers, maps):
         with tab:
+            hidden_syms, hidden_rows = st.session_state.setdefault("hidden", (set(), set()))
+            layers = hide(layers, hidden_syms, hidden_rows)
             result = map_component(data=map_markup(layers, show_conns, show_syms, zoom_to_highlight=zoom,
                                                    key=name, height=620,
                                                    names="off" if name.startswith("Drawing") else "auto"),
@@ -602,6 +604,17 @@ def _reverse(cid: str) -> None:
     c = next(x for x in review.connections if x.id == cid)
     c.from_id, c.to_id, c.flow = c.to_id, c.from_id, "reviewer"
     refresh_tables()
+
+
+def _hide(syms=(), rows=()) -> None:
+    """Hide items/lines from the map (not from DEXPI) and drop them from the selection."""
+    hs, hr = st.session_state.setdefault("hidden", (set(), set()))
+    st.session_state["hidden"] = (hs | set(syms), hr | set(rows))
+    select()
+
+
+def _unhide() -> None:
+    st.session_state["hidden"] = (set(), set())
 
 
 def _set_lines(cids: list, include: bool) -> None:
@@ -687,7 +700,19 @@ with panel_col:
                 if st.button(f"Go to {item_name(e)} ›", key=f"nend_{e}_{k}", type="tertiary"):
                     select({e}, (), zoom=True)
                     st.rerun()
+        if sel_items or sel_lines:
+            what = ("this item" if len(sel_items) == 1 and not sel_lines else
+                    "this line" if len(sel_lines) == 1 and not sel_items else "the selection")
+            st.button(f"Hide {what} on the map", key=f"hide_{k}", width="stretch", on_click=_hide,
+                      args=([s.id for s in sel_items], [c.id for c in sel_lines]),
+                      help="Takes it off the map so you can see what is behind it. It stays in the tables "
+                           "and in the DEXPI file - use 'In DEXPI' to leave it out of the file.")
         st.divider()
+        hidden_syms, hidden_rows = st.session_state.get("hidden", (set(), set()))
+        if hidden_syms or hidden_rows:
+            h1, h2 = st.columns([3, 2])
+            h1.caption(f"{len(hidden_syms)} item(s) and {len(hidden_rows)} line(s) hidden on the map")
+            h2.button("Show all", key=f"unhide_{k}", on_click=_unhide, width="stretch")
         b1, b2 = st.columns(2)
         to_check = [s for s in review.symbols if status(s) == "needs review"]
         current = next(iter(show_syms), None)

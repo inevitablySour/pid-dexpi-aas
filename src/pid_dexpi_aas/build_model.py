@@ -159,7 +159,8 @@ def build_shapes(
         # symbol - the symbol's own text is empty on all 123 valves across the 7 files -
         # so classify from the associated tag, not shape.text. (Classifying from
         # shape.text silently made every valve a generic StraightwayValve.)
-        mapping = mapping_overrides.get(shape.id) or map_shape(shape.shape_token, shape.text or tag_name or "")
+        mapping = mapping_overrides.get(shape.id) or map_shape(shape.shape_token, shape.text or tag_name or "",
+                                                               shape.style)
 
         obj = None
         if mapping.category == Category.EQUIPMENT:

@@ -140,7 +140,7 @@ def from_drawio(diagram: ParsedDiagram) -> ReviewDiagram:
         if shape.is_labeled_only and not (shape.id in endpoint_ids and shape.text):
             continue
         tag = _tag_name(shape, tag_lookup) or shape.text
-        mapping = map_shape(shape.shape_token, shape.text or tag or "")  # same rule as build_model
+        mapping = map_shape(shape.shape_token, shape.text or tag or "", shape.style)  # same rule as build_model
         if shape.is_labeled_only:
             dexpi_class, identified_by = OFF_PAGE, "text label a pipe ends on"
         else:

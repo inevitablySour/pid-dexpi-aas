@@ -186,7 +186,7 @@ def test_lightup_flow_directions(lightup):
     flows = {(tag[c.from_id], tag[c.to_id]): c.flow for c in lightup.connections if c.flow}
     assert flows[("V101", "P101")] == "drawn arrow"        # pump draws from the vessel
     assert flows[("GV202", "V202")] == "implied"           # arrow into V202 on the other leg
-    assert flows[("V202", "StraightwayValve")] == "implied"  # V202 outlet to the PC 201 valve
+    assert flows[("V202", "GateValve")] == "implied"  # V202 outlet to the PC 201 valve (drawn as gate)
     assert flows[("safe location", "Fume hood [atm]")] == "implied"
 
 
@@ -266,3 +266,18 @@ def test_normal_export_with_white_fills_is_not_inverted():
 
     out = np.asarray(to_dark_on_white(_sheet((0, 0, 0), (255, 255, 255))).convert("L"))
     assert out[60, 10] < 80 and out[5, 5] > 200
+
+
+@needs_routes
+def test_hidden_items_and_lines_leave_the_map(lightup):
+    from pid_dexpi_aas.flow_map import build_layers, hide
+
+    layers = build_layers(lightup.drawio, LIGHTUP)
+    box = next(b for b in layers.boxes)
+    direct = next(ln for ln in layers.lines if len(ln.rows) == 1)
+    net = next(ln for ln in layers.lines if len(ln.rows) > 1)
+    out = hide(layers, {box.id}, set(direct.rows) | {sorted(net.rows)[0]})
+    assert box.id not in {b.id for b in out.boxes}
+    assert direct not in out.lines
+    assert net in out.lines  # a network piece stays while any of its pairs is still shown
+    assert net not in hide(layers, set(), set(net.rows)).lines

@@ -130,8 +130,40 @@ def classify_instrument_tag(tag_text: str) -> tuple[str, dict]:
     }
 
 
-def map_shape(shape_token: str | None, tag_text: str) -> MappingResult:
-    """Top-level dispatch: shape token (+ tag text where needed) -> MappingResult."""
+# draw.io's own valve body type (style "valveType=..." on mxgraph.pid2valves.valve) ->
+# DEXPI class. Before this, an untagged check valve (LightUp, between P201 and GV205)
+# came out as a generic StraightwayValve. Three-way has no DEXPI class.
+VALVE_TYPE_MAP = {
+    "gate": "GateValve", "check": "CheckValve", "needle": "NeedleValve", "angle": "AngleValve",
+    "ball": "BallValve", "globe": "GlobeValve", "butterfly": "ButterflyValve", "plug": "PlugValve",
+}
+_VALVE_TYPE_RE = re.compile(r"(?:^|;)valveType=([A-Za-z]+)")
+# tag classes that say more than the body shape: function, not geometry
+_FUNCTION_VALVES = {"SafetyValveOrFitting", "OperatedValve"}
+
+
+def _classify_valve(tag_text: str, style: str) -> tuple[str, str]:
+    """Valve subtype from the tag and draw.io's drawn valve type: a function tag (PSV,
+    XV, FV, BPR) wins; otherwise the drawn body type; otherwise the tag prefix."""
+    tag_class, tag_note = classify_valve_tag(tag_text)
+    tag_known = not tag_note.startswith("unrecognized")
+    m = _VALVE_TYPE_RE.search(style or "")
+    drawn = m.group(1) if m else None
+    if tag_known and tag_class in _FUNCTION_VALVES:
+        return tag_class, tag_note
+    if drawn in VALVE_TYPE_MAP:
+        cls = VALVE_TYPE_MAP[drawn]
+        note = f"drawn as a {drawn} valve"
+        if tag_known and tag_class != cls:
+            note += f" (tag suggested {tag_class})"
+        return cls, note
+    if drawn == "threeWay":
+        return tag_class, f"three-way valve (no DEXPI three-way class); {tag_note}".rstrip("; ")
+    return tag_class, tag_note
+
+
+def map_shape(shape_token: str | None, tag_text: str, style: str = "") -> MappingResult:
+    """Top-level dispatch: shape token (+ tag text, + draw.io style for valve bodies) -> MappingResult."""
     if shape_token is None:
         return MappingResult(Category.UNMAPPED, None, "no shape token; likely a floating tag/label")
 
@@ -143,7 +175,7 @@ def map_shape(shape_token: str | None, tag_text: str) -> MappingResult:
         return MappingResult(Category[cat], cls, reason)
 
     if shape_token == GENERIC_VALVE_SHAPE:
-        dexpi_class, note = classify_valve_tag(tag_text)
+        dexpi_class, note = _classify_valve(tag_text, style)
         return MappingResult(Category.PIPING, dexpi_class, note)
 
     if shape_token == DISC_INST_SHAPE:

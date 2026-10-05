@@ -363,6 +363,17 @@ def _background_b64(path: Path) -> tuple[str, str]:
     return "image/png", base64.b64encode(buf.getvalue()).decode()
 
 
+def hide(layers: Layers, symbols: set, rows: set) -> Layers:
+    """The layers without the items and lines the reviewer hid. A line goes once every
+    table row it stands for is hidden (a pipe network's piece stays while any pair of
+    its ends is still shown). Only the map changes - the DEXPI file is not affected."""
+    if not symbols and not rows:
+        return layers
+    return Layers(layers.background, layers.size,
+                  [ln for ln in layers.lines if not (ln.rows and ln.rows <= rows)],
+                  [b for b in layers.boxes if b.id not in symbols], layers.stats, layers.legend)
+
+
 def map_markup(layers: Layers, highlight_rows: set | None = None, highlight_symbols: set | None = None,
                zoom_to_highlight: bool = True, key: str = "map", height: int = 720,
                names: str = "auto") -> dict:
