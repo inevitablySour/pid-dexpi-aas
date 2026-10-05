@@ -94,22 +94,24 @@ All commands run from `ml/relationformer/`.
 
 `--debug` cuts to 30 train / 30 val samples and disables dataloader workers. You should
 see parameter count (~39.7M), a loss that decreases, and a
-`=== PID2Graph validation, epoch N ===` block after each epoch. Kill it with Ctrl-C once
-you have seen a couple of epochs - it will otherwise run all 150.
+`=== PID2Graph validation, epoch N ===` block after each epoch. `--debug` stops after 2
+epochs; pass `--epochs N` to change that (it also overrides `TRAIN.EPOCHS` without
+`--debug`).
 
 Then delete the run folder before reusing the name:
 `rm -rf trained_weights/runs/smoke_10`
 
 ## Find your batch size
 
-Start at 4 on a 12GB card and raise until it OOMs, then drop one step:
+Measured on the 4070 (see the throughput table below): bs4 peaks at 7.3GB, bs8 OOMs.
+Use `-b 4` there. On another card, start at 4 and raise until it OOMs, then drop one step:
 
 ```bash
 .venv/bin/python train_pid2graph.py \
   --config configs/pid2graph_2d.yaml --exp_name bs4 -b 4 --debug
 ```
 
-Watch `nvidia-smi` in another terminal. Reference: batch size 1 used 2.3GB on the 3060.
+Watch `nvidia-smi` in another terminal. Reference: batch size 1 uses ~2.1GB.
 With headroom to spare you can also raise `HIDDEN_DIM` back to 512 and `ENC/DEC_LAYERS`
 to 6 in `configs/pid2graph_2d.yaml` (closer to the paper's model), but change one thing
 at a time and re-check memory.
@@ -152,13 +154,48 @@ node mAP.
   --resume trained_weights/runs/pid2graph_run1_10/models/<checkpoint>.pt
 ```
 
+## Fine-tune with real drawings (cross-validation)
+
+The base run (`sheetsplit_bs4`, 150 epochs, synthetic data only) scores **0.360 node /
+0.050 edge mAP on whole OPEN100 sheets** (published baseline: 0.521 / 0.459). The
+fine-tune fixes what that run measured as wrong, starting from its weights:
+
+| fix | what | where |
+|---|---|---|
+| 1 | Crossing pipes no longer counted as connected (56% of training edges were fake) | `_collapse_graph` / `_pass_through_partner` |
+| 2, 3 | Real OPEN100 sheets in training, 4-fold CV: 8 train / 1 val / 3 test sheets per fold (inlet/outlet only exists there) | `real_fold_sheets`, `--fold` |
+| 4 | Team draw.io drawings rendered + labelled as training data (LightUp held out); grey-fill / line-weight augmentation | `make_team_data.py`, `StyleAugment` |
+| 5 | Whole-sheet scoring at the training scale, comparable to the paper | `eval_sheets.py` |
+| 6 | Process vs signal lines as 2 relation classes | `NUM_REL_CLS: 2` |
+| 7 | Balanced sampling: real 31% / team 6% of draws; arrow 4%->13%, inlet/outlet 0.3%->4% | `sample_weights`, `BALANCED_SAMPLING` |
+
+```bash
+# once: team drawings -> data/PID2Graph/{Complete,Patched}/Team[ test] (needs ml/tools/drawio.AppImage)
+.venv/bin/python ml/pid2graph/make_team_data.py
+# all 4 folds (~4 h each on a 4070), then pooled scores:
+ml/pid2graph/run_folds.sh ml/relationformer/trained_weights/runs/sheetsplit_bs4_10/models/checkpoint_epoch=150.pt
+```
+
+Each fold is scored only on its own 3 held-out sheets, so the pooled number covers all
+12 sheets, each by a model that never saw it. Every fold also scores LightUp (team test,
+never trained on). `DEBUG=1` runs a 30-patch smoke test of the whole chain.
+
+Notes: OPEN100 patches are the complete sheets enlarged 2.65x, so whole-sheet scoring
+tiles at 1500/2.65 px. `exports/pid2graph_export/*.graphml` (draw.io coordinates) and the
+training data (`make_team_data.py`, image pixels) share one labelling,
+`export_pid2graph.labelled_symbols`: real symbols only. The first exports labelled every
+draw.io cell, text labels included, as "general" (LightUp: 113 nodes -> 59 symbols). For the app, point `PID_MODEL_CHECKPOINT` at a fine-tuned checkpoint.
+
 ## Evaluating a checkpoint
 
 ```bash
 .venv/bin/python train_pid2graph.py \
   --config configs/pid2graph_2d.yaml --exp_name pid2graph_run1 -b 4 \
-  --resume trained_weights/runs/pid2graph_run1_10/models/<checkpoint>.pt --eval
+  --resume trained_weights/runs/pid2graph_run1_10/models/<checkpoint>.pt --eval --eval_split test
 ```
+
+`--eval_split test` scores the held-out OPEN100 sheets (`DATA.PID2GRAPH_TEST_SUBSETS`);
+the default `val` scores the sheet-level validation split used for checkpoint selection.
 
 ## What the metrics mean
 
@@ -181,9 +218,10 @@ directly comparable to the published baselines (multiply by 100):
 | SynthPID E2, synth-only | 64.2 | 63.8 |
 | SynthPID E3, mixed | 71.3 | 72.6 |
 
-Caveat on comparability: those are reported on the 12 **Complete** OPEN100 sheets, while
-this config trains and validates on **Patched** data. Same metric, different split - so
-treat it as indicative until you evaluate on the held-out Complete sheets directly.
+Caveat on comparability: those are reported on the 12 **Complete** OPEN100 sheets. Our
+test split is the same 12 sheets, never trained on, but scored per **patch** rather than
+per whole sheet - same metric and same drawings, different granularity, so treat it as
+indicative.
 
 Edge mAP stays near zero for a long time. An edge needs *both* endpoint boxes matched at
 IoU >= 0.5 before it can score at all, so it lags node mAP by a wide margin early on.
@@ -209,9 +247,15 @@ Diagrams to Graphs: Digitizing P&IDs with Transformers*, IEEE DSAA 2025.
 | Patched/PID2Graph OPEN100 | 1,629 | png |
 | Patched/PID2Graph Synthetic | 14,708 | png |
 
-Training uses the three **Patched** subsets (35,799 pairs -> 32,219 train / 3,580 val).
-Full sheets are 2604x1744; patches are 1500x1500. The 12 unpatched Complete OPEN100
-sheets are deliberately held out.
+Training uses **Patched** Synthetic + Dataset PID, split **by sheet** 90/10: 30,744 train
+patches (675 sheets) / 3,426 val (75 sheets). **Patched OPEN100** (1,629 patches, 12 sheets)
+is the held-out test set - not trained on, not used for checkpoint selection.
+
+Why by sheet: patches overlap heavily (PID2Graph Synthetic sheet 241: 7000x4500 sheet,
+58 patches of 2000x2000 at a 500px stride - neighbours share 75%, each pixel lands in ~7
+patches). The first full run split per patch; 100% of val patches shared a sheet with
+train and val node mAP read 0.91 after 2 epochs - memorisation, not generalisation. That
+run was discarded.
 
 ### Real schema (verified, not taken from the paper)
 
@@ -300,24 +344,30 @@ Raise these once you have measured headroom on the real training card.
 
 ## Measured throughput and time estimate
 
-On the 3060 laptop, batch size 1, 576-800px after augmentation: **median 212 ms/step,
-2.30GB peak VRAM**.
+Training steps only (no eval/checkpoint), 4-8 loader workers, 32,219 training patches
+per epoch. Measured on the RTX 4070 (12GB):
 
-| | ms/sample | per epoch | 150 epochs |
-|---|---|---|---|
-| 3060 laptop (measured) | 212 | 114 min | ~12 days |
-| 4070 desktop @ bs1 (est.) | ~118 | ~63 min | ~6.6 days |
-| 4070 desktop @ bs4 (est.) | ~65 | ~35 min | ~3.6 days |
+| config | ms/sample | peak VRAM | per epoch | 150 epochs |
+|---|---|---|---|---|
+| upstream as shipped (cudnn.benchmark on, gc + empty_cache every step), bs1 | 1350-1760 | 10.0GB | ~12-16 h | months |
+| cudnn.benchmark off, gc + empty_cache kept, bs1 | 290 | 2.1GB | ~2.6 h | ~16 days |
+| **both fixed, bs1** | 102 | 2.1GB | ~55 min | ~5.7 days |
+| **both fixed, bs2** | 91 | 3.9GB | ~49 min | ~5.1 days |
+| **both fixed, bs4** | 83 | 7.3GB | ~45 min | ~4.6 days |
+| both fixed, bs8 | OOM | - | - | - |
 
-The 3060 row is measured. **The 4070 rows are extrapolations** assuming ~1.8x throughput
-and sublinear batch scaling - treat them as rough. Re-measure on the actual card before
-planning around them:
+Two upstream settings were responsible for a ~17x slowdown:
 
-```bash
-.venv/bin/python train_pid2graph.py --config configs/pid2graph_2d.yaml --exp_name bench -b 4 --debug
-```
+- **`cudnn.benchmark = True`** autotunes conv algorithms per input shape. The random
+  resize + crop augmentation makes nearly every shape new, so it never stops tuning (and
+  the tuning workspaces push VRAM to 10GB at bs1). Now `False` in `train_pid2graph.py`.
+- **`gc.collect()` + `torch.cuda.empty_cache()` after every step** in `trainer.py` forces
+  the CUDA allocator to re-allocate everything on the next step. Removed via
+  `upstream-fixes.patch`.
 
-12GB should allow a larger batch and/or `HIDDEN_DIM: 512`, which changes these numbers.
+Batch size gives diminishing returns past 2; bs4 is the fastest that fits, with ~4GB
+headroom for the desktop and unusually dense patches. An earlier 3060-laptop figure
+(212 ms/sample) was measured differently and is not comparable to this table.
 
 ## Evaluator
 
@@ -348,12 +398,12 @@ has no GT edges.
 
 - No real training run. No weights. The only mAP numbers so far are from an untrained or
   30-sample-overfit model and mean nothing.
-- Evaluation is on the **Patched** split. The published baselines are on the 12 unpatched
-  **Complete** OPEN100 sheets, so a like-for-like comparison still needs a config pointing
-  `PID2GRAPH_SUBSETS` at `Complete/PID2Graph OPEN100` for validation.
-- The team's own 7 P&IDs are exported as PID2Graph-schema GraphML in
-  `exports/pid2graph_export/` but are **graph-only** - no rendered PNGs, so they can't be
-  used as image-based eval yet. `subprojects/MEM4CHEM` (pptx) has no parser at all.
+- Test scoring is per **patch** on held-out OPEN100. The published baselines score whole
+  **Complete** sheets; a like-for-like number needs sheet-level inference (run the patches,
+  stitch predictions back into one sheet graph, then score).
+- The team's draw.io P&IDs are rendered and labelled by `make_team_data.py` (6 for
+  training, LightUp held out). Their connection labels come from the draw.io lines and
+  about half have one end resolved to the nearest shape - not individually verified. `subprojects/MEM4CHEM` (pptx) has no parser at all.
 - `solid` vs `non-solid` is carried on the target dict but folded to a single
   `connected` predicate class (`NUM_REL_CLS: 1`). Splitting it into two predicate classes
   is a one-line config change plus a loader tweak, if dashed/signal lines matter for the

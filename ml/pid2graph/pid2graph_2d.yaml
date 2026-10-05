@@ -4,16 +4,15 @@ DATA:
                             # deformable-DETR-style encoder; raise once a real run confirms
                             # headroom (see ml/README.md's benchmark-first instructions).
   DATA_PATH: '../../data/PID2Graph'   # extracted PID2Graph/ dir - see pid-dexpi-aas/data/
-  # Which PID2Graph subsets to train/val on. Starting on the Patched subsets only (not
-  # Complete) because Relationformer's own road_network precedent and drawing2's roadmap
-  # both treat full multi-thousand-pixel sheets as needing patching first - Complete
-  # OPEN100 sheets are reserved as a separate, unpatched real-world eval set instead (see
-  # ml/README.md). PID2Graph Synthetic patches (14,708) + Dataset PID patches (19,462)
-  # give a large synthetic pretraining pool; Patched OPEN100 (1,629) is real-world signal
-  # mixed into the same split so the model sees some real patches during training too.
+  # Train/val subsets. Split into train/val by whole sheet (see dataset_pid2graph.py) -
+  # the patches overlap 75%, so a per-patch split leaks near-duplicates into val.
   PID2GRAPH_SUBSETS:
     - 'Patched/PID2Graph Synthetic'
     - 'Patched/Dataset PID'
+  # Held-out test set, never trained on or used for checkpoint selection: the 12 real-world
+  # OPEN100 sheets, the subset the published baselines report on. Evaluate with
+  # `--eval --eval_split test --resume <checkpoint>`.
+  PID2GRAPH_TEST_SUBSETS:
     - 'Patched/PID2Graph OPEN100'
   BG_EDGE_PER_IMG: 75
   FG_EDGE_PER_IMG: 25

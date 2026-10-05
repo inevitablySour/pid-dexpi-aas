@@ -193,6 +193,9 @@ class NodeEdgeMeanAP(Metric):
             classes=PID2GRAPH_CLASS_NAMES,
             iou_list=(0.5, 0.75),
             iou_range=iou_range,
+            # Same limit as BoxAP below. COCOMetric's own default (50, 100) would silently
+            # cap whole-sheet scoring at 100 detections (OPEN100 sheets hold more symbols).
+            max_detection=(min(50, max_detections), max_detections),
             per_class=True,
             verbose=False,
         )

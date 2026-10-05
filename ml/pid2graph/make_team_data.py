@@ -1,0 +1,135 @@
+"""Turn the team's draw.io P&IDs into PID2Graph-format training/test data (images + labels).
+
+Runs in the MAIN venv (needs the draw.io parser and review layer), plus the draw.io
+desktop app for rendering (ml/tools/drawio.AppImage, see ml/README.md). For each file:
+
+  1. Render it to PNG with draw.io itself (scale 1, no border) - the team's real style:
+     grey-shaded vessels, filled valves, coloured columns, which the synthetic training
+     data never shows.
+  2. Labels come from export_pid2graph.labelled_symbols - the same labelling as the
+     (regenerated) exports/pid2graph_export files: only real symbols, with their
+     PID2Graph class; connections keep their line type (dashed = "non-solid").
+  3. draw.io's export origin is NOT simply the min of the parsed geometry (stray points
+     stretch it), so the draw.io -> pixel offset is found by sliding the symbol boxes
+     over the rendered ink and keeping the best overlap (measured: LightUp's naive origin
+     was 56 px off; registered boxes sit on their symbols).
+  4. Write the whole sheet (Complete/<subset>/<name>.png + .graphml, for sheet-level
+     evaluation) and 1500 px patches at a 500 px stride (Patched/<subset>/<name>/<n>.*,
+     PID2Graph's own layout), keeping symbols >= 50% inside a patch (clipped) and
+     connections whose two ends are both kept.
+
+Usage:
+    .venv/bin/python ml/pid2graph/make_team_data.py --out data/PID2Graph \
+        --test "P&ID gramflow reactor V3"
+"""
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from xml.etree import ElementTree as ET
+
+import numpy as np
+from PIL import Image
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "src"))
+
+from pid_dexpi_aas.decode_drawio import decode_drawio  # noqa: E402
+from align import register_offset  # noqa: E402
+from pid_dexpi_aas.export_pid2graph import labelled_symbols  # noqa: E402
+from pid_dexpi_aas.line_routes import DRAWIO_APP  # noqa: E402  (finds the installed app)
+from pid_dexpi_aas.parser_drawio import parse_drawio_xml_resolved  # noqa: E402
+
+
+def render_png(drawio_path: Path, out_png: Path) -> None:
+    subprocess.run([str(DRAWIO_APP), "--no-sandbox", "-x", "-f", "png", "-b", "0", "-s", "1",
+                    "-o", str(out_png), str(drawio_path)], check=True, capture_output=True)
+
+
+def write_graphml(path: Path, symbols: list[tuple[str, str, tuple]], edges: list[tuple[str, str, str]]) -> None:
+    ns = "http://graphml.graphdrawing.org/xmlns"
+    ET.register_namespace("", ns)
+    root = ET.Element(f"{{{ns}}}graphml")
+    for kid, name, typ in [("d0", "label", "string"), ("d1", "xmin", "double"), ("d2", "xmax", "double"),
+                           ("d3", "ymin", "double"), ("d4", "ymax", "double")]:
+        ET.SubElement(root, f"{{{ns}}}key", id=kid, attrib={"for": "node", "attr.name": name, "attr.type": typ})
+    ET.SubElement(root, f"{{{ns}}}key", id="d9", attrib={"for": "edge", "attr.name": "edge_label", "attr.type": "string"})
+    graph = ET.SubElement(root, f"{{{ns}}}graph", edgedefault="undirected")
+    for sid, label, (x1, y1, x2, y2) in symbols:
+        node = ET.SubElement(graph, f"{{{ns}}}node", id=sid)
+        for kid, val in (("d0", label), ("d1", x1), ("d2", x2), ("d3", y1), ("d4", y2)):
+            ET.SubElement(node, f"{{{ns}}}data", key=kid).text = str(round(val, 2)) if kid != "d0" else val
+    for a, b, line in edges:
+        e = ET.SubElement(graph, f"{{{ns}}}edge", source=a, target=b)
+        ET.SubElement(e, f"{{{ns}}}data", key="d9").text = line
+    ET.ElementTree(root).write(path, xml_declaration=True, encoding="utf-8")
+
+
+def tile_starts(total: int, tile: int, stride: int) -> list[int]:
+    if total <= tile:
+        return [0]
+    s = list(range(0, total - tile + 1, stride))
+    return s if s[-1] == total - tile else s + [total - tile]
+
+
+def process(drawio_path: Path, out_root: Path, subset: str, tile: int, stride: int) -> dict:
+    diagram = parse_drawio_xml_resolved(decode_drawio(drawio_path)[0], source_file=drawio_path.name, drawio_path=drawio_path)
+    syms, edges = labelled_symbols(diagram)  # the same labelling as exports/pid2graph_export
+
+    name = drawio_path.stem.strip()
+    complete_dir = out_root / "Complete" / subset
+    complete_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        png_tmp = Path(tmp) / "sheet.png"
+        render_png(drawio_path, png_tmp)
+        ox, oy, cov = register_offset([b for _, _, b, _ in syms], png_tmp)
+        sheet = Image.open(png_tmp).convert("RGB")
+    sheet.save(complete_dir / f"{name}.png")
+    px = [(sid, lab, (b[0] - ox, b[1] - oy, b[2] - ox, b[3] - oy)) for sid, lab, b, _ in syms]
+    write_graphml(complete_dir / f"{name}.graphml", px, edges)
+
+    patch_dir = out_root / "Patched" / subset / name
+    patch_dir.mkdir(parents=True, exist_ok=True)
+    W, H = sheet.size
+    n = 0
+    for y0 in tile_starts(H, tile, stride):
+        for x0 in tile_starts(W, tile, stride):
+            x1, y1 = x0 + min(tile, W), y0 + min(tile, H)
+            kept = []
+            for sid, lab, (a, b, c, d) in px:
+                ia = max(0.0, min(c, x1) - max(a, x0)) * max(0.0, min(d, y1) - max(b, y0))
+                if ia >= 0.5 * (c - a) * (d - b):
+                    kept.append((sid, lab, (max(a, x0) - x0, max(b, y0) - y0, min(c, x1) - x0, min(d, y1) - y0)))
+            ids = {k[0] for k in kept}
+            sheet.crop((x0, y0, x1, y1)).save(patch_dir / f"{n}.png")
+            write_graphml(patch_dir / f"{n}.graphml", kept, [e for e in edges if e[0] in ids and e[1] in ids])
+            n += 1
+    return {"file": drawio_path.name, "subset": subset, "size": (W, H), "symbols": len(px), "edges": len(edges),
+            "patches": n, "offset": (round(ox), round(oy)), "ink_coverage": round(cov, 3)}
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--out", default=str(ROOT / "data" / "PID2Graph"))
+    ap.add_argument("--test", nargs="*", default=["P&ID gramflow reactor V3"],
+                    help="file stems held out as the team test set")
+    ap.add_argument("--skip", nargs="*", default=["PFD combined set up 301122"],
+                    help="file stems left out entirely (the PFD is a simplified flow diagram, not a P&ID)")
+    ap.add_argument("--subset", default="Team",
+                    help="subset name; the held-out drawing goes to '<subset> test'. Use a new name "
+                         "(e.g. 'Team v2') to regenerate without touching data a running training reads")
+    ap.add_argument("--tile", type=int, default=1500)
+    ap.add_argument("--stride", type=int, default=500)
+    args = ap.parse_args()
+    for path in sorted((ROOT / "subprojects").glob("*/*.drawio")):
+        if path.stem.strip() in [k.strip() for k in args.skip]:
+            continue
+        subset = f"{args.subset} test" if path.stem.strip() in [t.strip() for t in args.test] else args.subset
+        print(process(path, Path(args.out), subset, args.tile, args.stride), flush=True)
+
+
+if __name__ == "__main__":
+    main()

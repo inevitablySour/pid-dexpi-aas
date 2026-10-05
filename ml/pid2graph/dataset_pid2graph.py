@@ -26,6 +26,7 @@ waypoints, keep physical components)" as its own required Phase 2 preprocessing 
 """
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 
@@ -91,6 +92,10 @@ def _collapse_graph(g: nx.Graph) -> tuple[list[str], list[tuple[float, float, fl
     collapsed connection (arbitrary among the chain's edges when they disagree, which
     real data essentially never does since a single drawn line is one edge_label end
     to end)."""
+    if g.is_multigraph():
+        # Two drawn lines between the same pair (e.g. the team's draw.io files) make
+        # read_graphml return a MultiGraph; for connectivity one edge per pair is enough.
+        g = nx.Graph(g)
     real_nodes = [n for n, d in g.nodes(data=True) if d.get("label") not in _STRUCTURAL_LABELS]
     real_index = {n: i for i, n in enumerate(real_nodes)}
     labels = [g.nodes[n]["label"] for n in real_nodes]
@@ -100,7 +105,7 @@ def _collapse_graph(g: nx.Graph) -> tuple[list[str], list[tuple[float, float, fl
         boxes.append(bbox if bbox is not None else (0.0, 0.0, 0.0, 0.0))
 
     collapsed_edges: set[tuple[int, int, str]] = set()
-    visited_structural: set = set()
+    partners: dict = {}
 
     for real_n in real_nodes:
         for neighbor in g.neighbors(real_n):
@@ -111,33 +116,82 @@ def _collapse_graph(g: nx.Graph) -> tuple[list[str], list[tuple[float, float, fl
                     edge_label = g.edges[real_n, neighbor].get("edge_label", "solid")
                     collapsed_edges.add((min(a, b), max(a, b), edge_label))
                 continue
-            # Walk the chain of structural nodes via BFS until hitting real node(s).
-            frontier = [neighbor]
-            seen = {neighbor}
+            # Walk the chain of structural nodes until hitting real node(s). The walk
+            # remembers which way it came in: at a pass-through crossing (two pipes
+            # drawn across each other, see _pass_through_partner) it may only continue
+            # straight on along the same pipe, never turn onto the other one.
             chain_edge_label = g.edges[real_n, neighbor].get("edge_label", "solid")
-            while frontier:
-                current = frontier.pop()
-                visited_structural.add(current)
-                for nxt in g.neighbors(current):
-                    if nxt in seen:
-                        continue
-                    seen.add(nxt)
+            stack = [(neighbor, real_n)]
+            seen = {(neighbor, real_n)}
+            while stack:
+                current, came_from = stack.pop()
+                if current not in partners:
+                    partners[current] = _pass_through_partner(g, current)
+                partner = partners[current]
+                if partner is not None:
+                    onward = [partner[came_from]] if came_from in partner else []
+                else:
+                    onward = [n for n in g.neighbors(current) if n != came_from]
+                for nxt in onward:
                     if g.nodes[nxt].get("label") not in _STRUCTURAL_LABELS:
                         a, b = real_index[real_n], real_index[nxt]
                         if a != b:
                             collapsed_edges.add((min(a, b), max(a, b), chain_edge_label))
-                    else:
-                        frontier.append(nxt)
+                    elif (nxt, current) not in seen:
+                        seen.add((nxt, current))
+                        stack.append((nxt, current))
 
     return labels, boxes, sorted(collapsed_edges)
 
 
+def _center(data: dict) -> tuple[float, float] | None:
+    bbox = _node_bbox(data)
+    return None if bbox is None else ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
+
+
+def _pass_through_partner(g: nx.Graph, node, tolerance_deg: float = 20.0) -> dict | None:
+    """For a 4-arm crossing whose arms form two straight lines through it, map each
+    neighbour to the neighbour straight across - the same pipe continuing. None for
+    anything else (bends, T-junctions, 5+ arms, missing geometry), which are walked as
+    real junctions.
+
+    Why: in PID2Graph a "crossing" node marks every place lines meet, including two
+    pipes merely drawn across each other. Walking through such a node in every
+    direction linked every symbol on one pipe to every symbol on the other. Measured on
+    a 400-patch training sample: 98% of 4-arm crossings are two straight lines, and
+    74% of collapsed training edges existed only because of them. Real OPEN100 sheets
+    almost never contain them (7 of 1,926 crossings), so the old labels taught the
+    model connections real drawings don't have. In P&ID convention crossing lines
+    without a junction dot are not connected.
+    """
+    if g.nodes[node].get("label") != "crossing" or g.degree(node) != 4:
+        return None
+    c = _center(g.nodes[node])
+    arms = []
+    for n in g.neighbors(node):
+        p = _center(g.nodes[n])
+        if c is None or p is None or p == c:
+            return None
+        arms.append((math.degrees(math.atan2(p[1] - c[1], p[0] - c[0])) % 360, n))
+    arms.sort()
+    opposite = lambda i, j: abs(((arms[j][0] - arms[i][0]) % 360) - 180) <= tolerance_deg
+    if not (opposite(0, 2) and opposite(1, 3)):
+        return None
+    (_, a), (_, b), (_, c2), (_, d) = arms
+    return {a: c2, c2: a, b: d, d: b}
+
+
 class PID2GraphDataset(Dataset):
-    def __init__(self, samples: list[tuple[Path, Path]], transforms=None, n_queries: int = 201):
-        """samples: list of (image_path, graphml_path) pairs."""
+    def __init__(self, samples: list[tuple[Path, Path]], transforms=None, n_queries: int = 201, n_rel_classes: int = 1):
+        """samples: list of (image_path, graphml_path) pairs. n_rel_classes = MODEL.NUM_REL_CLS:
+        1 -> every connection is "connected"; 2 -> "solid" (process pipe) vs "non-solid"
+        (signal/instrument line) are learned as separate relation classes."""
         self.samples = samples
         self.transforms = transforms
         self.n_queries = n_queries
+        self.predicate_to_idx = (
+            {"solid": 1, "non-solid": 2} if n_rel_classes >= 2 else {"solid": 1, "non-solid": 1}
+        )
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -168,7 +222,7 @@ class PID2GraphDataset(Dataset):
             )
             if edges:
                 gt_rels = np.asarray(
-                    [(i, j, PREDICATE_TO_IDX.get(label, PREDICATE_TO_IDX["connected"])) for i, j, label in edges],
+                    [(i, j, self.predicate_to_idx.get(label, 1)) for i, j, label in edges],
                     dtype=np.int64,
                 )
             else:
@@ -224,56 +278,195 @@ def _discover_pairs(root: Path, subset_dirs: list[str]) -> list[tuple[Path, Path
     return pairs
 
 
-def build_pid2graph_data(config, mode: str = "split", split: float = 0.9, seed: int = 10):
-    """Mirrors dataset_scene.py's build_scene_graph_data / dataset_road_network.py's
-    build_road_network_data interface (config in, (train_ds, val_ds) or single ds out)
-    so train.py needs only a branch selecting this function, not a rewritten call site.
+class StyleAugment:
+    """Make synthetic line drawings look more like real/team P&IDs (train only).
+
+    Measured gaps this targets: the model misses most grey-shaded equipment on the team's
+    draw.io drawings (LightUp: V203, X102, V201/V204 undetected) and real sheets differ in
+    line weight and scan quality. Applied to the PIL image before resizing, with boxes
+    still in absolute pixels: shade the inside of a few equipment boxes grey (lines stay
+    dark), thicken lines, blur, shift contrast.
+    """
+
+    SHADE_CLASSES = {CLASS_TO_IDX["tank"], CLASS_TO_IDX["general"], CLASS_TO_IDX["pump"]}
+
+    def __init__(self, p_shade=0.4, p_thick=0.3, p_blur=0.2, p_contrast=0.3):
+        self.p_shade, self.p_thick, self.p_blur, self.p_contrast = p_shade, p_thick, p_blur, p_contrast
+
+    def __call__(self, img, target):
+        import random
+
+        from PIL import ImageEnhance, ImageFilter
+
+        if random.random() < self.p_shade and len(target["boxes"]):
+            arr = np.asarray(img).copy()
+            cands = [i for i, c in enumerate(target["labels"].tolist()) if c in self.SHADE_CLASSES]
+            for i in random.sample(cands, min(len(cands), random.randint(1, 3))):
+                x1, y1, x2, y2 = [int(v) for v in target["boxes"][i].tolist()]
+                region = arr[y1:y2, x1:x2]
+                if region.size == 0:
+                    continue
+                light = region.mean(axis=2) > 200  # paper, not linework
+                top, bottom = random.randint(150, 215), random.randint(150, 215)
+                shade = np.linspace(top, bottom, region.shape[0])[:, None].repeat(region.shape[1], 1)
+                region[light] = np.stack([shade[light]] * 3, axis=-1).astype(np.uint8)
+            img = Image.fromarray(arr)
+        if random.random() < self.p_thick:
+            # Thicken only: thinning (MaxFilter) erased 1-px symbols entirely in testing,
+            # which would train the model to find symbols that are not visible.
+            img = img.filter(ImageFilter.MinFilter(3))
+        if random.random() < self.p_blur:
+            img = img.filter(ImageFilter.GaussianBlur(random.uniform(0.5, 1.2)))
+        if random.random() < self.p_contrast:
+            img = ImageEnhance.Contrast(img).enhance(random.uniform(0.7, 1.3))
+        return img, target
+
+
+def _cfg(config, section: str, key: str, default):
+    return getattr(getattr(config, section), key, default)
+
+
+def _sheets(pairs: list[tuple[Path, Path]], subset_paths: set[Path]) -> dict[str, list]:
+    """Group pairs by source sheet: Patched/<subset>/<sheet>/<n> -> the sheet dir."""
+    groups: dict[str, list] = {}
+    for p in pairs:
+        g = p[1]
+        key = str(g.parent) if g.parent not in subset_paths else str(g)
+        groups.setdefault(key, []).append(p)
+    return groups
+
+
+def real_fold_sheets(config, fold: int, seed: int = 10) -> dict[str, list[str]]:
+    """The real (OPEN100) sheets of a cross-validation fold: {"test", "val", "train"} ->
+    sheet directory names. 12 sheets, 4 folds: 3 test sheets per fold, the next sheet
+    (cyclically) as a real validation sheet for checkpoint selection, 8 for training.
+    Every sheet is tested by exactly one fold, always by a model that never saw it."""
+    import random
+
+    root = Path(config.DATA.DATA_PATH)
+    real_dir = root / _cfg(config, "DATA", "REAL_SUBSET", "Patched/PID2Graph OPEN100")
+    names = sorted((d.name for d in real_dir.iterdir() if d.is_dir()), key=lambda n: int(n) if n.isdigit() else n)
+    random.Random(seed).shuffle(names)
+    n_folds = int(_cfg(config, "DATA", "NUM_FOLDS", 4))
+    per = len(names) // n_folds
+    test = names[fold * per:(fold + 1) * per]
+    val = [names[((fold + 1) * per) % len(names)]]
+    train = [n for n in names if n not in test and n not in val]
+    return {"test": test, "val": val, "train": train}
+
+
+def build_pid2graph_data(config, mode: str = "split", split: float = 0.9, seed: int = 10, fold: int | None = None):
+    """Mirrors dataset_scene.py's build_scene_graph_data interface.
+
+    mode "split" -> (train_ds, val_ds); "test" -> the held-out real test set (with `fold`:
+    that fold's 3 OPEN100 sheets; without: DATA.PID2GRAPH_TEST_SUBSETS); "team_test" ->
+    the held-out team drawing(s) (DATA.TEAM_TEST_SUBSETS).
+
+    With `fold`, real OPEN100 sheets join training (8 sheets) and validation (1 sheet),
+    and DATA.EXTRA_TRAIN_SUBSETS (the team's own drawings) join training. Synthetic data
+    is always split 90/10 by sheet. Every split is by whole sheet: patches overlap heavily,
+    so a per-patch split leaks near-duplicates (measured: 100% leak, val mAP 0.91).
     """
     import random
 
     import transforms as T
 
     root = Path(config.DATA.DATA_PATH)
-    subset_dirs = list(config.DATA.PID2GRAPH_SUBSETS)
     n_queries = config.MODEL.DECODER.NUM_QUERIES
+    n_rel = int(config.MODEL.NUM_REL_CLS)
+    real_subset = _cfg(config, "DATA", "REAL_SUBSET", "Patched/PID2Graph OPEN100")
 
     normalize = T.Compose([T.ToTensor(), T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
     scales = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
+    style = [StyleAugment()] if _cfg(config, "DATA", "STYLE_AUGMENT", False) else []
     train_transform = T.Compose(
-        [
+        style + [
             T.RandomHorizontalFlip(),
             T.RandomSelect(
                 T.RandomResize(scales, max_size=800),
-                T.Compose(
-                    [
-                        T.RandomResize(scales),
-                        T.RandomSizeCrop(384, 600),
-                        T.RandomResize(scales, max_size=800),
-                    ]
-                ),
+                T.Compose([T.RandomResize(scales), T.RandomSizeCrop(384, 600), T.RandomResize(scales, max_size=800)]),
             ),
             normalize,
         ]
     )
     val_transform = T.Compose([T.RandomResize([800], max_size=800), normalize])
+    ds = lambda pairs, tf: PID2GraphDataset(pairs, tf, n_queries, n_rel)
 
+    if mode == "team_test":
+        return ds(_discover_pairs(root, list(_cfg(config, "DATA", "TEAM_TEST_SUBSETS", ["Patched/Team test"]))),
+                  val_transform)
+    if mode == "test":
+        if fold is None:
+            return ds(_discover_pairs(root, list(config.DATA.PID2GRAPH_TEST_SUBSETS)), val_transform)
+        names = set(real_fold_sheets(config, fold, seed)["test"])
+        return ds([p for p in _discover_pairs(root, [real_subset]) if p[1].parent.name in names], val_transform)
+
+    subset_dirs = list(config.DATA.PID2GRAPH_SUBSETS)
     pairs = _discover_pairs(root, subset_dirs)
     if not pairs:
         raise FileNotFoundError(
             f"No .graphml/image pairs found under {root} for subsets {subset_dirs} - "
             "check config.DATA.DATA_PATH points at the extracted PID2Graph/ directory."
         )
-
-    random.seed(seed)
-    random.shuffle(pairs)
-
     if mode == "train":
-        return PID2GraphDataset(pairs, train_transform, n_queries)
+        return ds(pairs, train_transform)
     if mode == "val":
-        return PID2GraphDataset(pairs, val_transform, n_queries)
+        return ds(pairs, val_transform)
 
-    split_idx = int(split * len(pairs))
-    train_pairs, val_pairs = pairs[:split_idx], pairs[split_idx:]
-    train_ds = PID2GraphDataset(train_pairs, train_transform, n_queries)
-    val_ds = PID2GraphDataset(val_pairs, val_transform, n_queries)
-    return train_ds, val_ds
+    groups = _sheets(pairs, {root / s for s in subset_dirs})
+    sheets = sorted(groups)
+    random.seed(seed)
+    random.shuffle(sheets)
+    val_sheets = set(sheets[int(split * len(sheets)):])
+    train_pairs = [p for s in sheets if s not in val_sheets for p in groups[s]]
+    val_pairs = [p for s in sheets if s in val_sheets for p in groups[s]]
+
+    if fold is not None:
+        real = real_fold_sheets(config, fold, seed)
+        real_pairs = _discover_pairs(root, [real_subset])
+        train_pairs += [p for p in real_pairs if p[1].parent.name in real["train"]]
+        val_pairs += [p for p in real_pairs if p[1].parent.name in real["val"]]
+        train_pairs += _discover_pairs(root, list(_cfg(config, "DATA", "EXTRA_TRAIN_SUBSETS", [])))
+
+    random.shuffle(train_pairs)
+    return ds(train_pairs, train_transform), ds(val_pairs, val_transform)
+
+
+def sample_weights(samples: list[tuple[Path, Path]], config, cache_path: Path) -> list[float]:
+    """Per-patch sampling weight (fix #7 + oversampling of scarce real/team data).
+
+    weight = source weight (DATA.REAL_WEIGHT for OPEN100 patches, DATA.TEAM_WEIGHT for the
+    team's drawings, 1 for synthetic) x rarity (the rarest class in the patch, as
+    sqrt(median class count / that class's count), capped at DATA.RARITY_CAP). Class
+    counts per patch are cached in cache_path - parsing 35k GraphML files takes ~30 s.
+    """
+    import json
+    from collections import Counter
+    from concurrent.futures import ProcessPoolExecutor
+
+    cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
+    missing = [str(g) for _, g in samples if str(g) not in cache]
+    if missing:
+        with ProcessPoolExecutor() as pool:
+            for path, labels in zip(missing, pool.map(_labels_of, missing, chunksize=64)):
+                cache[path] = labels
+        cache_path.write_text(json.dumps(cache))
+
+    freq = Counter(l for _, g in samples for l in cache[str(g)])
+    median = float(np.median(list(freq.values()))) if freq else 1.0
+    cap = float(_cfg(config, "DATA", "RARITY_CAP", 4.0))
+    real_w = float(_cfg(config, "DATA", "REAL_WEIGHT", 1.0))
+    team_w = float(_cfg(config, "DATA", "TEAM_WEIGHT", 1.0))
+    real_key = _cfg(config, "DATA", "REAL_SUBSET", "Patched/PID2Graph OPEN100")
+    team_keys = list(_cfg(config, "DATA", "EXTRA_TRAIN_SUBSETS", []))
+    weights = []
+    for _, g in samples:
+        labels = cache[str(g)]
+        rarity = max((min(cap, (median / freq[l]) ** 0.5) for l in labels), default=1.0)
+        source = real_w if real_key in str(g) else team_w if any(k in str(g) for k in team_keys) else 1.0
+        weights.append(max(rarity, 1.0) * source)
+    return weights
+
+
+def _labels_of(graphml_path: str) -> list[str]:
+    return _collapse_graph(nx.read_graphml(graphml_path))[0]

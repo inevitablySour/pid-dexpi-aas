@@ -43,7 +43,10 @@ cp "$MINE/evaluator_pid2graph.py"  "$RF_DIR/"
 cp "$MINE/pid2graph_2d.yaml"       "$RF_DIR/configs/"
 
 # 4. Virtualenv.
-if [ ! -d "$RF_DIR/.venv" ]; then
+#    Check for the interpreter, not the directory: a half-created or copied-in .venv
+#    can exist without a working bin/python.
+if [ ! -x "$RF_DIR/.venv/bin/python" ]; then
+  rm -rf "$RF_DIR/.venv"
   python3 -m venv "$RF_DIR/.venv"
 fi
 PY="$RF_DIR/.venv/bin/python"
@@ -54,7 +57,17 @@ PY="$RF_DIR/.venv/bin/python"
 #    torch's cpp_extension refuses a major-version mismatch. cu121 wheels build fine
 #    against a CUDA 12.0 toolkit. Adjust this line if your nvcc is a different major
 #    version (e.g. cu124/cu128 wheels for a CUDA 12.4/12.8 toolkit).
-"$PY" -m pip install -q torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
+# No CUDA toolkit (a laptop, or CPU_ONLY=1): CPU wheels and no compiled op - enough to run
+# the review app's image/hybrid modes (infer_sheet.py falls back to a PyTorch op), not to train.
+CPU_ONLY="${CPU_ONLY:-}"
+if [ -z "$CPU_ONLY" ] && ! command -v nvcc >/dev/null 2>&1; then
+  echo "nvcc not found - CPU-only install (inference only)"; CPU_ONLY=1
+fi
+if [ -n "$CPU_ONLY" ]; then
+  "$PY" -m pip install -q torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
+else
+  "$PY" -m pip install -q torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
+fi
 
 # monai>=1.6 requires torch>=2.8, which would silently upgrade torch to a cu130 build
 # and break the extension compile - pin an older monai and install it with --no-deps.
@@ -62,6 +75,10 @@ PY="$RF_DIR/.venv/bin/python"
 "$PY" -m pip install -q ignite pytorch_ignite numpy scipy matplotlib PyYAML \
     scikit-image tensorboardX timm einops networkx pillow ninja \
     tensorboard loguru pycocotools
+# EasyOCR reads tags for the review app (ml/pid2graph/infer_sheet.py). --no-deps: its
+# metadata pulls an unpinned torch, which would replace the cu121 build above.
+"$PY" -m pip install -q --no-deps easyocr==1.7.2
+"$PY" -m pip install -q opencv-python-headless python-bidi Shapely pyclipper
 # tensorboard: torch.utils.tensorboard.SummaryWriter needs it at import time.
 # loguru + pycocotools: pulled in by metrics/coco.py, which the mAP evaluator uses.
 # None of these three are in the repo's own requirements.txt.
@@ -74,9 +91,11 @@ PY="$RF_DIR/.venv/bin/python"
 # 6. Compile the deformable-attention CUDA op.
 #    -fuse-ld=gold is required: GNU ld 2.42 fails to link against torch's large
 #    libtorch_cpu.so with "file too short". The gold linker handles it.
-cd "$RF_DIR/models/ops"
-CFLAGS="-fuse-ld=gold" LDFLAGS="-fuse-ld=gold" "$PY" setup.py install
-cd "$RF_DIR"
+if [ -z "$CPU_ONLY" ]; then
+  cd "$RF_DIR/models/ops"
+  CFLAGS="-fuse-ld=gold" LDFLAGS="-fuse-ld=gold" "$PY" setup.py install
+  cd "$RF_DIR"
+fi
 
 echo
 echo "Setup complete. Verify with:"

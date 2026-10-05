@@ -38,6 +38,39 @@ index e2580a3..47d94e5 100644
  
      def _get_src_permutation_idx(self, indices):
          # permute predictions following indices
+diff --git a/models/ops/functions/ms_deform_attn_func.py b/models/ops/functions/ms_deform_attn_func.py
+index 8c5df8c..abd18d0 100644
+--- a/models/ops/functions/ms_deform_attn_func.py
++++ b/models/ops/functions/ms_deform_attn_func.py
+@@ -15,7 +15,10 @@ import torch.nn.functional as F
+ from torch.autograd import Function
+ from torch.autograd.function import once_differentiable
+ 
+-import MultiScaleDeformableAttention as MSDA
++try:
++    import MultiScaleDeformableAttention as MSDA
++except ImportError:  # CPU-only install (no compiled op): ml/pid2graph/infer_sheet.py uses the PyTorch fallback
++    MSDA = None
+ 
+ 
+ class MSDeformAttnFunction(Function):
+diff --git a/trainer.py b/trainer.py
+index fd746eb..fe1339a 100644
+--- a/trainer.py
++++ b/trainer.py
+@@ -55,9 +55,9 @@ class RelationformerTrainer(SupervisedTrainer):
+ 
+ 
+         self.optimizer.step()
+-        
+-        gc.collect()
+-        torch.cuda.empty_cache()
++        # Upstream ran gc.collect() + torch.cuda.empty_cache() here every step. Measured
++        # on a 4070 at bs1: 290 -> 102 ms/sample once removed - empty_cache forces the
++        # allocator to cudaMalloc everything again on the next step.
+ 
+         return {"images": images, "points": None, "boxes": None, "loss": losses}
+ 
 diff --git a/util/misc.py b/util/misc.py
 index cfe8681..031483f 100644
 --- a/util/misc.py

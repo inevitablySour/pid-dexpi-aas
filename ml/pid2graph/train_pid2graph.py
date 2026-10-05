@@ -47,10 +47,24 @@ def parse_args():
     parser.add_argument("--local_rank", default=0, type=int)
     parser.add_argument("--nproc_per_node", default=None, type=int)
     parser.add_argument('--cuda_visible_device', nargs='*', type=int, default=None)
-    parser.add_argument('--debug', dest='debug', help='do fast debug (tiny subset)', action='store_true')
+    parser.add_argument('--debug', dest='debug', help='do fast debug (tiny subset, 2 epochs unless --epochs)', action='store_true')
+    parser.add_argument('--epochs', dest='epochs', help='override TRAIN.EPOCHS from the config', type=int, default=None)
+    parser.add_argument('--init_from', default='', type=str,
+                        help='start from this checkpoint\'s weights only (fresh optimizer, scheduler and epoch '
+                             'count) - for fine-tuning a finished run, unlike --resume which continues its schedule')
+    parser.add_argument('--freeze_detector', action='store_true',
+                        help='train only the relation (connection) head; backbone, encoder, decoder and the '
+                             'symbol class/box heads stay fixed')
+    parser.add_argument('--lr', dest='lr', type=float, default=None, help='override TRAIN.LR')
     parser.add_argument('--exp_name', dest='exp_name', help='name of the experiment', type=str, required=True)
     parser.add_argument('-b', dest='batch_size', help='batch size', type=int, default=2)
     parser.add_argument('--eval', dest='eval', help='evaluate pretrained model', action='store_true')
+    parser.add_argument('--eval_split', choices=['val', 'test', 'team_test'], default='val',
+                        help="with --eval: 'test' = held-out OPEN100 sheets (the fold's 3 with --fold), "
+                             "'team_test' = the held-out team drawing (DATA.TEAM_TEST_SUBSETS)")
+    parser.add_argument('--fold', type=int, default=None,
+                        help='OPEN100 cross-validation fold (0-3): 8 real sheets join training, 1 validation, '
+                             '3 are this fold\'s test set; also adds DATA.EXTRA_TRAIN_SUBSETS to training')
     return parser.parse_args()
 
 
@@ -80,9 +94,17 @@ def main(rank, args):
     config.MODEL.RESUME = args.resume
     config.log.exp_name = args.exp_name
     config.DATA.BATCH_SIZE = args.batch_size
+    if args.lr is not None:
+        config.TRAIN.LR = args.lr
+    assert not (args.init_from and args.resume), '--init_from and --resume are mutually exclusive'
 
     print('Experiment Name : ', config.log.exp_name)
     print('Batch size : ', config.DATA.BATCH_SIZE)
+    if args.epochs is not None:
+        config.TRAIN.EPOCHS = args.epochs
+    elif args.debug:
+        # The config's 150 epochs would make a "quick" debug/benchmark run take hours.
+        config.TRAIN.EPOCHS = 2
     if args.debug:
         config.DATA.NUM_WORKERS = 0
 
@@ -93,7 +115,9 @@ def main(rank, args):
         os.makedirs(exp_path, exist_ok=True)
         copyfile(args.config, os.path.join(exp_path, "config.yaml"))
 
-    torch.backends.cudnn.benchmark = True
+    # benchmark=True autotunes per input shape; random resize/crop makes nearly every
+    # shape new, so it never stops tuning - measured 1.4-1.8 s vs 0.10 s per sample.
+    torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.enabled = True
     torch.multiprocessing.set_sharing_strategy('file_system')
     args.distributed = False
@@ -107,7 +131,10 @@ def main(rank, args):
     if igdist.get_local_rank() > 0:
         igdist.barrier()
 
-    train_ds, val_ds = build_pid2graph_data(config, mode='split')
+    train_ds, val_ds = build_pid2graph_data(config, mode='split', fold=args.fold)
+    if args.eval and args.eval_split in ('test', 'team_test'):
+        val_ds = build_pid2graph_data(config, mode=args.eval_split, fold=args.fold)
+    print(f'Train patches: {len(train_ds)}  val patches: {len(val_ds)}' + (f'  (fold {args.fold})' if args.fold is not None else ''))
 
     if args.debug:
         train_ds.samples = train_ds.samples[:30]
@@ -116,10 +143,26 @@ def main(rank, args):
     if igdist.get_local_rank() == 0:
         igdist.barrier()
 
-    train_loader = igdist.auto_dataloader(
-        train_ds, batch_size=config.DATA.BATCH_SIZE, num_workers=config.DATA.NUM_WORKERS,
-        collate_fn=image_graph_collate_scene_graph, pin_memory=True, shuffle=True,
-    )
+    if getattr(config.DATA, 'BALANCED_SAMPLING', False) and not args.eval:
+        # Rare classes and the scarce real/team patches are drawn more often; an "epoch"
+        # is DATA.EPOCH_SAMPLES draws (with replacement) rather than one pass over 30k
+        # mostly-synthetic patches. See sample_weights() for the weighting.
+        from pathlib import Path as _Path
+        from torch.utils.data import WeightedRandomSampler
+        from pid2graph_data.dataset_pid2graph import sample_weights
+        weights = sample_weights(train_ds.samples, config, _Path(config.DATA.DATA_PATH) / '.class_counts_cache.json')
+        n_draw = len(train_ds) if args.debug else int(getattr(config.DATA, 'EPOCH_SAMPLES', len(train_ds)))
+        sampler = WeightedRandomSampler(weights, num_samples=n_draw, replacement=True)
+        train_loader = DataLoader(
+            train_ds, batch_size=config.DATA.BATCH_SIZE, sampler=sampler, num_workers=config.DATA.NUM_WORKERS,
+            collate_fn=image_graph_collate_scene_graph, pin_memory=True,
+        )
+        print(f'Balanced sampling: {n_draw} draws per epoch')
+    else:
+        train_loader = igdist.auto_dataloader(
+            train_ds, batch_size=config.DATA.BATCH_SIZE, num_workers=config.DATA.NUM_WORKERS,
+            collate_fn=image_graph_collate_scene_graph, pin_memory=True, shuffle=True,
+        )
     val_loader = igdist.auto_dataloader(
         val_ds, batch_size=config.DATA.BATCH_SIZE, num_workers=config.DATA.NUM_WORKERS,
         collate_fn=image_graph_collate_scene_graph, pin_memory=True, shuffle=False,
@@ -146,6 +189,23 @@ def main(rank, args):
 
     if args.distributed:
         net_wo_dist = model.module
+
+    if args.init_from:
+        state = torch.load(args.init_from, map_location='cpu')['net']
+        own = net_wo_dist.state_dict()
+        # A layer whose shape changed (e.g. the relation head's output when NUM_REL_CLS
+        # goes 1 -> 2 for process vs signal lines) keeps its fresh initialisation.
+        reshaped = [k for k, v in state.items() if k in own and own[k].shape != v.shape]
+        state = {k: v for k, v in state.items() if k not in reshaped}
+        missing_keys, unexpected_keys = net_wo_dist.load_state_dict(state, strict=False)
+        assert set(missing_keys) == set(reshaped) and not unexpected_keys, (missing_keys, unexpected_keys)
+        print('Initialised weights from', args.init_from, '| re-initialised (shape changed):', reshaped or 'none')
+    if args.freeze_detector:
+        # Only the connection head learns. Used to fix connection labels without
+        # disturbing symbol detection, which was trained on correct labels.
+        for name, p in net_wo_dist.named_parameters():
+            p.requires_grad = name.startswith('relation_embed')
+        print('Trainable parameters (relation head only):', count_parameters(net_wo_dist))
 
     matcher = build_matcher(config=config)
     loss = SetCriterion(
@@ -174,6 +234,7 @@ def main(rank, args):
         # FREQ_BIAS is False, which it always is for this dataset).
     ]
 
+    param_dicts = [g for g in param_dicts if g["params"]]  # frozen groups are empty
     optimizer = torch.optim.AdamW(param_dicts, lr=float(config.TRAIN.LR), weight_decay=float(config.TRAIN.WEIGHT_DECAY))
     optimizer = igdist.auto_optim(optimizer)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, config.TRAIN.LR_DROP)
@@ -241,7 +302,8 @@ def main(rank, args):
         evaluator.run()
     else:
         trainer.run()
-    dist.destroy_process_group()
+    # No dist.destroy_process_group() here: igdist.Parallel.__exit__ already does it, and
+    # calling it twice raised AssertionError at the end of every run.
 
 
 if __name__ == '__main__':

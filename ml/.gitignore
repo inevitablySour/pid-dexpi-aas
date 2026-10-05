@@ -1,1 +1,8 @@
 /relationformer/
+
+# draw.io desktop AppImage (154 MB) used by make_team_data.py - download, do not commit
+tools/
+
+# trained model for the review app - published as a GitHub release asset (ml/get_model.sh)
+models/
+/run_folds.log
