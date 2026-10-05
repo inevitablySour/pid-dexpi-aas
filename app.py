@@ -41,9 +41,10 @@ from PIL import Image  # noqa: E402
 
 from pid_dexpi_aas.check_sheet import build_check_sheet, number_items, numbered_overlay, render_after_png  # noqa: E402
 from pid_dexpi_aas.flow_map import (  # noqa: E402
-    MAP_CSS, MAP_JS, Box, Layers, build_layers, hide, image_layers, map_markup, review_overrides,
+    MAP_CSS, MAP_JS, Box, Layers, add_edits, build_layers, hide, image_layers, map_markup, review_overrides,
 )
 from pid_dexpi_aas.decode_drawio import decode_drawio  # noqa: E402
+from pid_dexpi_aas.dexpi_fields import prefill, spec_fields  # noqa: E402
 from pid_dexpi_aas.mapping import classify_detection  # noqa: E402
 from pid_dexpi_aas.parser_drawio import parse_drawio_xml_resolved  # noqa: E402
 from pid_dexpi_aas.review import (  # noqa: E402
@@ -280,6 +281,19 @@ def drawio_layers(review: ReviewDiagram) -> Layers | None:
     layers = build_layers(review.drawio, path, boxes=boxes, overrides=review_overrides(review), names=names)
     if layers is not None:
         layers.legend += extra_legend
+        # lines added or re-pointed in the panel/tables: drawn between their new ends
+        original = {e.id: e for e in review.drawio.edges}
+        edits, replaced = [], set()
+        for c in review.connections:
+            e = original.get(c.id)
+            if not c.include or (e is not None and {c.from_id, c.to_id} == {e.source, e.target}):
+                continue
+            if e is not None:
+                replaced.add(c.id)
+            edits.append((c.id, c.from_id, c.to_id, 1 if c.flow in FLOW_KNOWN else 0,
+                          f"{item_name(c.from_id)} -> {item_name(c.to_id)}: line you "
+                          f"{'changed' if e is not None else 'added'}"))
+        add_edits(layers, edits, replaced)
     return layers
 
 
@@ -364,8 +378,9 @@ def found_by(c: ReviewConnection) -> str:
 
 
 def _keep_specs(old: dict, new: dict) -> dict:
-    """Recomputed tag attributes, keeping the drawing's spec notes ("18 bar")."""
-    return {**new, **({"specs": old["specs"]} if old and old.get("specs") else {})}
+    """Recomputed tag attributes, keeping the drawing's spec notes ("18 bar") and the
+    specification fields filled in by the reviewer."""
+    return {**new, **{k: old[k] for k in ("specs", "dexpi", "custom") if old and old.get(k)}}
 
 
 # ------------------------------------------------------------------------- selection ---
@@ -606,6 +621,77 @@ def _reverse(cid: str) -> None:
     refresh_tables()
 
 
+def _spec_key(sid: str, name: str, part: str, k: str) -> str:
+    return f"spec_{sid}_{name}_{part}_{k}"
+
+
+def _set_spec(sid: str, f, k: str) -> None:
+    s = by_sym[sid]
+    store = s.attributes.setdefault("custom" if f.custom else "dexpi", {})
+    if f.kind == "quantity":
+        v = st.session_state.get(_spec_key(sid, f.name, "v", k))
+        u = st.session_state.get(_spec_key(sid, f.name, "u", k)) or f.units[0]
+        store[f.name] = {"value": v, "unit": u} if v is not None else None
+    else:
+        store[f.name] = st.session_state.get(_spec_key(sid, f.name, "v", k)) or None
+    if store.get(f.name) is None:
+        store.pop(f.name, None)
+
+
+def _spec_widget(s: ReviewSymbol, f, cur, k: str) -> None:
+    label = f.label + (" (custom)" if f.custom else "")
+    if f.kind == "quantity":
+        c1, c2 = st.columns([2, 1])
+        c1.number_input(label, value=(cur or {}).get("value"), format="%g", key=_spec_key(s.id, f.name, "v", k),
+                        on_change=_set_spec, args=(s.id, f, k))
+        unit = (cur or {}).get("unit")
+        c2.selectbox("unit", f.units, index=f.units.index(unit) if unit in f.units else 0,
+                     key=_spec_key(s.id, f.name, "u", k), on_change=_set_spec, args=(s.id, f, k))
+    elif f.kind == "choice":
+        opts = [""] + f.options
+        st.selectbox(label, opts, index=opts.index(cur) if cur in opts else 0, key=_spec_key(s.id, f.name, "v", k),
+                     on_change=_set_spec, args=(s.id, f, k))
+    elif f.kind == "number":
+        st.number_input(label, value=cur, key=_spec_key(s.id, f.name, "v", k), on_change=_set_spec, args=(s.id, f, k))
+    else:
+        st.text_input(label, cur or "", key=_spec_key(s.id, f.name, "v", k), on_change=_set_spec, args=(s.id, f, k))
+
+
+def _neighbours(sid: str) -> list:
+    """The items a process item connects to, upstream ones first (from known flow)."""
+    ups, downs, other = [], [], []
+    for c in review.connections:
+        if not c.include or c.line_type != "process" or sid not in (c.from_id, c.to_id):
+            continue
+        o = c.to_id if c.from_id == sid else c.from_id
+        known = c.flow in FLOW_KNOWN
+        (ups if known and c.to_id == sid else downs if known else other).append(o)
+    out = []
+    for o in ups + other + downs:
+        if o not in out and o != sid:
+            out.append(o)
+    return out
+
+
+def _add_line(a: str, b: str, flow: str = "", note: str = "") -> str:
+    cid = f"manual_c{len(review.connections) + 1}_{a[-4:]}_{b[-4:]}"
+    review.connections.append(ReviewConnection(id=cid, from_id=a, to_id=b, line_type="process", source="manual",
+                                               flow=flow, notes=note or "added by you"))
+    select((), {cid}, zoom=True)
+    return cid
+
+
+def _bypass(sid: str, up: str, down: str) -> None:
+    """Take an in-line item out: its lines to `up` and `down` go, one line up -> down comes in."""
+    for c in review.connections:
+        if c.include and sid in (c.from_id, c.to_id) and {c.from_id, c.to_id} & {up, down}:
+            c.include = False
+            c.notes = "; ".join(x for x in (c.notes, f"replaced by the bypass of {item_name(sid)}") if x)
+    by_sym[sid].include = False
+    known = any(c.flow in FLOW_KNOWN and c.to_id == sid and c.from_id == up for c in review.connections)
+    _add_line(up, down, "reviewer" if known else "", f"bypass of {item_name(sid)}")
+
+
 def _hide(syms=(), rows=()) -> None:
     """Hide items/lines from the map (not from DEXPI) and drop them from the selection."""
     hs, hr = st.session_state.setdefault("hidden", (set(), set()))
@@ -651,6 +737,39 @@ with panel_col:
             for label, value in facts:
                 if value:
                     st.caption(f"**{label}:** {value}")
+            fields = spec_fields(s.dexpi_class) if s.dexpi_class not in (SKIP, OFF_PAGE) else []
+            if fields:
+                vals = (s.attributes or {}).get("dexpi", {})
+                cust = (s.attributes or {}).get("custom", {})
+                pre = prefill(s.dexpi_class, (s.attributes or {}).get("specs", ""))
+                filled = sum(1 for f in fields if (cust if f.custom else vals).get(f.name) or pre.get(f.name))
+                with st.expander(f"Specifications · {s.dexpi_class} ({filled} of {len(fields)} filled)",
+                                 expanded=True):
+                    st.caption("Fields DEXPI defines for this type" + (", pre-filled from the drawing's notes"
+                               if pre else "") + ". Written into the DEXPI file when you build.")
+                    for f in fields:
+                        _spec_widget(s, f, (cust if f.custom else vals).get(f.name) or pre.get(f.name), k)
+            st.markdown("**Change the line-up**")
+            others = [o for o in review.symbols if o.id != s.id and o.include and o.dexpi_class != SKIP]
+            target = st.selectbox("Connect to", [""] + [item_option(o.id) for o in others], key=f"conn_to_{s.id}_{k}",
+                                  help="Adds a process pipe from this item to the one you pick")
+            if target and st.button("Add this line", key=f"add_line_{s.id}_{k}", width="stretch"):
+                _add_line(s.id, option_id[target])
+                st.rerun()
+            nb = _neighbours(s.id)
+            if len(nb) == 2:
+                st.button(f"Bypass: connect {item_name(nb[0])} → {item_name(nb[1])} directly", key=f"bypass_{s.id}_{k}",
+                          on_click=_bypass, args=(s.id, nb[0], nb[1]), width="stretch",
+                          help="Replaces this item's two lines by one line between its neighbours and takes the item "
+                               "out of DEXPI. Undo: switch 'In DEXPI' back on for the item and its old lines.")
+            elif len(nb) > 2:
+                c1, c2 = st.columns(2)
+                a = c1.selectbox("Bypass from", [item_name(x) for x in nb], key=f"bpa_{s.id}_{k}")
+                b = c2.selectbox("to", [item_name(x) for x in nb], index=1, key=f"bpb_{s.id}_{k}")
+                ids = {item_name(x): x for x in nb}
+                if a != b and st.button("Bypass this item", key=f"bypass_{s.id}_{k}", width="stretch"):
+                    _bypass(s.id, ids[a], ids[b])
+                    st.rerun()
             mine = [c for c in review.connections if s.id in (c.from_id, c.to_id) and c.include]
             if mine:
                 st.markdown(f"**Connected to** ({len(mine)}) - click to open the line")

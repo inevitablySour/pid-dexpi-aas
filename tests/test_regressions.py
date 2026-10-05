@@ -281,3 +281,32 @@ def test_hidden_items_and_lines_leave_the_map(lightup):
     assert direct not in out.lines
     assert net in out.lines  # a network piece stays while any of its pairs is still shown
     assert net not in hide(layers, set(), set(net.rows)).lines
+
+
+# ------------------------------------------------------------ specification fields ---
+def test_each_dexpi_class_gets_its_own_spec_fields():
+    from pid_dexpi_aas.dexpi_fields import spec_fields
+
+    names = lambda c: {f.name for f in spec_fields(c)}
+    assert "nominalCapacityVolume" in names("Tank")
+    assert {"designVolumeFlowRate", "differentialPressure"} <= names("Pump")
+    assert "setPressureHigh" in names("SafetyValveOrFitting")
+    assert "nominalCapacityVolume" not in names("Pump")
+    assert next(f for f in spec_fields("Tank") if f.name == "nominalCapacityVolume").units[0] == "l"
+
+
+@needs_routes
+def test_reviewed_spec_values_reach_the_dexpi_file(lightup, tmp_path):
+    import copy
+
+    from pid_dexpi_aas.review import to_dexpi
+
+    review = copy.deepcopy(lightup)
+    v101 = next(s for s in review.symbols if s.tag == "V101")
+    v101.attributes["dexpi"] = {"nominalCapacityVolume": {"value": 2.5, "unit": "l"}}
+    v101.attributes["custom"] = {"Material": "316L"}
+    _, result = to_dexpi(review)
+    assert not result.spec_problems
+    save_and_verify(result.model, tmp_path, "x")
+    xml = next(tmp_path.glob("x*")).read_text()
+    assert 'Value="2.5" Units="Litre"' in xml and 'Value="316L"' in xml

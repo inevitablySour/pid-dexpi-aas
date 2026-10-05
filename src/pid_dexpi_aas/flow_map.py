@@ -363,6 +363,31 @@ def _background_b64(path: Path) -> tuple[str, str]:
     return "image/png", base64.b64encode(buf.getvalue()).decode()
 
 
+def add_edits(layers: Layers, edits: list, replaced_rows: set) -> Layers:
+    """Show the reviewer's line edits on the draw.io map: an added or re-pointed line is
+    drawn between its new ends (teal, with flow arrows when known), and a drawn route
+    whose line was re-pointed fades out - so it is clear what the DEXPI file will hold.
+    edits: [(row id, from item id, to item id, flow sign +1/0, hover text)]."""
+    boxes = {b.id: b for b in layers.boxes}
+    centre = lambda b: ((b.box[0] + b.box[2]) / 2, (b.box[1] + b.box[3]) / 2)
+    for ln in layers.lines:
+        if ln.rows and ln.rows <= replaced_rows:
+            ln.color, ln.dashed, ln.kind, ln.arrows, ln.word, ln.dots = EXCLUDED, True, "excluded", [], None, []
+            ln.tip = "original drawn line - you re-pointed it (see the teal line)"
+    n = 0
+    for rid, a, b, flow, tip in edits:
+        if a not in boxes or b not in boxes:
+            continue
+        pa, pb = centre(boxes[a]), centre(boxes[b])
+        pts = [pa, (pb[0], pa[1]), pb] if abs(pa[0] - pb[0]) > 1 and abs(pa[1] - pb[1]) > 1 else [pa, pb]
+        arrows, _ = _arrows_on(pts, flow)
+        layers.lines.append(Line(pts, FLOW_COLORS["reviewer"], 5, {rid}, tip, arrows=arrows, ends=(a, b)))
+        n += 1
+    if n:
+        layers.legend.append((f"line you added or changed ({n})", FLOW_COLORS["reviewer"], None))
+    return layers
+
+
 def hide(layers: Layers, symbols: set, rows: set) -> Layers:
     """The layers without the items and lines the reviewer hid. A line goes once every
     table row it stands for is hidden (a pipe network's piece stays while any pair of

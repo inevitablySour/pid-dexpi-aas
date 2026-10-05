@@ -410,4 +410,13 @@ def to_dexpi(review: ReviewDiagram) -> tuple[ParsedDiagram, BuildResult]:
                             flow=base.flow if base is not None else None,
                             routes=base.routes if base is not None else None,
                             drawn_edges=list(base.edges) if base is not None else None)
-    return diagram, build_model(diagram, overrides, tag_overrides)
+    result = build_model(diagram, overrides, tag_overrides)
+    # specification fields filled in by the reviewer (dexpi_fields.py), over the drawing's notes
+    from pid_dexpi_aas.dexpi_fields import apply_fields
+    result.spec_problems = []
+    for s in review.symbols:
+        obj = result.shape_objects.get(s.id)
+        values, custom = (s.attributes or {}).get("dexpi"), (s.attributes or {}).get("custom")
+        if obj is not None and (values or custom):
+            result.spec_problems += [f"{s.tag or s.id}: {p}" for p in apply_fields(obj, values, custom)]
+    return diagram, result
