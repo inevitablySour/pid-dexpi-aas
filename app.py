@@ -45,6 +45,7 @@ from pid_dexpi_aas.flow_map import (  # noqa: E402
     Line, build_layers, hide, image_layers, map_markup, review_overrides,
 )
 from pid_dexpi_aas.decode_drawio import decode_drawio  # noqa: E402
+from pid_dexpi_aas.aas_export import DexpiModelInput, aasx_bytes, check_aasx, drawing_svg, mapping_entries  # noqa: E402
 from pid_dexpi_aas.dexpi_fields import prefill, spec_fields  # noqa: E402
 from pid_dexpi_aas.mapping import classify_detection  # noqa: E402
 from pid_dexpi_aas.parser_drawio import parse_drawio_xml_resolved  # noqa: E402
@@ -1152,7 +1153,28 @@ with panel_col:
 
 
 # ---------------------------------------------------------------------------- build ---
-st.markdown("##### 3 · Build the DEXPI file")
+st.markdown("##### 3 · Build the DEXPI file and the AAS")
+with st.expander("AAS details (Asset Administration Shell, IDTA 02012-1-0) - optional, used for the .aasx"):
+    st.caption("Describes the plant this P&ID belongs to. Everything is optional; filled-in fields go into the "
+               "AAS's PlantMetadata and ModelMetadata. The DEXPI file goes inside the AAS package, with every tagged "
+               "item listed so the digital twins can find it by tag.")
+    a1, a2 = st.columns(2)
+    stem_default = Path(review.source_name).stem.strip()
+    aas_plant = {
+        "ProcessPlantName": a1.text_input("Plant name", stem_default, key="aas_plant"),
+        "PlantSectionName": a2.text_input("Plant section", "", key="aas_section"),
+        "ProjectName": a1.text_input("Project", "", key="aas_project"),
+        "EnterpriseName": a2.text_input("Organisation", "", key="aas_enterprise"),
+        "SiteName": a1.text_input("Site", "", key="aas_site"),
+    }
+    aas_model_meta = {
+        "DrawingNumber": a2.text_input("Drawing number", stem_default, key="aas_drawing"),
+        "CreatorName": a1.text_input("Drawn by", "", key="aas_creator"),
+        "CheckerName": a2.text_input("Checked by", "", key="aas_checker"),
+    }
+    aas_base = st.text_input("Id prefix for the AAS, its Submodel and the items (leave empty for an automatic one)",
+                             "", key="aas_base", help="e.g. https://your-lab.example/plants/lightup - the twins look "
+                             "items up by '<prefix>:asset:<tag>'")
 b1, b2 = st.columns([1, 1])
 with b2:
     st.download_button("Save review (.json) to continue later", review_to_json(review),
@@ -1195,8 +1217,23 @@ if build_clicked:
     m2.metric("Instrument functions", len(cm.processInstrumentationFunctions))
     m3.metric("Pipe segments", sum(len(s.segments) for s in cm.pipingNetworkSystems))
     m4.metric("Skipped elements", report.skipped_count)
-    d1, d2 = st.columns(2)
+    d1, d2, d3 = st.columns(3)
     d1.download_button("Download DEXPI XML", xml_bytes, file_name=f"{stem}.xml", mime="application/xml")
+    with st.spinner("Packaging the AAS..."):
+        aas_in = DexpiModelInput(stem, xml_bytes, drawing_svg(diagram, result),
+                                 {k: v for k, v in aas_model_meta.items() if v})
+        aas_data = aasx_bytes([aas_in], {k: v for k, v in aas_plant.items() if v}, base_iri=aas_base or None)
+        aas_ok, aas_problems = check_aasx(aas_data)
+    d3.download_button("Download AAS (.aasx)", aas_data, file_name=f"{stem}.aasx", mime="application/asset-administration-shell-package",
+                       help="Asset Administration Shell with the IDTA 02012-1-0 DEXPI Submodel: the DEXPI file, the "
+                            "drawing as SVG, and every tagged item mapped to a global id.")
+    n_mapped = len(mapping_entries(xml_bytes))
+    if aas_ok:
+        d3.caption(f"✓ Passes the IDTA AAS compliance check · {n_mapped} items mapped")
+    else:
+        d3.warning("The AAS package did not pass the IDTA compliance check")
+        with st.expander("Compliance check details"):
+            st.text("\n".join(aas_problems))
     with st.spinner("Preparing the check sheet..."):
         sheet = build_check_sheet(review, result, mode, diagram)
     d2.download_button(

@@ -62,6 +62,26 @@ Code: `src/pid_dexpi_aas/review.py` (review rows, cross-check, -> DEXPI),
 `ocr_tags.py` (OCR tokens -> tags -> symbols), `ml/pid2graph/infer_sheet.py` (model + OCR,
 runs in the ML venv).
 
+## DEXPI -> AAS (IDTA 02012-1-0)
+
+The review app's build step also gives an `.aasx`: an Asset Administration Shell (Type 1)
+with the IDTA 02012-1-0 Submodel "Information Model for P&I Diagrams based on DEXPI":
+`PlantMetadata`, and per drawing a `Model01` holding `ModelMetadata`, the DEXPI XML
+(`ModelFile`), the drawing as SVG (`ModelRepresentation`) and a `MappingDirectory` - every
+tagged item (equipment, valves, instruments; nozzles as sub tags) with its DEXPI local id
+and a relationship to a stable global id `<prefix>:asset:<tag>` for the digital twins.
+Every package is checked with the IDTA's aas-test-engines.
+
+Several drawings of one plant in one AAS (Model01, Model02, ...):
+
+```bash
+.venv/bin/python -m pid_dexpi_aas.aas_export subprojects/Lumen/*.drawio -o lumen.aasx \
+    --process-plant-name "Lumen gramflow setups" --project-name "INCEPTION CHILL"
+```
+
+AAS metamodel 3.0 (basyx-python-sdk 2.0.x): what IDTA 02012-1-0 was published for and
+what the IDTA test engine checks; 2.1+ writes 3.1.
+
 ## Known limitation: pyDEXPI 1.2.0's Proteus exporter is equipment-only
 
 **Confirmed by direct testing and by reading `process-intelligence-research/pyDEXPI` on

@@ -107,17 +107,52 @@ def _allocate_nozzle(equipment) -> "eq.Nozzle":
     return nozzle
 
 
-def _build_piping_item(shape: Shape, mapping: MappingResult):
+_TAG_PARTS = re.compile(r"^\s*([A-Za-z]+)[\s\-_]*(.*?)\s*$")
+
+
+def _tag_parts(tag: str) -> tuple[str, str]:
+    """"PI 202" -> ("PI", "202"), "TI 201/2" -> ("TI", "201/2"), "GV101" -> ("GV", "101")."""
+    m = _TAG_PARTS.match(tag or "")
+    return (m.group(1), m.group(2)) if m else ("", tag or "")
+
+
+def _tag_attribute(tag: str) -> CustomStringAttribute:
+    return CustomStringAttribute(attributeName="TagName", attributeURI="urn:pid-dexpi-aas:TagName", value=tag)
+
+
+def _build_piping_item(shape: Shape, mapping: MappingResult, tag_name: str | None = None):
+    """A valve or other piping component, carrying its tag: DEXPI's piping component name
+    ("GV101") and number ("101"); a class without those fields (SafetyValveOrFitting)
+    gets a TagName custom attribute so the tag is never lost."""
     cls = _PIPING_CLASSES[mapping.dexpi_class_name]
-    return cls(nodes=[piping.PipingNode(), piping.PipingNode()])
+    obj = cls(nodes=[piping.PipingNode(), piping.PipingNode()])
+    if tag_name:
+        fields = type(obj).model_fields
+        if "pipingComponentName" in fields:
+            obj.pipingComponentName = tag_name
+            obj.pipingComponentNumber = _tag_parts(tag_name)[1] or None
+        elif "customAttributes" in fields:
+            obj.customAttributes = list(obj.customAttributes or []) + [_tag_attribute(tag_name)]
+    return obj
 
 
 def _build_instrumentation_item(shape: Shape, mapping: MappingResult, tag_name: str | None):
+    """An instrument function: its tag split the DEXPI way, "PI 202" -> category "PI" +
+    number "202" (a 'tagName' keyword, used before, is not a field of these classes and
+    was silently dropped)."""
     cls = _INSTRUMENTATION_CLASSES[mapping.dexpi_class_name]
-    kwargs = {}
+    obj = cls()
     if tag_name:
-        kwargs["tagName"] = tag_name
-    return cls(**kwargs)
+        fields = type(obj).model_fields
+        if "processInstrumentationFunctionNumber" in fields:
+            category, number = _tag_parts(tag_name)
+            obj.processInstrumentationFunctionCategory = category or None
+            obj.processInstrumentationFunctionNumber = number or tag_name
+        elif "tagName" in fields:
+            obj.tagName = tag_name
+        elif "customAttributes" in fields:
+            obj.customAttributes = list(obj.customAttributes or []) + [_tag_attribute(tag_name)]
+    return obj
 
 
 def build_shapes(
@@ -172,7 +207,7 @@ def build_shapes(
             )
 
         elif mapping.category == Category.PIPING:
-            obj = _build_piping_item(shape, mapping)
+            obj = _build_piping_item(shape, mapping, tag_name)
             result.shape_objects[shape.id] = obj
             result.records.append(
                 BuildRecord(shape.id, "shape", "built", mapping.dexpi_class_name, mapping.reason)

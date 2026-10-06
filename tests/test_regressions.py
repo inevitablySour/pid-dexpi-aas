@@ -362,3 +362,38 @@ def test_map_with_a_selection_it_does_not_draw(lightup):
     layers = build_layers(lightup.drawio, LIGHTUP)
     m = map_markup(layers, highlight_rows={"not-on-this-map"}, highlight_symbols={"picture-only-item"})
     assert m["view"] is None and m["focus"] is None and "svg" in m["html"]
+
+
+# --------------------------------------------------------------------- AAS export ---
+@needs_routes
+def test_aasx_follows_idta_02012_and_maps_every_tag(lightup, tmp_path):
+    pytest.importorskip("aas_test_engines")
+    import io
+    import zipfile
+
+    from basyx.aas.adapter import aasx
+
+    from pid_dexpi_aas.aas_export import DexpiModelInput, aasx_bytes, check_aasx, mapping_entries
+    from pid_dexpi_aas.review import to_dexpi
+
+    _, result = to_dexpi(lightup)
+    save_and_verify(result.model, tmp_path, "x")
+    xml = next(tmp_path.glob("x*")).read_bytes()
+    entries = mapping_entries(xml)
+    tags = {e.tag for e in entries if e.kind == "TagMapping"}
+    assert {"V101", "P101", "GV101", "PSV201", "PI 202"} <= tags  # equipment, valves, safety valves, instruments
+    assert any(e.kind == "SubTagMapping" for e in entries)  # nozzles
+    data = aasx_bytes([DexpiModelInput("P&ID gramflow reactor V3", xml)], {"ProcessPlantName": "LightUp"})
+    ok, problems = check_aasx(data)
+    assert ok, problems
+    # reads back: the DEXPI file is inside and the Submodel carries the template's structure
+    from basyx.aas import model as aas_model
+
+    objects, files = aas_model.DictObjectStore(), aasx.DictSupplementaryFileContainer()
+    with aasx.AASXReader(io.BytesIO(data)) as reader:
+        reader.read_into(objects, files)
+    sm = next(o for o in objects if getattr(o, "id_short", "") == "DEXPI")
+    model01 = sm.get_referable("Model01")
+    assert {e.id_short for e in model01} >= {"ModelMetadata", "ModelFile", "MappingDirectory"}
+    assert len(list(model01.get_referable("MappingDirectory"))) == len({e.local_id for e in entries})
+    assert any(n.endswith(".xml") for n in zipfile.ZipFile(io.BytesIO(data)).namelist())
