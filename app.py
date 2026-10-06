@@ -1172,6 +1172,10 @@ with st.expander("AAS details (Asset Administration Shell, IDTA 02012-1-0) - opt
         "CreatorName": a1.text_input("Drawn by", "", key="aas_creator"),
         "CheckerName": a2.text_input("Checked by", "", key="aas_checker"),
     }
+    aas_version = st.radio("AAS version", ["3.0", "3.1"], horizontal=True, key="aas_version",
+                           help="3.0: what IDTA 02012-1-0 was published for, read by most AAS software, checked with the "
+                                "IDTA's own test engine. 3.1: the newest metamodel - check that your AAS software reads it. "
+                                "Both are verified against their official metamodel before download.")
     aas_base = st.text_input("Id prefix for the AAS, its Submodel and the items (leave empty for an automatic one)",
                              "", key="aas_base", help="e.g. https://your-lab.example/plants/lightup - the twins look "
                              "items up by '<prefix>:asset:<tag>'")
@@ -1222,16 +1226,18 @@ if build_clicked:
     with st.spinner("Packaging the AAS..."):
         aas_in = DexpiModelInput(stem, xml_bytes, drawing_svg(diagram, result),
                                  {k: v for k, v in aas_model_meta.items() if v})
-        aas_data = aasx_bytes([aas_in], {k: v for k, v in aas_plant.items() if v}, base_iri=aas_base or None)
+        aas_data = aasx_bytes([aas_in], {k: v for k, v in aas_plant.items() if v}, version=aas_version,
+                              base_iri=aas_base or None)
         aas_ok, aas_problems = check_aasx(aas_data)
-    d3.download_button("Download AAS (.aasx)", aas_data, file_name=f"{stem}.aasx", mime="application/asset-administration-shell-package",
+    d3.download_button(f"Download AAS {aas_version} (.aasx)", aas_data, file_name=f"{stem}.aasx", mime="application/asset-administration-shell-package",
                        help="Asset Administration Shell with the IDTA 02012-1-0 DEXPI Submodel: the DEXPI file, the "
                             "drawing as SVG, and every tagged item mapped to a global id.")
     n_mapped = len(mapping_entries(xml_bytes))
     if aas_ok:
-        d3.caption(f"✓ Passes the IDTA AAS compliance check · {n_mapped} items mapped")
+        d3.caption(f"✓ Valid AAS {aas_version} ({'IDTA test engine + ' if aas_version == '3.0' else ''}aas-core "
+                   f"metamodel check) · {n_mapped} items mapped")
     else:
-        d3.warning("The AAS package did not pass the IDTA compliance check")
+        d3.warning(f"The AAS {aas_version} package did not pass the compliance check")
         with st.expander("Compliance check details"):
             st.text("\n".join(aas_problems))
     with st.spinner("Preparing the check sheet..."):

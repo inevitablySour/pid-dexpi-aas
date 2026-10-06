@@ -366,7 +366,8 @@ def test_map_with_a_selection_it_does_not_draw(lightup):
 
 # --------------------------------------------------------------------- AAS export ---
 @needs_routes
-def test_aasx_follows_idta_02012_and_maps_every_tag(lightup, tmp_path):
+@pytest.mark.parametrize("version", ["3.0", "3.1"])
+def test_aasx_follows_idta_02012_and_maps_every_tag(lightup, tmp_path, version):
     pytest.importorskip("aas_test_engines")
     import io
     import zipfile
@@ -383,9 +384,12 @@ def test_aasx_follows_idta_02012_and_maps_every_tag(lightup, tmp_path):
     tags = {e.tag for e in entries if e.kind == "TagMapping"}
     assert {"V101", "P101", "GV101", "PSV201", "PI 202"} <= tags  # equipment, valves, safety valves, instruments
     assert any(e.kind == "SubTagMapping" for e in entries)  # nozzles
-    data = aasx_bytes([DexpiModelInput("P&ID gramflow reactor V3", xml)], {"ProcessPlantName": "LightUp"})
+    data = aasx_bytes([DexpiModelInput("P&ID gramflow reactor V3", xml)], {"ProcessPlantName": "LightUp"},
+                      version=version)
     ok, problems = check_aasx(data)
     assert ok, problems
+    if version == "3.1":
+        return  # BaSyx 2.0.x reads 3.0 only; 3.1 is verified by aas-core3.1 in check_aasx
     # reads back: the DEXPI file is inside and the Submodel carries the template's structure
     from basyx.aas import model as aas_model
 

@@ -238,30 +238,103 @@ def _parent_tag(dexpi_xml: bytes, parent_id: str | None) -> str:
     return _PARENT_TAGS.get(key) or (parent_id or "")
 
 
-def write_aasx(path_or_file, models: list[DexpiModelInput], plant: dict, **kw) -> str:
+VERSIONS = ("3.0", "3.1")  # AAS metamodel versions offered
+_NS = {"3.0": "https://admin-shell.io/aas/3/0", "3.1": "https://admin-shell.io/aas/3/1"}
+
+
+def write_aasx(path_or_file, models: list[DexpiModelInput], plant: dict, version: str = "3.0", **kw) -> str:
     """Write the AASX package; returns the AAS id."""
+    Path(path_or_file).write_bytes(aasx_bytes(models, plant, version=version, **kw)) if isinstance(
+        path_or_file, (str, Path)) else path_or_file.write(aasx_bytes(models, plant, version=version, **kw))
+    return build_package(models, plant, **kw)[2]
+
+
+def aasx_bytes(models: list[DexpiModelInput], plant: dict, version: str = "3.0", **kw) -> bytes:
+    """The AASX package in AAS metamodel `version`.
+
+    Built in 3.0 with BaSyx 2.0.x (what IDTA 02012-1-0 was published for). 3.1 is the same
+    content in the 3.1 schema: for the elements this Submodel uses the two differ only in
+    the namespace, and the result is verified against 3.1 by aas-core3.1 (check_aasx)."""
+    if version not in VERSIONS:
+        raise ValueError(f"AAS version {version!r}: choose one of {VERSIONS}")
     store, files, aas_id = build_package(models, plant, **kw)
-    with aasx.AASXWriter(path_or_file) as writer:
-        writer.write_aas(aas_id, store, files, write_json=False)
-    return aas_id
-
-
-def aasx_bytes(models: list[DexpiModelInput], plant: dict, **kw) -> bytes:
     buf = io.BytesIO()
-    write_aasx(buf, models, plant, **kw)
-    return buf.getvalue()
+    with aasx.AASXWriter(buf) as writer:
+        writer.write_aas(aas_id, store, files, write_json=False)
+    data = buf.getvalue()
+    return data if version == "3.0" else _to_version(data, version)
+
+
+def _to_version(data: bytes, version: str) -> bytes:
+    """Rewrite the package's AAS environment (aasx/data.xml) into another metamodel version."""
+    import zipfile
+
+    src = zipfile.ZipFile(io.BytesIO(data))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():
+            content = src.read(info.filename)
+            if info.filename == "aasx/data.xml":
+                content = content.replace(_NS["3.0"].encode(), _NS[version].encode())
+            dst.writestr(info, content)
+    return out.getvalue()
+
+
+def aasx_version(data: bytes) -> str | None:
+    import zipfile
+
+    xml = zipfile.ZipFile(io.BytesIO(data)).read("aasx/data.xml")[:400].decode("utf-8", "replace")
+    return next((v for v, ns in _NS.items() if ns in xml), None)
+
+
+def _verify_environment(data: bytes, version: str) -> list[str]:
+    """aas-core (the AAS core team's reference implementation) verification of the AAS
+    environment inside the package: schema + all metamodel constraints."""
+    import zipfile
+
+    xml = zipfile.ZipFile(io.BytesIO(data)).read("aasx/data.xml").decode("utf-8")
+    if version == "3.0":
+        from aas_core3 import verification, xmlization
+    else:
+        from aas_core3_1 import verification, xmlization
+    try:
+        env = xmlization.environment_from_str(xml)
+    except Exception as exc:
+        return [f"does not read as an AAS {version} environment: {exc}"]
+    return [f"{e.path}: {e.cause}" for e in verification.verify(env)][:60]
+
+
+def _verify_package(data: bytes) -> list[str]:
+    """Package structure: every relationship target inside the zip exists."""
+    import zipfile
+
+    z = zipfile.ZipFile(io.BytesIO(data))
+    names = set(z.namelist())
+    problems = []
+    for rel in (n for n in names if n.endswith(".rels")):
+        for target in re.findall(r'Target="/?([^"]+)"', z.read(rel).decode("utf-8")):
+            if target not in names:
+                problems.append(f"{rel}: missing part {target}")
+    return problems
 
 
 def check_aasx(data: bytes) -> tuple[bool, list[str]]:
-    """IDTA aas-test-engines compliance check of an AASX package: (ok, problem lines)."""
+    """Check an AASX package: (ok, problems). 3.0: the IDTA's aas-test-engines (package +
+    metamodel) and aas-core3.0; 3.1 (which the IDTA test engine does not read yet): the
+    package structure and aas-core3.1."""
     import zipfile
 
-    from aas_test_engines.file import check_aasx_data
+    version = aasx_version(data)
+    if version is None:
+        return False, ["no AAS 3.0 or 3.1 environment found in the package"]
+    problems = _verify_package(data) + _verify_environment(data, version)
+    if version == "3.0":
+        from aas_test_engines.file import check_aasx_data
 
-    result = check_aasx_data(zipfile.ZipFile(io.BytesIO(data)))
-    if result.ok():
-        return True, []
-    return False, [line for line in result.to_lines() if line.strip()][:60]
+        result = check_aasx_data(zipfile.ZipFile(io.BytesIO(data)))
+        if not result.ok():
+            problems += [line for line in result.to_lines() if line.strip()][:60]
+    return not problems, problems
 
 
 def drawing_svg(diagram, result) -> bytes | None:
@@ -307,14 +380,16 @@ def main() -> None:
     for name in PLANT_FIELDS:
         ap.add_argument(f"--{re.sub(r'(?<!^)(?=[A-Z])', '-', name).lower()}", dest=name, default=None)
     ap.add_argument("--base-iri", default=None, help="prefix of the AAS / Submodel / asset ids")
+    ap.add_argument("--aas-version", choices=VERSIONS, default="3.0", help="AAS metamodel version (default 3.0)")
     args = ap.parse_args()
     plant = {k: getattr(args, k) for k in PLANT_FIELDS if getattr(args, k)}
     models = [model_from_drawio(d) for d in args.drawings]
-    data = aasx_bytes(models, plant, base_iri=args.base_iri)
+    data = aasx_bytes(models, plant, version=args.aas_version, base_iri=args.base_iri)
     Path(args.out).write_bytes(data)
     ok, problems = check_aasx(data)
     n = sum(len(mapping_entries(m.dexpi_xml)) for m in models)
-    print(f"{args.out}: {len(models)} DEXPI model(s), {n} mapped elements, IDTA check {'passed' if ok else 'FAILED'}")
+    print(f"{args.out}: AAS {args.aas_version}, {len(models)} DEXPI model(s), {n} mapped elements, "
+          f"check {'passed' if ok else 'FAILED'}")
     for line in problems:
         print("  ", line)
 

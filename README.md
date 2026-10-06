@@ -79,8 +79,10 @@ Several drawings of one plant in one AAS (Model01, Model02, ...):
     --process-plant-name "Lumen gramflow setups" --project-name "INCEPTION CHILL"
 ```
 
-AAS metamodel 3.0 (basyx-python-sdk 2.0.x): what IDTA 02012-1-0 was published for and
-what the IDTA test engine checks; 2.1+ writes 3.1.
+AAS metamodel 3.0 (default) or 3.1 (`--aas-version 3.1`, or the app's AAS details). 3.0 is
+what IDTA 02012-1-0 was published for and is checked with the IDTA's aas-test-engines plus
+aas-core3.0; 3.1 is the same content in the 3.1 schema, verified with aas-core3.1 (the IDTA
+test engine does not read 3.1 yet). Built with basyx-python-sdk 2.0.x (2.1+ writes only 3.1).
 
 ## Known limitation: pyDEXPI 1.2.0's Proteus exporter is equipment-only
 
