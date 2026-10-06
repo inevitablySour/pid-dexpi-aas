@@ -352,3 +352,13 @@ def test_equipment_tag_goes_to_the_tank_not_the_instrument_tag():
             OcrTag("V101", (180, 140, 220, 160), 0.9, ["V101"])]      # inside the tank
     got = attach_tags(boxes, tags, classes={"tank": "tank", "bubble": "instrumentation"})
     assert got["tank"][0].text == "V101" and got["bubble"][0].text == "FI 102"
+
+
+@needs_routes
+def test_map_with_a_selection_it_does_not_draw(lightup):
+    # selecting a picture-only item (or a line another tab draws) crashed the other maps
+    from pid_dexpi_aas.flow_map import build_layers, map_markup
+
+    layers = build_layers(lightup.drawio, LIGHTUP)
+    m = map_markup(layers, highlight_rows={"not-on-this-map"}, highlight_symbols={"picture-only-item"})
+    assert m["view"] is None and m["focus"] is None and "svg" in m["html"]

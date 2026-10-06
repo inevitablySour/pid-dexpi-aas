@@ -440,6 +440,9 @@ def map_markup(layers: Layers, highlight_rows: set | None = None, highlight_symb
     hr, hs = set(highlight_rows or ()), set(highlight_symbols or ())
     lit_lines = [ln for ln in layers.lines if ln.rows & hr]
     hs |= {s for ln in lit_lines for s in ln.ends}  # a selected connection lights its ends too
+    # only what this map draws: a selection made on another tab (a picture-only item while
+    # the drawing renders) has nothing here to light up or zoom to
+    hs &= {b.id for b in layers.boxes}
     any_lit = bool(lit_lines or hs)
     W, H = layers.size
     mime, bg = _background_b64(layers.background)
