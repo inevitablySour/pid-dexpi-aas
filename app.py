@@ -42,7 +42,7 @@ from PIL import Image  # noqa: E402
 from pid_dexpi_aas.check_sheet import build_check_sheet, number_items, numbered_overlay, render_after_png  # noqa: E402
 from pid_dexpi_aas.flow_map import (  # noqa: E402
     BOX_CHECK, BOX_IN, BOX_LEGEND, BOX_OUT, BOX_PICTURE, MAP_CSS, MAP_JS, OCR_TAG, Box, Layers, add_edits,
-    build_layers, hide, image_layers, map_markup, review_overrides,
+    Line, build_layers, hide, image_layers, map_markup, review_overrides,
 )
 from pid_dexpi_aas.decode_drawio import decode_drawio  # noqa: E402
 from pid_dexpi_aas.dexpi_fields import prefill, spec_fields  # noqa: E402
@@ -302,12 +302,136 @@ def drawio_layers(review: ReviewDiagram) -> Layers | None:
     return layers
 
 
+AGREE = (0, 140, 70)
+DRAWING_ONLY = (40, 100, 220)
+PICTURE_ONLY = BOX_PICTURE
+TYPE_DIFFERS = BOX_CHECK
+FLOW_BASIS = {"drawn arrow": "arrow", "implied": "implied", "reviewer": "reviewer"}
+
+
+def _to_px(review: ReviewDiagram):
+    """draw.io units -> picture pixels (review.align_drawio_to_image's fit)."""
+    (ax, bx), (ay, by) = review.alignment["x"], review.alignment["y"]
+    return lambda p: (ax * p[0] + bx, ay * p[1] + by)
+
+
+def _picture_rows(review: ReviewDiagram):
+    """Picture item id -> the review row it stands for (its matched draw.io item, else
+    itself when it is a picture-only row), and draw.io pair -> draw.io line row."""
+    pic = review.picture
+    row_of = {m: d for d, m in pic["match"].items()}
+    rows = {s.id for s in review.symbols}
+    item_row = {s.id: row_of.get(s.id, s.id if s.id in rows else "") for s in pic["symbols"]}
+    drawing_pairs = {frozenset((c.from_id, c.to_id)): c for c in review.connections
+                     if c.source == "draw.io" and c.include}
+    return item_row, drawing_pairs
+
+
+def hybrid_picture_layers(review: ReviewDiagram) -> Layers:
+    """Both inputs: what the PICTURE alone shows - the model's items and the pipes traced on
+    it - nothing from the drawing. Clicking selects the matching review row."""
+    pic = review.picture
+    item_row, drawing_pairs = _picture_rows(review)
+    boxes = [Box(item_row[s.id], tuple(s.box), BOX_IN, s.tag or s.detected_as, 3,
+                 f"Found in the picture: {s.tag or '(no tag)'} - {s.detected_as}"
+                 + (f"; matches {item_name(item_row[s.id])} in the drawing" if item_row[s.id] in pic["match"] else
+                    "; not in the drawing"), False, "item")
+             for s in pic["symbols"] if s.box]
+    conns = []
+    for c in pic["connections"]:
+        a, b = item_row.get(c.from_id) or c.from_id, item_row.get(c.to_id) or c.to_id
+        row = drawing_pairs.get(frozenset((a, b)))
+        conns.append((row.id if row else c.id, c.from_id, c.to_id, c.line_type, True,
+                      f"{c.line_type} {('traced on the picture' if c.path else 'predicted by the model')}"
+                      + ("; also in the drawing" if row else "; not in the drawing"),
+                      c.path, FLOW_BASIS.get(c.flow, "")))
+    raw = [Box(s.id, tuple(s.box), BOX_IN, "", 3) for s in pic["symbols"] if s.box]  # centres by picture id
+    layers = image_layers(review.image_path, conns, raw)
+    for ln in layers.lines:  # clicking a picture line selects its drawing row, when there is one
+        ln.rows = {r for r in ln.rows if r in {c.id for c in review.connections}}
+    layers.boxes = boxes
+    layers.legend = [("item found in the picture", BOX_IN, None, "box")] + layers.legend
+    return layers
+
+
+def compare_layers(review: ReviewDiagram) -> tuple[Layers, dict] | None:
+    """Both inputs, laid over each other on the picture and coloured by agreement:
+    green both agree, blue only in the drawing, brown dashed only in the picture, amber
+    in both but the picture sees another type. Lines are compared pair by pair."""
+    if not review.picture or not review.alignment or not review.image_path:
+        return None
+    pic = review.picture
+    item_row, drawing_pairs = _picture_rows(review)
+    px = _to_px(review)
+    centre = lambda b: ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
+    counts = {"items": {"agree": 0, "drawing": 0, "picture": 0, "type": 0},
+              "lines": {"agree": 0, "drawing": 0, "picture": 0}}
+    boxes = []
+    for s in review.symbols:
+        if not s.box or s.dexpi_class == SKIP:
+            continue
+        if s.source == "image model":
+            kind, color, dashed = "picture", PICTURE_ONLY, True
+            what = "only in the picture - missing from the drawing?"
+        elif s.id not in pic["match"]:
+            kind, color, dashed = "drawing", DRAWING_ONLY, False
+            what = "only in the drawing - the picture shows nothing here"
+        elif s.image_check.startswith("model agrees"):
+            kind, color, dashed = "agree", AGREE, False
+            what = "in the drawing and the picture"
+        else:
+            kind, color, dashed = "type", TYPE_DIFFERS, False
+            what = f"in both, but {s.image_check}"
+        counts["items"][kind] += 1
+        boxes.append(Box(s.id, tuple(s.box), color, item_name(s.id) if kind != "agree" else "", 3,
+                         f"{item_name(s.id)}: {what}", dashed, f"cmp-{kind}"))
+    centres = {b.id: centre(b.box) for b in boxes}
+    lines = []
+    routes = (review.drawio.routes or {}) if review.drawio else {}
+    seen_drawing = set()
+    for c in pic["connections"]:
+        a, b = item_row.get(c.from_id) or c.from_id, item_row.get(c.to_id) or c.to_id
+        row = drawing_pairs.get(frozenset((a, b)))
+        if a not in centres or b not in centres:
+            continue
+        pts = [tuple(p) for p in c.path] if c.path else [centres[a], centres[b]]
+        if row is not None:
+            seen_drawing.add(row.id)
+            counts["lines"]["agree"] += 1
+            lines.append(Line(pts, AGREE, 4, {row.id}, f"{item_name(a)} - {item_name(b)}: in the drawing and the picture",
+                              ends=(a, b), kind="cmp-agree"))
+        else:
+            counts["lines"]["picture"] += 1
+            lines.append(Line(pts, PICTURE_ONLY, 3, set(), f"{item_name(a)} - {item_name(b)}: only in the picture "
+                              f"({'traced' if c.path else 'model prediction'}) - missing from the drawing?",
+                              dashed=True, ends=(a, b), kind="cmp-picture"))
+    for pair, c in drawing_pairs.items():
+        if c.id in seen_drawing or c.from_id not in centres or c.to_id not in centres:
+            continue
+        r = routes.get(c.id)
+        pts = [px(p) for p in r] if r else [centres[c.from_id], centres[c.to_id]]
+        counts["lines"]["drawing"] += 1
+        lines.append(Line(pts, DRAWING_ONLY, 3, {c.id}, f"{item_name(c.from_id)} - {item_name(c.to_id)}: only in the "
+                          "drawing - the picture does not show this line", ends=(c.from_id, c.to_id), kind="cmp-drawing"))
+    ci, cl = counts["items"], counts["lines"]
+    # chips toggle per agreement class (items and lines together): hide "in both" to see only the differences
+    legend = [(f"in both: {ci['agree']} items, {cl['agree']} lines", AGREE, "cmp-agree", "box"),
+              (f"only in the drawing: {ci['drawing']} items, {cl['drawing']} lines", DRAWING_ONLY, "cmp-drawing", "box"),
+              (f"only in the picture: {ci['picture']} items, {cl['picture']} lines", PICTURE_ONLY, "cmp-picture", "box"),
+              (f"in both, other type in the picture: {ci['type']} items", TYPE_DIFFERS, "cmp-type", "box")]
+    with Image.open(review.image_path) as im:
+        size = im.size
+    return Layers(Path(review.image_path), size, lines, boxes, counts, legend), counts
+
+
 def picture_layers(review: ReviewDiagram) -> Layers | None:
     """The uploaded picture with the symbol boxes and connections as rows say (straight
     lines between box centres - the model has no pipe routes), plus OCR tags no symbol
     claimed."""
     if not review.image_path or not Path(review.image_path).exists():
         return None
+    if review.picture:  # both inputs: the picture's own findings only
+        return hybrid_picture_layers(review)
     only = lambda s: s.image_check.startswith("only in image")
     boxes = [Box(s.id, tuple(s.box), MODEL_ONLY if only(s) else symbol_color(s, set()),
                  "" if only(s) or status(s) == "left out" else item_name(s.id), 3,
@@ -582,7 +706,9 @@ st.session_state["current_show"] = (show_syms, show_conns)
 with map_col:
     zoom = st.session_state.pop("map_click_zoom", True)
     with st.spinner("Tracing pipes and flow directions..."):
-        maps = [(name, layers) for name, layers in (("Drawing (draw.io)", drawio_layers(edited)),
+        cmp = compare_layers(edited)
+        maps = [(name, layers) for name, layers in (("Compare drawing ↔ picture", cmp[0] if cmp else None),
+                                                     ("Drawing (draw.io)", drawio_layers(edited)),
                                                      ("Picture (image)", picture_layers(edited))) if layers]
     containers = st.tabs([n for n, _ in maps]) if len(maps) > 1 else [st.container()] * len(maps)
     for tab, (name, layers) in zip(containers, maps):
@@ -597,12 +723,23 @@ with map_col:
                 click = json.loads(result.clicked)
                 select({click["sym"]} if click.get("sym") else (), click.get("rows") or ())
                 st.rerun()
+            st.caption({
+                "Compare drawing ↔ picture": "The drawing and the picture laid over each other. Green = both agree · "
+                    "blue = only in the drawing · brown dashed = only in the picture · amber = in both, but the "
+                    "picture sees another type. Click 'in both' above the map to hide it and see only the differences. "
+                    "The DEXPI file follows the drawing; use this to spot what it misses.",
+                "Drawing (draw.io)": "Only what the draw.io file says: pipes along their drawn routes, coloured by "
+                    "how the flow direction is known.",
+                "Picture (image)": "Only what the picture shows: items the model found and pipes traced on it. "
+                    "Clicking an item selects the drawing item it matches.",
+            }.get(name, ""))
     if not maps:
         st.info("No picture to show - upload an image, or a draw.io file (with the draw.io app installed) "
                 "for the flow map.")
-    st.caption("Colours: green = in DEXPI · amber = to check · red dashed = left out of DEXPI (items and lines) · "
-               "brown dashed = only the picture / the model says so · grey line = flow direction unknown. "
-               "Click a chip above the map to hide that kind of line.")
+    if len(maps) <= 1:
+        st.caption("Colours: green = in DEXPI · amber = to check · red dashed = left out of DEXPI (items and lines) · "
+                   "brown dashed = only the picture / the model says so · grey line = flow direction unknown. "
+                   "Click a chip above the map to hide that kind of line.")
 
 # ---------------------------------------------------------------------- edit panel ---
 def _set_item(sid: str, field: str, key: str) -> None:

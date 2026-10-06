@@ -103,6 +103,10 @@ class ReviewDiagram:
     unattached_tags: list[dict] = field(default_factory=list)  # OCR tags no symbol claimed
     alignment: dict | None = None  # both-inputs mode: draw.io -> image pixel transform + fit quality
     moved: list = field(default_factory=list)  # both-inputs mode: tags drawn at different places in the two
+    # both-inputs mode: what the picture alone shows - {"symbols": [ReviewSymbol] (image px),
+    # "connections": [ReviewConnection], "match": {draw.io item id: picture item id}} - for
+    # the app's Picture and Compare views (the rows themselves stay draw.io's)
+    picture: dict | None = None
 
     def symbol_rows(self) -> list[dict]:
         return [asdict(s) for s in self.symbols]
@@ -347,6 +351,8 @@ def cross_check(drawio_review: ReviewDiagram, image_review: ReviewDiagram, infer
 
     model_syms = [s for s in image_review.symbols]
     used = set()
+    match = {}
+    review.picture = {"symbols": image_review.symbols, "connections": image_review.connections, "match": match}
     for s in review.symbols:
         s.box = to_px(s.box)
         best = max(model_syms, key=lambda m: _iou(s.box, m.box), default=None)
@@ -354,6 +360,7 @@ def cross_check(drawio_review: ReviewDiagram, image_review: ReviewDiagram, infer
             s.image_check = "not detected by model"
             continue
         used.add(best.id)
+        match[s.id] = best.id
         ok = best.detected_as in _COMPATIBLE.get(category_for_class(s.dexpi_class), set())
         s.image_check = f"model agrees ({best.detected_as})" if ok else f"model sees '{best.detected_as}' here"
         if best.tag and s.tag and _norm_tag(best.tag) != _norm_tag(s.tag):
