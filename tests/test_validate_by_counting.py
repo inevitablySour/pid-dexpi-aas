@@ -19,8 +19,9 @@ def test_all_seven_team_files_are_fully_accounted_for():
         assert report.fully_accounted_for, f"{report.source_file} lost/gained elements"
 
 
-def test_report_flags_multi_tag_shapes_for_manual_review():
+def test_stream_names_no_longer_pile_onto_a_tank():
     report = report_for_file(FIXTURE)
-    # The known tank-with-three-tags case from the PFD smoke fixture (see
-    # tag_association.py's documented limitation).
-    assert len(report.multi_tag_shapes) >= 1
+    # The PFD tank used to collect its tag plus the stream names "Product" and "Gasses"
+    # (tag_association.py's documented limitation); stream names a line ends on are now
+    # off-page connectors, so no item carries several tags here.
+    assert report.multi_tag_shapes == []

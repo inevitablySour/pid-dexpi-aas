@@ -389,16 +389,29 @@ def resolve_floating_edge_endpoints(diagram: ParsedDiagram) -> None:
             return min(x - shape.x, shape.x + shape.width - x, y - shape.y, shape.y + shape.height - y)
         return d
 
-    def resolve_by_nearest_shape(point: tuple[float, float]) -> tuple[str, str] | tuple[None, None]:
+    def resolve_by_nearest_shape(point: tuple[float, float], exclude: str | None = None) -> tuple[str, str] | tuple[None, None]:
         """Returns (shape_id, resolution_tier) or (None, None). Two tiers: a confident
         short-distance match, or a wider-but-unambiguous margin-based match (see
         _MARGIN_RESOLUTION_DISTANCE's docstring above for why margin matters more than
-        absolute distance here)."""
+        absolute distance here).
+
+        A free-text label ("Product", "N 2", "Fume hood") right at the line end and clearly
+        closer than any symbol is where the line goes - a stream leaving or entering the
+        drawing - even when a symbol is near enough for a margin match: the Lumen product
+        line ends 20 from "Product" and 72 from the tank it starts on, and became a loop
+        on that tank. `exclude`: the shape the line's other end is on (never a loop)."""
         x, y = point
+        dist = lambda s: _resolution_distance(s, x, y)
+        near_label = min((s for s in label_shapes if s.text.strip() and s.id != exclude), key=dist, default=None)
+        near_real = min((s for s in real_shapes if s.id != exclude), key=dist, default=None)
+        if (near_label is not None and dist(near_label) <= _MAX_RESOLUTION_DISTANCE
+                and (near_real is None or dist(near_label) * _MARGIN_RATIO <= dist(near_real))):
+            return near_label.id, "nearest_shape"
         for candidates in (real_shapes, label_shapes):
+            candidates = [s for s in candidates if s.id != exclude]
             if not candidates:
                 continue
-            ranked = sorted(candidates, key=lambda s: _resolution_distance(s, x, y))
+            ranked = sorted(candidates, key=dist)
             nearest = ranked[0]
             nearest_distance = _resolution_distance(nearest, x, y)
 
@@ -425,7 +438,7 @@ def resolve_floating_edge_endpoints(diagram: ParsedDiagram) -> None:
                     edge.source = resolved
                     edge.source_resolution = "exit_fraction"
             if edge.source is None:
-                resolved_id, tier = resolve_by_nearest_shape(edge.source_point)
+                resolved_id, tier = resolve_by_nearest_shape(edge.source_point, exclude=edge.target)
                 if resolved_id is not None:
                     edge.source = resolved_id
                     edge.source_resolution = tier
@@ -437,7 +450,7 @@ def resolve_floating_edge_endpoints(diagram: ParsedDiagram) -> None:
                     edge.target = resolved
                     edge.target_resolution = "exit_fraction"
             if edge.target is None:
-                resolved_id, tier = resolve_by_nearest_shape(edge.target_point)
+                resolved_id, tier = resolve_by_nearest_shape(edge.target_point, exclude=edge.source)
                 if resolved_id is not None:
                     edge.target = resolved_id
                     edge.target_resolution = tier

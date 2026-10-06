@@ -52,7 +52,8 @@ def associate_tags(diagram: ParsedDiagram) -> list[TagAssociation]:
     _MAX_TAG_ASSOCIATION_DISTANCE gets target_shape_id=None (unresolved) rather than
     being force-matched to the nearest shape regardless of how far away it actually is.
 
-    KNOWN LIMITATION: nearest-distance-only association conflates true equipment tags
+    Texts a line ends on that are not tags are stream names (off-page connectors) and are
+    never associated. KNOWN LIMITATION (for the rest): nearest-distance-only association conflates true equipment tags
     (e.g. "V101") with nearby stream/state annotations (e.g. "Product", "Reaction
     mixture") when both sit closest to the same shape and no edge/parent-child data
     disambiguates them - confirmed on the PFD smoke-test file, where a tank picks up
@@ -60,14 +61,23 @@ def associate_tags(diagram: ParsedDiagram) -> list[TagAssociation]:
     report shapes with more than one associated tag as needing manual review, not
     silently trust every association.
     """
+    from pid_dexpi_aas.mapping import classify_tag
+
     labeled_shapes = [s for s in diagram.shapes if not s.is_labeled_only]
     associations: list[TagAssociation] = []
+    # A text a line ends on that is not a tag ("Product", "Fume hood [atm]") names the
+    # stream leaving there (an off-page connector), never the tag of the symbol beside it.
+    line_ends = {x for e in diagram.edges for x in (e.source, e.target) if x}
 
     for label in diagram.shapes:
         if not label.is_labeled_only or not label.text:
             continue
 
         if not labeled_shapes:
+            associations.append(TagAssociation(label.id, label.text, None, math.inf))
+            continue
+
+        if label.id in line_ends and classify_tag(label.text)[0] is None:
             associations.append(TagAssociation(label.id, label.text, None, math.inf))
             continue
 

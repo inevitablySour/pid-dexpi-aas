@@ -454,3 +454,19 @@ def test_box_drawn_by_reviewer_is_built_and_its_new_line_routed():
     assert result.shape_objects["drawn1"].tagName == "T-999"
     pts = diagram.routes["manual_c1"]
     assert len(pts) >= 2 and all(abs(p[0] - q[0]) < 1e-6 or abs(p[1] - q[1]) < 1e-6 for p, q in zip(pts, pts[1:]))
+
+
+LUMEN_NODES = ROOT / "subprojects" / "Lumen" / "P&ID Lumen New set-up nodes 081122 (1).drawio"
+
+
+@pytest.mark.skipif(line_routes._find_drawio() is None, reason="needs the draw.io app for line routes")
+def test_line_ending_at_a_stream_name_is_a_stream_not_a_loop():
+    """The Lumen product line starts on V301 and ends 20 from the text "Product" (72 from
+    V301): a FlowOut stream, not a loop back onto V301; "Product" is no valve's tag."""
+    diagram = parse_drawio_file(LUMEN_NODES)
+    assert not [e.id for e in diagram.edges if e.source and e.source == e.target and e.source_point]
+    result = build_model(diagram)
+    product = next(s for s in diagram.shapes if s.text == "Product")
+    assert isinstance(result.shape_objects[product.id], piping.FlowOutPipeOffPageConnector)
+    tags = {s.tag for s in from_drawio(diagram).symbols if s.dexpi_class != "(off-page connector)"}
+    assert "Product" not in tags and "N 2" not in tags

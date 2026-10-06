@@ -524,7 +524,7 @@ by_sym = {s.id: s for s in review.symbols}
 
 
 def friendly_class(cls: str) -> str:
-    return {SKIP: "not in DEXPI", OFF_PAGE: "off-page connector"}.get(cls, cls)
+    return {SKIP: "not in DEXPI", OFF_PAGE: "stream in / out (off-page)"}.get(cls, cls)
 
 
 def item_name(sid: str) -> str:
@@ -871,6 +871,37 @@ def _set_line(cid: str, field: str, key: str) -> None:
     refresh_tables()
 
 
+def _to_stream(cid: str, end: str, key: str) -> None:
+    """One end of a line is a stream leaving or entering the drawing (product, vent, feed):
+    a new off-page row named by the reviewer, placed where the line ends."""
+    c = next(x for x in review.connections if x.id == cid)
+    name = (st.session_state.get(key) or "").strip() or ("Product" if end == "to" else "Feed")
+    keep = by_sym.get(c.from_id if end == "to" else c.to_id)
+    route = (review.drawio.routes or {}).get(cid) if review.drawio else None
+    if route and not c.id.startswith("net"):
+        p = route[-1] if end == "to" else route[0]
+        if review.alignment and review.image_path:
+            p = _to_px(review)(p)
+    elif keep is not None and keep.box:
+        b = keep.box
+        p = (b[2] + (b[2] - b[0]), (b[1] + b[3]) / 2)  # beside the item it comes from
+    else:
+        p = (0.0, 0.0)
+    w = 60.0
+    n = 1 + sum(1 for x in review.symbols if x.id.startswith("stream"))
+    review.symbols.append(ReviewSymbol(
+        id=f"stream{n}", source="manual", box=[p[0] - w / 2, p[1] - w / 4, p[0] + w / 2, p[1] + w / 4],
+        detected_as="stream in/out", tag=name, tag_source="manual", dexpi_class=OFF_PAGE,
+        identified_by="marked by you as a stream in / out", notes="set in the line panel"))
+    if end == "to":
+        c.to_id = f"stream{n}"
+    else:
+        c.from_id = f"stream{n}"
+    c.flow = c.flow if c.flow in FLOW_KNOWN else "reviewer"  # From -> To: into / out of the drawing
+    c.notes = "; ".join(x for x in (c.notes, f"{'to' if end == 'to' else 'from'} stream '{name}'") if x)
+    select((), {cid}, zoom=True)
+
+
 def _reverse(cid: str) -> None:
     c = next(x for x in review.connections if x.id == cid)
     c.from_id, c.to_id, c.flow = c.to_id, c.from_id, "reviewer"
@@ -1195,6 +1226,21 @@ with panel_col:
                       args=(c.id, "include", f"cinc_{c.id}_{k}"))
             st.text_input("Notes", c.notes, key=f"cnote_{c.id}_{k}", on_change=_set_line,
                           args=(c.id, "notes", f"cnote_{c.id}_{k}"))
+            loop = c.from_id == c.to_id
+            if loop:
+                st.warning(f"Both ends are on {item_name(c.from_id)}. A line like this usually leaves the "
+                           "drawing - a product, vent or feed stream. Mark it below.")
+            with st.expander("Stream in / out of the drawing", expanded=loop):
+                st.caption("For a line that ends at a product, vent or feed stream instead of an item: "
+                           "it becomes an off-page connector (DEXPI FlowIn / FlowOut) with this name.")
+                st.text_input("Stream name", "Product", key=f"sname_{c.id}_{k}")
+                b1, b2 = st.columns(2)
+                b1.button("Out: To end", key=f"sout_{c.id}_{k}", on_click=_to_stream,
+                          args=(c.id, "to", f"sname_{c.id}_{k}"), width="stretch",
+                          help=f"Replace the To end ({item_name(c.to_id)}) by a stream leaving the drawing")
+                b2.button("In: From end", key=f"sin_{c.id}_{k}", on_click=_to_stream,
+                          args=(c.id, "from", f"sname_{c.id}_{k}"), width="stretch",
+                          help=f"Replace the From end ({item_name(c.from_id)}) by a stream entering the drawing")
             for end in dict.fromkeys((c.from_id, c.to_id)):  # a line back onto its own item has one end
                 if st.button(f"Go to {item_name(end)} ›", key=f"end_{c.id}_{end}_{k}", type="tertiary"):
                     select({end}, (), zoom=True)
