@@ -52,6 +52,7 @@ BOX_LEGEND = [("item in DEXPI", BOX_IN, "box-in", "box"), ("item to check", BOX_
               ("item left out of DEXPI", BOX_OUT, "box-out", "box")]
 HIGHLIGHT = (230, 0, 200)
 SECTION = (120, 120, 170)  # plant section outlines
+MEMBER = (30, 110, 255)  # items of a selected section: theirs, not one object with it
 LEGEND_BAND = 120
 
 
@@ -249,7 +250,8 @@ def build_layers(diagram: ParsedDiagram, drawio_path: str | Path, boxes: list | 
         pts = [P(p) for p in sec.polygon] + [P(sec.polygon[0])]
         top = min(pts, key=lambda p: (p[1], p[0]))
         lines.append(Line(pts, SECTION, 3, {f"section:{sec.id}"}, f"Plant section: {sec.name} ({len(sec.members)} items)",
-                          dashed=True, word=(sec.name, (top[0] + 6, top[1] + 4)), kind="section"))
+                          dashed=True, word=(sec.name, (top[0] + 6, top[1] + 4)), kind="section",
+                          ends=tuple(sec.members)))
     if boxes is None:
         cat_color = {Category.EQUIPMENT: (240, 50, 230), Category.PIPING: (0, 128, 128),
                      Category.INSTRUMENTATION: (67, 99, 216)}
@@ -448,10 +450,15 @@ def map_markup(layers: Layers, highlight_rows: set | None = None, highlight_symb
     widths stay constant on screen at any zoom."""
     hr, hs = set(highlight_rows or ()), set(highlight_symbols or ())
     lit_lines = [ln for ln in layers.lines if ln.rows & hr]
-    hs |= {s for ln in lit_lines for s in ln.ends}  # a selected connection lights its ends too
+    # a selected connection lights its ends too; a selected SECTION lights its items in their own
+    # colour - they belong to it, they are not one object with it
+    members = {s for ln in lit_lines if ln.kind == "section" for s in ln.ends}
+    hs |= {s for ln in lit_lines if ln.kind != "section" for s in ln.ends}
+    members -= hs
     # only what this map draws: a selection made on another tab (a picture-only item while
     # the drawing renders) has nothing here to light up or zoom to
     hs &= {b.id for b in layers.boxes}
+    members &= {b.id for b in layers.boxes}
     any_lit = bool(lit_lines or hs)
     W, H = layers.size
     mime, bg = _background_b64(layers.background)
@@ -502,7 +509,7 @@ def map_markup(layers: Layers, highlight_rows: set | None = None, highlight_symb
 
     dim = ' class="dim"' if any_lit else ""
     # boxes under lines: a line crossing a box stays clickable
-    parts.append(f"<g{dim}>" + "".join(box_svg(b) for b in layers.boxes if b.id not in hs) +
+    parts.append(f"<g{dim}>" + "".join(box_svg(b) for b in layers.boxes if b.id not in hs and b.id not in members) +
                  "".join(line_svg(ln) for ln in layers.lines if not (ln.rows & hr)) + "</g>")
     glow = _rgb(HIGHLIGHT, 0.3)
     for ln in lit_lines:  # selected on top: a wide glow, then the line in magenta
@@ -510,6 +517,12 @@ def map_markup(layers: Layers, highlight_rows: set | None = None, highlight_symb
         parts.append(f'<polyline points="{pts}" fill="none" stroke="{glow}" stroke-width="14" '
                      f'stroke-linejoin="round"{NS}/>')
         parts.append(line_svg(ln, HIGHLIGHT, 4, lit=True))
+    for b in layers.boxes:
+        if b.id in members:  # a selected section's items: their own colour, each its own box
+            x1, y1, x2, y2 = b.box
+            parts.append(f'<rect x="{x1 - 4:.1f}" y="{y1 - 4:.1f}" width="{x2 - x1 + 8:.1f}" height="{y2 - y1 + 8:.1f}" '
+                         f'fill="{_rgb(MEMBER, 0.12)}" stroke="{_rgb(MEMBER, 0.35)}" stroke-width="8"{NS}/>')
+            parts.append(box_svg(b, MEMBER, 3))
     for b in layers.boxes:
         if b.id in hs:
             x1, y1, x2, y2 = b.box
@@ -521,8 +534,9 @@ def map_markup(layers: Layers, highlight_rows: set | None = None, highlight_symb
     view = None  # None: keep the user's current zoom
     focus = None  # what +/- zoom towards: the selection
     if any_lit:
-        xs = [x for ln in lit_lines for x, _ in ln.points] + [v for b in layers.boxes if b.id in hs for v in (b.box[0], b.box[2])]
-        ys = [y for ln in lit_lines for _, y in ln.points] + [v for b in layers.boxes if b.id in hs for v in (b.box[1], b.box[3])]
+        lit_boxes = hs | members
+        xs = [x for ln in lit_lines for x, _ in ln.points] + [v for b in layers.boxes if b.id in lit_boxes for v in (b.box[0], b.box[2])]
+        ys = [y for ln in lit_lines for _, y in ln.points] + [v for b in layers.boxes if b.id in lit_boxes for v in (b.box[1], b.box[3])]
         x1, x2, y1, y2 = min(xs), max(xs), min(ys), max(ys)
         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
         focus = [cx, cy]
