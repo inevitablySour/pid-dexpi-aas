@@ -459,10 +459,30 @@ def to_dexpi(review: ReviewDiagram) -> tuple[ParsedDiagram, BuildResult]:
         edges.append(edge)
     if base is None:  # image mode: the redraw follows the pipes traced on the picture
         traced = {c.id: [tuple(p) for p in c.path] for c in review.connections if c.include and c.path}
+    else:
+        traced = {}
+    # every other line without a drawn route (added, re-pointed, untraced) is routed around the
+    # items like a draw.io connector, so the re-drawn picture has no straight lines across it
+    from pid_dexpi_aas.routing import route
+    drawn_routes = (base.routes or {}) if base is not None else {}
+    original = {e.id: e for e in base.edges} if base is not None else {}
+    item_box = {sh.id: (sh.x, sh.y, sh.x + sh.width, sh.y + sh.height) for sh in shapes if sh.width and sh.height}
+    obstacles = list(item_box.values())
+    for c in review.connections:
+        if not c.include or c.id in traced or c.from_id not in item_box or c.to_id not in item_box:
+            continue
+        o = original.get(c.id)
+        if c.id in drawn_routes and o is not None and {o.source, o.target} == {c.from_id, c.to_id}:
+            continue  # drawn, unchanged
+        if o is not None and o.merged_into is None and c.id in drawn_routes:
+            pass  # re-pointed: the drawn route no longer fits
+        elif c.id.startswith("net"):
+            continue  # pipe networks are drawn piece by piece from their member lines
+        traced[c.id] = route(item_box[c.from_id], item_box[c.to_id], obstacles)
     diagram = ParsedDiagram(source_file=review.source_name, shapes=shapes, edges=edges,
                             specs=dict(base.specs) if base is not None else {},
                             flow=base.flow if base is not None else None,
-                            routes=base.routes if base is not None else (traced or None),
+                            routes=({**(base.routes or {}), **traced} if base is not None else (traced or None)),
                             drawn_edges=list(base.edges) if base is not None else None,
                             sections=list(base.sections) if base is not None else [])
     result = build_model(diagram, overrides, tag_overrides)

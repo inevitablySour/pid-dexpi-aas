@@ -149,7 +149,10 @@ def _routed_edge_elements(diagram: ParsedDiagram, result: BuildResult) -> list:
     D = lambda p: (p[0], -p[1])  # draw.io y grows down, DEXPI y up
     current = {e.id: e for e in diagram.edges}  # reviewed rows: their own From -> To and flow
     out = []
-    for e in diagram.drawn_edges or diagram.edges:
+    drawn = list(diagram.drawn_edges or [])
+    drawn_ids = {e.id for e in drawn}
+    # the reviewed lines with no drawn edge of their own (added in the review) come last
+    for e in drawn + [e for e in diagram.edges if e.id not in drawn_ids]:
         r = diagram.routes.get(e.id)
         if e.is_decorative or e.is_dashed or not r or len(r) < 2 or e.style in ("pipe network", "adjacent"):
             continue
