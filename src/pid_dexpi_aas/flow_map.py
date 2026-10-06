@@ -31,16 +31,25 @@ from PIL import Image, ImageDraw, ImageFont
 
 from pid_dexpi_aas.parser_drawio import ParsedDiagram
 
-FLOW_COLORS = {"arrow": (215, 80, 0), "implied": (150, 50, 200), "reviewer": (0, 150, 120), "": (130, 130, 130)}
+# One colour per meaning, nothing shared: grey is only "flow unknown", red only "left out".
+FLOW_COLORS = {"arrow": (215, 80, 0), "implied": (150, 50, 200), "reviewer": (0, 150, 120), "": (95, 95, 95)}
 FLOW_WORD = {"arrow": "arrow", "implied": "implied", "reviewer": "reviewer", "": "?"}
 FLOW_TEXT = {"arrow": "flow from an arrow drawn on the line", "implied": "flow implied by neighbouring arrows",
              "reviewer": "flow direction set by the reviewer", "": "flow direction unknown"}
 SIGNAL = (0, 140, 255)
 TAP = (110, 160, 190)
-GUESSED = (220, 0, 0)
+GUESSED = (230, 160, 0)  # amber: "check this", like items to check
 COMPARTMENT = (40, 160, 60)
-EXCLUDED = (200, 200, 200)
-MODEL_LINE = (255, 140, 0)
+EXCLUDED = (205, 40, 40)  # left out of DEXPI: red, dashed - items and lines alike
+MODEL_LINE = (150, 95, 45)  # brown, dashed: only the model / only the picture says so
+# item boxes
+BOX_IN = (0, 140, 70)
+BOX_CHECK = (225, 150, 0)
+BOX_OUT = EXCLUDED
+BOX_PICTURE = MODEL_LINE
+OCR_TAG = (110, 90, 170)
+BOX_LEGEND = [("item in DEXPI", BOX_IN, None, "box"), ("item to check", BOX_CHECK, None, "box"),
+              ("item left out of DEXPI", BOX_OUT, None, "box")]
 HIGHLIGHT = (230, 0, 200)
 LEGEND_BAND = 120
 
@@ -257,7 +266,7 @@ def build_layers(diagram: ParsedDiagram, drawio_path: str | Path, boxes: list | 
     if stats["reviewer"]:
         legend.insert(2, (f"direction set by you ({stats['reviewer']})", FLOW_COLORS["reviewer"], None))
     if stats["excluded"]:
-        legend.append((f"left out of DEXPI ({stats['excluded']})", EXCLUDED, "excluded"))
+        legend.append((f"line left out of DEXPI ({stats['excluded']})", EXCLUDED, "excluded"))
     return Layers(Path(png), size, lines, out_boxes, stats, legend)
 
 
@@ -294,7 +303,7 @@ def image_layers(image_path: str | Path, connections: list, boxes: list[Box]) ->
               (f"predicted by the model, not traced ({n['model']})", MODEL_LINE, None),
               (f"signal line ({n['signal']})", SIGNAL, "signal")]
     if n["excluded"]:
-        legend.append((f"left out of DEXPI ({n['excluded']})", EXCLUDED, "excluded"))
+        legend.append((f"line left out of DEXPI ({n['excluded']})", EXCLUDED, "excluded"))
     return Layers(Path(image_path), size, lines, boxes, n, legend)
 
 
@@ -505,8 +514,12 @@ def map_markup(layers: Layers, highlight_rows: set | None = None, highlight_symb
             view = [cx - w * 0.65, cy - h * 0.65, w * 1.3, h * 1.3]
 
     chips = []
-    for text, c, kind in layers.legend:
-        sw = f'<i style="background:{_rgb(c)}"></i>'
+    for text, c, kind, *shape in layers.legend:
+        if shape and shape[0] == "box":
+            dash = "dashed" if c == BOX_OUT else "solid"
+            sw = f'<i style="width:12px;height:10px;border:2px {dash} {_rgb(c)};background:transparent"></i>'
+        else:
+            sw = f'<i style="background:{_rgb(c)}"></i>'
         if kind:  # a layer the toolbar can hide
             chips.append(f'<button class="chip" data-kind="{kind}" title="Show / hide">{sw}{html.escape(text)}</button>')
         else:

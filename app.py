@@ -41,7 +41,8 @@ from PIL import Image  # noqa: E402
 
 from pid_dexpi_aas.check_sheet import build_check_sheet, number_items, numbered_overlay, render_after_png  # noqa: E402
 from pid_dexpi_aas.flow_map import (  # noqa: E402
-    MAP_CSS, MAP_JS, Box, Layers, add_edits, build_layers, hide, image_layers, map_markup, review_overrides,
+    BOX_CHECK, BOX_IN, BOX_LEGEND, BOX_OUT, BOX_PICTURE, MAP_CSS, MAP_JS, OCR_TAG, Box, Layers, add_edits,
+    build_layers, hide, image_layers, map_markup, review_overrides,
 )
 from pid_dexpi_aas.decode_drawio import decode_drawio  # noqa: E402
 from pid_dexpi_aas.dexpi_fields import prefill, spec_fields  # noqa: E402
@@ -218,14 +219,17 @@ def symbol_color(s: ReviewSymbol, selected: set[str]) -> tuple[int, int, int]:
     if s.id in selected:
         return (220, 0, 220)
     if not s.include or s.dexpi_class == SKIP:
-        return (150, 150, 150)
+        return BOX_OUT
     if needs_review(s):
-        return (220, 40, 40)
-    return (0, 140, 70)
+        return BOX_CHECK
+    return BOX_IN
 
 
-MODEL_ONLY = (245, 130, 49)
-OCR_TAG = (120, 120, 120)
+def _left_out(s: ReviewSymbol) -> bool:
+    return not s.include or s.dexpi_class == SKIP
+
+
+MODEL_ONLY = BOX_PICTURE
 
 
 def _symbol_tip(s: ReviewSymbol) -> str:
@@ -265,7 +269,7 @@ def drawio_layers(review: ReviewDiagram) -> Layers | None:
     # names only on items in (or to check for) DEXPI; left-out shapes and picture-only finds
     # keep theirs in the hover text, so labels don't pile up
     boxes = [Box(s.id, (sh.x, sh.y, sh.x + sh.width, sh.y + sh.height), symbol_color(s, set()),
-                 item_name(s.id) if status(s) != "left out" else "", 3, _symbol_tip(s))
+                 item_name(s.id) if status(s) != "left out" else "", 3, _symbol_tip(s), _left_out(s))
              for s in review.symbols if (sh := shapes.get(s.id)) is not None]
     extra_legend = []
     if review.alignment:
@@ -276,12 +280,12 @@ def drawio_layers(review: ReviewDiagram) -> Layers | None:
                   for s in model_only]
         ocr = _ocr_boxes(review, to_drawio)
         boxes += ocr
-        extra_legend = [(f"found only in the picture ({len(model_only)})", MODEL_ONLY, "model"),
-                        (f"text read in the picture, not on any item ({len(ocr)})", OCR_TAG, "ocr")]
+        extra_legend = [(f"item found only in the picture ({len(model_only)})", MODEL_ONLY, "model", "box"),
+                        (f"text read in the picture, not on any item ({len(ocr)})", OCR_TAG, "ocr", "box")]
     names = {s.id: item_name(s.id) for s in review.symbols}
     layers = build_layers(review.drawio, path, boxes=boxes, overrides=review_overrides(review), names=names)
     if layers is not None:
-        layers.legend += extra_legend
+        layers.legend = BOX_LEGEND + layers.legend + extra_legend
         # lines added or re-pointed in the panel/tables: drawn between their new ends
         original = {e.id: e for e in review.drawio.edges}
         edits, replaced = [], set()
@@ -307,7 +311,7 @@ def picture_layers(review: ReviewDiagram) -> Layers | None:
     only = lambda s: s.image_check.startswith("only in image")
     boxes = [Box(s.id, tuple(s.box), MODEL_ONLY if only(s) else symbol_color(s, set()),
                  "" if only(s) or status(s) == "left out" else item_name(s.id), 3,
-                 _symbol_tip(s), only(s), "model" if only(s) else "item")
+                 _symbol_tip(s), only(s) or _left_out(s), "model" if only(s) else "item")
              for s in review.symbols if s.box]
     ocr = _ocr_boxes(review)
     name = {s.id: item_name(s.id) for s in review.symbols}
@@ -317,7 +321,8 @@ def picture_layers(review: ReviewDiagram) -> Layers | None:
               f", {found_by(c)}" + (f", flow: {FLOW_LABELS.get(c.flow, c.flow)}" if c.flow else ""),
               c.path, basis.get(c.flow, "")) for c in review.connections]
     layers = image_layers(review.image_path, conns, boxes + ocr)
-    layers.legend.append((f"text read in the picture, not on any item ({len(ocr)})", OCR_TAG, "ocr"))
+    layers.legend = BOX_LEGEND + layers.legend + [
+        (f"text read in the picture, not on any item ({len(ocr)})", OCR_TAG, "ocr", "box")]
     return layers
 
 
@@ -595,8 +600,9 @@ with map_col:
     if not maps:
         st.info("No picture to show - upload an image, or a draw.io file (with the draw.io app installed) "
                 "for the flow map.")
-    st.caption("Boxes: green = in DEXPI · red = to check · grey = left out · dashed orange = found only in the "
-               "picture. Pipe colour = how its flow direction is known (chips above the map).")
+    st.caption("Colours: green = in DEXPI · amber = to check · red dashed = left out of DEXPI (items and lines) · "
+               "brown dashed = only the picture / the model says so · grey line = flow direction unknown. "
+               "Click a chip above the map to hide that kind of line.")
 
 # ---------------------------------------------------------------------- edit panel ---
 def _set_item(sid: str, field: str, key: str) -> None:
@@ -697,6 +703,77 @@ def _bypass(sid: str, up: str, down: str) -> None:
     _add_line(up, down, "reviewer" if known else "", f"bypass of {item_name(sid)}")
 
 
+def _overlap(a, b) -> float:
+    """Share of the smaller box covered by the other (0 when apart)."""
+    if not a or not b:
+        return 0.0
+    w = min(a[2], b[2]) - max(a[0], b[0])
+    h = min(a[3], b[3]) - max(a[1], b[1])
+    if w <= 0 or h <= 0:
+        return 0.0
+    small = min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1])) or 1.0
+    return w * h / small
+
+
+def _gap(a, b) -> float:
+    return max(0.0, max(a[0], b[0]) - min(a[2], b[2]), max(a[1], b[1]) - min(a[3], b[3]))
+
+
+def _merge_candidates(s: ReviewSymbol) -> list:
+    """Items whose box overlaps or almost touches this one - typically the same equipment
+    found as several boxes (overlapping first, then the closest)."""
+    if not s.box:
+        return []
+    size = min(s.box[2] - s.box[0], s.box[3] - s.box[1]) or 1.0
+    scored = [(_overlap(s.box, o.box), _gap(s.box, o.box), o) for o in review.symbols if o.id != s.id and o.box]
+    keep = [t for t in scored if t[0] > 0.05 or t[1] <= max(15.0, 0.3 * size)]
+    return [o for _, _, o in sorted(keep, key=lambda t: (-t[0], t[1]))][:6]
+
+
+def _merge_label(s: ReviewSymbol, o: ReviewSymbol) -> str:
+    ov = _overlap(s.box, o.box)
+    return f"{item_option(o.id)} ({friendly_class(o.dexpi_class)}, " + (f"overlaps {ov:.0%})" if ov > 0.05 else "next to it)")
+
+
+def _merge(keep_id: str, other_ids: list) -> None:
+    """Fold duplicate boxes of one item into `keep_id`: their lines move to it (dropping
+    lines that would join it to itself or repeat an existing line), a missing tag / type /
+    specifications are taken from them, the box grows to cover them all, their rows go."""
+    keep = by_sym[keep_id]
+    others = [by_sym[i] for i in other_ids if i in by_sym and i != keep_id]
+    for o in others:
+        if not keep.tag and o.tag:
+            keep.tag, keep.tag_source = o.tag, o.tag_source
+        if keep.dexpi_class == SKIP and o.dexpi_class != SKIP:
+            keep.dexpi_class = o.dexpi_class
+        for key in ("dexpi", "custom"):
+            if o.attributes.get(key):
+                keep.attributes.setdefault(key, {})
+                for k2, v in o.attributes[key].items():
+                    keep.attributes[key].setdefault(k2, v)
+        if o.attributes.get("specs") and not keep.attributes.get("specs"):
+            keep.attributes["specs"] = o.attributes["specs"]
+        if keep.box and o.box:
+            keep.box = [min(keep.box[0], o.box[0]), min(keep.box[1], o.box[1]),
+                        max(keep.box[2], o.box[2]), max(keep.box[3], o.box[3])]
+        keep.include = keep.include or o.include
+        for c in review.connections:
+            c.from_id = keep_id if c.from_id == o.id else c.from_id
+            c.to_id = keep_id if c.to_id == o.id else c.to_id
+    gone = {o.id for o in others}
+    review.symbols = [x for x in review.symbols if x.id not in gone]
+    kept, pairs = [], set()
+    for c in review.connections:
+        key = (frozenset((c.from_id, c.to_id)), c.line_type)
+        if c.from_id == c.to_id or (key in pairs and keep_id in (c.from_id, c.to_id)):
+            continue  # the merge made it a self-loop or a repeat
+        pairs.add(key)
+        kept.append(c)
+    review.connections = kept
+    keep.notes = "; ".join(x for x in (keep.notes, f"merged with {', '.join(refs.get(i, i) for i in gone)}") if x)
+    select({keep_id}, (), zoom=True)
+
+
 def _hide(syms=(), rows=()) -> None:
     """Hide items/lines from the map (not from DEXPI) and drop them from the selection."""
     hs, hr = st.session_state.setdefault("hidden", (set(), set()))
@@ -775,6 +852,17 @@ with panel_col:
                 if a != b and st.button("Bypass this item", key=f"bypass_{s.id}_{k}", width="stretch"):
                     _bypass(s.id, ids[a], ids[b])
                     st.rerun()
+            near = _merge_candidates(s)
+            if near:
+                st.markdown("**Same item drawn twice?**")
+                labels = [_merge_label(s, o) for o in near]
+                pick = st.selectbox("Merge with", [""] + labels,
+                                    key=f"merge_{s.id}_{k}",
+                                    help="Folds the other box into this item: its lines move here and its row goes. "
+                                         "Use when one piece of equipment was found as several boxes.")
+                if pick and st.button(f"Merge into {item_name(s.id)}", key=f"do_merge_{s.id}_{k}", width="stretch"):
+                    _merge(s.id, [near[labels.index(pick)].id])
+                    st.rerun()
             mine = [c for c in review.connections if s.id in (c.from_id, c.to_id) and c.include]
             if mine:
                 st.markdown(f"**Connected to** ({len(mine)}) - click to open the line")
@@ -815,6 +903,17 @@ with panel_col:
                 st.caption("Lines that meet at tees. Every pair of its ends is a line in the table.")
             else:
                 st.markdown(f"**{len(sel_items)} items and {len(sel_lines)} lines selected**")
+                if len(sel_items) >= 2 and not sel_lines:
+                    # keep the tagged / biggest one by default
+                    best = max(sel_items, key=lambda x: (bool(x.tag), (x.box[2] - x.box[0]) * (x.box[3] - x.box[1])
+                                                          if x.box else 0))
+                    names = [item_option(x.id) for x in sel_items]
+                    keep_name = st.selectbox("Merge these into one - keep", names, index=names.index(item_option(best.id)),
+                                             key=f"mkeep_{k}")
+                    if st.button(f"Merge {len(sel_items)} items into one", key=f"mmerge_{k}", width="stretch"):
+                        keep_id = sel_items[names.index(keep_name)].id
+                        _merge(keep_id, [x.id for x in sel_items if x.id != keep_id])
+                        st.rerun()
             st.caption(", ".join(item_name(e) for e in ends[:20]))
             if sel_lines:
                 inc = all(c.include for c in sel_lines)
