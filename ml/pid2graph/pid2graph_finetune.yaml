@@ -35,8 +35,8 @@ DATA:
   SEED: 10
   REAL_SUBSET: 'Patched/PID2Graph OPEN100'
   NUM_FOLDS: 4
-  EXTRA_TRAIN_SUBSETS: ['Patched/Team']       # made by ml/pid2graph/make_team_data.py
-  TEAM_TEST_SUBSETS: ['Patched/Team test']
+  EXTRA_TRAIN_SUBSETS: ['Patched/Team v3']       # made by ml/pid2graph/make_team_data.py
+  TEAM_TEST_SUBSETS: ['Patched/Team v3 test']
   STYLE_AUGMENT: True
   BALANCED_SAMPLING: True
   EPOCH_SAMPLES: 10000     # draws per epoch (with replacement) - ~15 min on a 4070 at bs4

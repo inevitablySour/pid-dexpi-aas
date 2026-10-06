@@ -38,7 +38,11 @@ from train_pid2graph import dict2obj  # noqa: E402
 DATA = HERE.parents[1] / "data" / "PID2Graph"
 SETS = {
     "open100": {"dir": DATA / "Complete" / "PID2Graph OPEN100", "scale": 2.65},
-    "team": {"dir": DATA / "Complete" / "Team test", "scale": 1.0},
+    # LightUp, held out. "Team v3 test" = the corrected labels (reactor and compartments,
+    # tee networks, hand-dashed signal lines); "Team test" (team-v1) had 43 of its 97
+    # connections and is kept only to compare with older scores.
+    "team": {"dir": DATA / "Complete" / "Team v3 test", "scale": 1.0},
+    "team-v1": {"dir": DATA / "Complete" / "Team test", "scale": 1.0},
 }
 
 
