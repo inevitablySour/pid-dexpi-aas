@@ -720,19 +720,21 @@ def _gap(a, b) -> float:
 
 
 def _merge_candidates(s: ReviewSymbol) -> list:
-    """Items whose box overlaps or almost touches this one - typically the same equipment
-    found as several boxes (overlapping first, then the closest)."""
-    if not s.box:
-        return []
-    size = min(s.box[2] - s.box[0], s.box[3] - s.box[1]) or 1.0
-    scored = [(_overlap(s.box, o.box), _gap(s.box, o.box), o) for o in review.symbols if o.id != s.id and o.box]
-    keep = [t for t in scored if t[0] > 0.05 or t[1] <= max(15.0, 0.3 * size)]
-    return [o for _, _, o in sorted(keep, key=lambda t: (-t[0], t[1]))][:6]
+    """Every other item, most likely duplicates first: the most overlap, then the closest,
+    then items with no box. The picker is searchable, so any item can be merged."""
+    def rank(o):
+        if not (s.box and o.box):
+            return (1, 0.0, float("inf"))
+        return (0, -_overlap(s.box, o.box), _gap(s.box, o.box))
+    return sorted((o for o in review.symbols if o.id != s.id), key=rank)
 
 
 def _merge_label(s: ReviewSymbol, o: ReviewSymbol) -> str:
-    ov = _overlap(s.box, o.box)
-    return f"{item_option(o.id)} ({friendly_class(o.dexpi_class)}, " + (f"overlaps {ov:.0%})" if ov > 0.05 else "next to it)")
+    where = ""
+    if s.box and o.box:
+        ov = _overlap(s.box, o.box)
+        where = f", overlaps {ov:.0%}" if ov > 0.05 else f", {_gap(s.box, o.box):.0f} px away"
+    return f"{item_option(o.id)} ({friendly_class(o.dexpi_class)}{where})"
 
 
 def _merge(keep_id: str, other_ids: list) -> None:
@@ -866,7 +868,7 @@ with panel_col:
             if near:
                 st.markdown("**Same item drawn twice?**")
                 labels = [_merge_label(s, o) for o in near]
-                pick = st.selectbox("Merge with", [""] + labels,
+                pick = st.selectbox("Merge with (type to search)", [""] + labels,
                                     key=f"merge_{s.id}_{k}",
                                     help="Folds the other box into this item: its lines move here and its row goes. "
                                          "Use when one piece of equipment was found as several boxes.")
