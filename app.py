@@ -1105,7 +1105,7 @@ with panel_col:
                       args=(c.id, "include", f"cinc_{c.id}_{k}"))
             st.text_input("Notes", c.notes, key=f"cnote_{c.id}_{k}", on_change=_set_line,
                           args=(c.id, "notes", f"cnote_{c.id}_{k}"))
-            for end in (c.from_id, c.to_id):
+            for end in dict.fromkeys((c.from_id, c.to_id)):  # a line back onto its own item has one end
                 if st.button(f"Go to {item_name(end)} ›", key=f"end_{c.id}_{end}_{k}", type="tertiary"):
                     select({end}, (), zoom=True)
                     st.rerun()
