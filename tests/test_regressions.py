@@ -529,3 +529,74 @@ def test_tracer_does_not_attach_a_frame_running_past_a_symbol():
     d.line((20, 195, 680, 195), fill=0, width=3)   # frame edge 5 px above all three
     pairs = {(x["a"], x["b"]) for x in trace(np.asarray(im), [a, b, c])}
     assert pairs == {(0, 1)}
+
+
+# ------------------------------------------------------------------ symbol refinement ---
+def _refine():
+    pytest.importorskip("scipy")
+    import sys
+
+    sys.path.insert(0, str(ROOT / "ml" / "pid2graph"))
+    sys.path.insert(0, str(ROOT / "src"))
+    from refine_symbols import refine
+    return refine
+
+
+def _sym(i, box, cls, score=0.9):
+    return {"id": f"m{i}", "box": list(box), "class": cls, "score": score, "class_votes": {cls: 1}, "n_tiles": 1}
+
+
+def test_refine_finds_a_piped_container_and_its_compartments_but_not_a_frame():
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    refine = _refine()
+    im = Image.new("L", (1400, 900), 255)
+    d = ImageDraw.Draw(im)
+    d.rounded_rectangle((100, 100, 700, 400), radius=30, outline=0, width=2)  # reactor
+    d.rectangle((150, 180, 300, 330), outline=0, width=2)                      # compartments
+    d.rectangle((500, 180, 650, 330), outline=0, width=2)
+    d.line((400, 400, 400, 520), fill=0, width=2)                              # pipe ending on it
+    d.rectangle((360, 520, 440, 600), outline=0, width=2)                      # pump below
+    d.rectangle((850, 100, 1350, 450), outline=0, width=2)                     # section frame
+    v1, v2 = (900, 250, 980, 330), (1200, 250, 1280, 330)
+    d.rectangle(v1, outline=0, width=2)
+    d.rectangle(v2, outline=0, width=2)
+    d.line((980, 290, 1200, 290), fill=0, width=2)
+    d.line((1280, 290, 1390, 290), fill=0, width=2)                            # crosses the frame
+    syms = [_sym(0, (360, 520, 440, 600), "pump"), _sym(1, v1, "valve"), _sym(2, v2, "valve")]
+    out, _ = refine(np.asarray(im), syms, [])
+    added = sorted((s["class"], tuple(round(v) for v in s["box"])) for s in out if s["id"].startswith("c"))
+    assert [c for c, _ in added] == ["general", "general", "tank"]
+    tank = next(b for c, b in added if c == "tank")
+    assert abs(tank[0] - 100) <= 3 and abs(tank[2] - 700) <= 3  # the reactor, not the frame
+
+
+def test_refine_fits_a_loose_tank_box_and_merges_its_fragments():
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    refine = _refine()
+    im = Image.new("L", (800, 800), 255)
+    d = ImageDraw.Draw(im)
+    d.rounded_rectangle((300, 150, 420, 600), radius=40, outline=0, width=2)   # a tall vessel
+    d.line((360, 600, 360, 700), fill=0, width=2)
+    syms = [_sym(0, (300, 150, 420, 380), "tank"), _sym(1, (300, 370, 420, 600), "tank"),
+            _sym(2, (100, 100, 180, 180), "valve")]
+    out, renamed = refine(np.asarray(im), syms, [])
+    tanks = [s for s in out if s["class"] == "tank"]
+    assert len(tanks) == 1 and renamed
+    assert [round(v) for v in tanks[0]["box"]] == [299, 149, 421, 601] or \
+        all(abs(a - b) <= 3 for a, b in zip(tanks[0]["box"], (300, 150, 420, 600)))
+
+
+def test_refine_lets_a_tag_inside_a_box_set_its_class_but_not_an_off_page_arrow():
+    import numpy as np
+
+    refine = _refine()
+    gray = np.full((400, 600), 255, np.uint8)
+    syms = [_sym(0, (100, 100, 180, 180), "valve"), _sym(1, (300, 100, 420, 150), "inlet/outlet")]
+    tokens = [{"text": "P101", "conf": 0.99, "box": [115, 130, 165, 150], "angle": 0},
+              {"text": "V204", "conf": 0.99, "box": [320, 115, 380, 135], "angle": 0}]
+    out, _ = refine(gray, syms, tokens, fixes=("tag",))
+    assert [s["class"] for s in out] == ["pump", "inlet/outlet"]

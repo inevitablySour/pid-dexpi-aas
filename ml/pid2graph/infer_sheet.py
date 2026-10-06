@@ -225,6 +225,23 @@ def run_ocr(sheet: Image.Image, use_gpu: bool, tile: int = 1000, stride: int = 7
     return tokens
 
 
+def use_fallback_attention(device: str) -> None:
+    """The compiled deformable-attention op is CUDA-only and only built where the CUDA
+    toolkit is installed (setup.sh); otherwise use the repo's pure-PyTorch reference
+    implementation - on CPU, or on an NVIDIA GPU with just the driver (a laptop)."""
+    import models.ops.functions.ms_deform_attn_func as f
+    if device != "cpu" and f.MSDA is not None:
+        return
+    import models.ops.modules.ms_deform_attn as m
+
+    class _CPUFallback:
+        @staticmethod
+        def apply(value, shapes, level_start, sampling_locations, attention_weights, im2col_step):
+            return f.ms_deform_attn_core_pytorch(value, shapes, sampling_locations, attention_weights)
+
+    m.MSDeformAttnFunction = _CPUFallback
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--image", required=True)
@@ -237,25 +254,21 @@ def main() -> None:
     ap.add_argument("--stride", type=int, default=700)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--no-ocr", action="store_true")
+    ap.add_argument("--no-refine", action="store_true", help="raw model symbols (refine_symbols.py off)")
     args = ap.parse_args()
 
-    import models.ops.functions.ms_deform_attn_func as f
-    if args.device == "cpu" or f.MSDA is None:
-        # The compiled deformable-attention op is CUDA-only and only built where the CUDA
-        # toolkit is installed (setup.sh); otherwise use the repo's pure-PyTorch reference
-        # implementation - on CPU, or on an NVIDIA GPU with just the driver (a laptop).
-        import models.ops.modules.ms_deform_attn as m
-
-        class _CPUFallback:
-            @staticmethod
-            def apply(value, shapes, level_start, sampling_locations, attention_weights, im2col_step):
-                return f.ms_deform_attn_core_pytorch(value, shapes, sampling_locations, attention_weights)
-
-        m.MSDeformAttnFunction = _CPUFallback
-
+    use_fallback_attention(args.device)
     sheet = load_sheet(args.image)
     symbols, connections = detect(sheet, args.checkpoint, args.tile, args.stride, args.device)
     tokens = [] if args.no_ocr else run_ocr(sheet, use_gpu=args.device != "cpu")
+    # Clean up with the picture and the tags (refine_symbols.py): tag-set classes, tank boxes
+    # fitted to their outlines and merged, containers and their compartments the model misses.
+    if not args.no_refine:
+        from refine_symbols import refine
+        symbols, renamed = refine(np.asarray(sheet.convert("L")), symbols, tokens)
+        connections = [dict(c, **{"from": renamed.get(c["from"], c["from"]), "to": renamed.get(c["to"], c["to"])})
+                       for c in connections]
+        connections = [c for c in connections if c["from"] != c["to"]]
     # Pipes followed across the whole sheet (trace_pipes.py): the model only links symbols
     # that share a tile; the tracer has no tiles. Paths and arrowhead directions included.
     from trace_pipes import trace_connections

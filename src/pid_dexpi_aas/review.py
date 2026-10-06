@@ -227,7 +227,8 @@ def from_image(infer: dict, source_name: str) -> ReviewDiagram:
             tag=tag, tag_source=f"OCR {how}" if tag else "", dexpi_class=dexpi_class,
             identified_by=identified_by, confidence=round(float(s["score"]), 3),
             attributes=_instrument_attributes(dexpi_class, tag),
-            notes="; ".join(x for x in (mapping.reason, f"tile votes {votes}" if votes else "") if x),
+            notes="; ".join(x for x in (mapping.reason, f"tile votes {votes}" if votes else "",
+                                        *s.get("refined", [])) if x),
             include=dexpi_class != SKIP,
         ))
     review.unattached_tags = [

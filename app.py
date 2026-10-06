@@ -105,7 +105,7 @@ def _digest(*parts: bytes) -> str:
 
 # Bump when the model's input handling changes, so results cached by an older version
 # are redone (v2: dark-theme exports keep their light lines - sheet_image.py; v3: traced pipes).
-INFER_VERSION = b"v3"
+INFER_VERSION = b"v4"
 
 
 @st.cache_data(show_spinner=False)
