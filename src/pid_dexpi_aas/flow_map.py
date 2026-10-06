@@ -51,6 +51,7 @@ OCR_TAG = (110, 90, 170)
 BOX_LEGEND = [("item in DEXPI", BOX_IN, "box-in", "box"), ("item to check", BOX_CHECK, "box-check", "box"),
               ("item left out of DEXPI", BOX_OUT, "box-out", "box")]
 HIGHLIGHT = (230, 0, 200)
+SECTION = (120, 120, 170)  # plant section outlines
 LEGEND_BAND = 120
 
 
@@ -243,6 +244,12 @@ def build_layers(diagram: ParsedDiagram, drawio_path: str | Path, boxes: list | 
                 line.dots.append(P(end))
         lines.append(line)
 
+    # plant sections (frames drawn around groups, sections.py): outline + name, own layer
+    for sec in getattr(diagram, "sections", None) or []:
+        pts = [P(p) for p in sec.polygon] + [P(sec.polygon[0])]
+        top = min(pts, key=lambda p: (p[1], p[0]))
+        lines.append(Line(pts, SECTION, 3, set(), f"Plant section: {sec.name} ({len(sec.members)} items)",
+                          dashed=True, word=(sec.name, (top[0] + 6, top[1] + 4)), kind="section"))
     if boxes is None:
         cat_color = {Category.EQUIPMENT: (240, 50, 230), Category.PIPING: (0, 128, 128),
                      Category.INSTRUMENTATION: (67, 99, 216)}
@@ -263,6 +270,8 @@ def build_layers(diagram: ParsedDiagram, drawio_path: str | Path, boxes: list | 
               (f"instrument on a pipe ({stats['tap']})", TAP, "tap"),
               ("tee", (0, 0, 0), None), ("guessed line end", GUESSED, None),
               ("compartments sharing a wall", COMPARTMENT, "compartment")]
+    if getattr(diagram, "sections", None):
+        legend.append((f"plant sections ({len(diagram.sections)})", SECTION, "section"))
     if stats["reviewer"]:
         legend.insert(2, (f"direction set by you ({stats['reviewer']})", FLOW_COLORS["reviewer"], "flow-reviewer"))
     if stats["excluded"]:
@@ -473,7 +482,10 @@ def map_markup(layers: Layers, highlight_rows: set | None = None, highlight_symb
             out.append(f'<polygon points="{poly}" fill="{col}"/>')
         if ln.word and not lit:
             x, y = ln.word[1]
-            out.append(label_svg(x, y + 14, ln.word[0], col, 15, "word"))
+            if ln.kind == "section":
+                out.append(label_svg(x, y + 18, ln.word[0], col, 22, "sec"))
+            else:
+                out.append(label_svg(x, y + 14, ln.word[0], col, 15, "word"))
         rows = "|".join(sorted(ln.rows))
         tip = html.escape(ln.tip + ("  (click to select)" if ln.rows else ""))
         return f'<g class="item k-{ln.kind}" data-rows="{html.escape(rows)}"><title>{tip}</title>{"".join(out)}</g>'

@@ -608,8 +608,13 @@ items_tab, lines_tab = st.tabs([f"Items ({len(review.symbols)})", f"Lines ({len(
 # ---------------------------------------------------------------------------- tables ---
 ITEM_FILTERS = ["All", "Selected", "To check", "In DEXPI", "Left out"]
 with items_tab:
-    f1, f2 = st.columns([3, 2])
+    f1, f2, f3 = st.columns([3, 2, 2])
     item_filter = f1.segmented_control("Show", ITEM_FILTERS, default="All", key="item_filter")
+    section_names = sorted({s.section for s in review.symbols if s.section} |
+                           {sec.name for sec in (review.drawio.sections if review.drawio else [])})
+    section_filter = f3.selectbox("Plant section", ["All sections"] + section_names + (["(no section)"] if section_names else []),
+                                  key="section_filter", disabled=not section_names,
+                                  help="Frames drawn around groups of items on the drawing")
     if any(s.source == "image model" for s in review.symbols) and f2.button(
             "Re-classify model items from their tags",
             help="Re-runs the tag-prefix classifier (PI -> instrument, GV -> valve, ...) for items the model found."):
@@ -625,14 +630,16 @@ with items_tab:
     keep = {"All": lambda s: True, "Selected": lambda s: s.id in seed_syms,
             "To check": lambda s: status(s) == "needs review", "In DEXPI": lambda s: status(s) == "in DEXPI",
             "Left out": lambda s: status(s) == "left out"}[item_filter or "All"]
-    shown_syms = [s for s in review.symbols if keep(s)]
+    in_section = (lambda s: True) if section_filter in (None, "All sections") else \
+        (lambda s: not s.section) if section_filter == "(no section)" else (lambda s: s.section == section_filter)
+    shown_syms = [s for s in review.symbols if keep(s) and in_section(s)]
     hybrid = any(s.image_check for s in review.symbols)
     item_df = pd.DataFrame([{
         "selected": s.id in seed_syms, "id": s.id, "ref": refs[s.id], "tag": s.tag, "dexpi_class": s.dexpi_class,
         "include": s.include, "status": ("● " if s.id in seed_syms else "") + status(s), "found_as": found_as(s),
-        "why": s.identified_by, "image_check": s.image_check, "specs": (s.attributes or {}).get("specs", ""),
-        "notes": s.notes} for s in shown_syms],
-        columns=["selected", "id", "ref", "tag", "dexpi_class", "include", "status", "found_as", "why",
+        "section": s.section, "why": s.identified_by, "image_check": s.image_check,
+        "specs": (s.attributes or {}).get("specs", ""), "notes": s.notes} for s in shown_syms],
+        columns=["selected", "id", "ref", "tag", "dexpi_class", "include", "status", "found_as", "section", "why",
                  "image_check", "specs", "notes"])
     edited_items = st.data_editor(
         item_df, key=f"items_{version}_{item_filter}", num_rows="dynamic", width="stretch", hide_index=True,
@@ -648,6 +655,9 @@ with items_tab:
                                                        help="Untick to leave this item out of the DEXPI file"),
             "status": st.column_config.TextColumn("Status", disabled=True),
             "found_as": st.column_config.TextColumn("Found as", disabled=True),
+            "section": (st.column_config.SelectboxColumn("Plant section", options=[""] + section_names,
+                                                         help="The frame it was drawn in; change it here")
+                        if section_names else None),
             "why": st.column_config.TextColumn("How the type was chosen", disabled=True),
             "image_check": (st.column_config.TextColumn("Picture check", disabled=True) if hybrid else None),
             "specs": st.column_config.TextColumn("Specs from the drawing", disabled=True),
@@ -705,6 +715,8 @@ def apply_edits() -> ReviewDiagram:
             s.tag = str(r.get("tag") or "").strip()
             s.dexpi_class = r.get("dexpi_class") or SKIP
             s.notes = str(r.get("notes") or "")
+            if "section" in r and r.get("section") is not None:
+                s.section = str(r.get("section") or "")
             s.attributes = _keep_specs(s.attributes, _instrument_attributes(s.dexpi_class, s.tag))
             out.append(s)
     for n, r in enumerate(x for x in edited_items.to_dict("records") if not x.get("id")):
@@ -1001,13 +1013,18 @@ with panel_col:
         elif len(sel_items) == 1 and not sel_lines:
             s = sel_items[0]
             st.markdown(f"**Item: {item_name(s.id)}** &nbsp; `{refs[s.id]}`")
-            st.caption(f"{found_as(s)} · status: {status(s)}")
+            st.caption(f"{found_as(s)} · status: {status(s)}" + (f" · section: {s.section}" if s.section else ""))
             st.text_input("Tag", s.tag, key=f"tag_{s.id}_{k}", on_change=_set_item, args=(s.id, "tag", f"tag_{s.id}_{k}"))
             st.selectbox("DEXPI type", DEXPI_CLASS_CHOICES,
                          index=DEXPI_CLASS_CHOICES.index(s.dexpi_class) if s.dexpi_class in DEXPI_CLASS_CHOICES else 0,
                          key=f"cls_{s.id}_{k}", on_change=_set_item, args=(s.id, "dexpi_class", f"cls_{s.id}_{k}"))
             st.toggle("In DEXPI", s.include, key=f"inc_{s.id}_{k}", on_change=_set_item,
                       args=(s.id, "include", f"inc_{s.id}_{k}"))
+            if section_names:
+                secs = [""] + section_names
+                st.selectbox("Plant section", secs, index=secs.index(s.section) if s.section in secs else 0,
+                             key=f"sec_{s.id}_{k}", on_change=_set_item, args=(s.id, "section", f"sec_{s.id}_{k}"),
+                             help="The frame it was drawn in on the drawing")
             st.text_input("Notes", s.notes, key=f"note_{s.id}_{k}", on_change=_set_item,
                           args=(s.id, "notes", f"note_{s.id}_{k}"))
             facts = [("How the type was chosen", s.identified_by), ("Picture check", s.image_check),

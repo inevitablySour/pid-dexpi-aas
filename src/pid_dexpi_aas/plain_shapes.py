@@ -69,11 +69,42 @@ def _contains(outer: Shape, inner: Shape) -> bool:
     return outer.x <= cx <= outer.x + outer.width and outer.y <= cy <= outer.y + outer.height and outer is not inner
 
 
+def _near_border(p, s: Shape, tol: float = 10.0) -> bool:
+    """A point on (or right next to) a box's outline."""
+    x, y = p
+    x1, y1, x2, y2 = s.x, s.y, s.x + s.width, s.y + s.height
+    if not (x1 - tol <= x <= x2 + tol and y1 - tol <= y <= y2 + tol):
+        return False
+    return min(abs(x - x1), abs(x - x2), abs(y - y1), abs(y - y2)) <= tol
+
+
 def _is_frame(shape: Shape, diagram: ParsedDiagram) -> bool:
-    stroke = _STROKE_RE.search(shape.style or "")
-    if stroke and stroke.group(1).strip().lower() not in _BLACK:
-        return True
-    return any(s.shape_token and _contains(shape, s) for s in diagram.shapes)
+    """A box drawn around a group (a plant section), not an item. Decided by what it holds
+    and what connects to it - never by colour or line weight:
+      - it contains at least two items, or one item with lines or a title;
+      - nothing connects to the box itself: no line is attached to it, and no loose line
+        end lands on its outline (pipes go to the items inside instead).
+    The reactor container holds its compartments but has pipes ending on its outline, so it
+    stays equipment."""
+    items = [o for o in diagram.shapes if o is not shape and (o.shape_token or _is_closed_bordered(o))
+             and _contains(shape, o) and o.width * o.height < shape.width * shape.height]
+    if not items:
+        return False
+    item_ids = {o.id for o in items}
+    lines_inside = any(e.source in item_ids or e.target in item_ids for e in diagram.edges)
+    if len(items) < 2 and not lines_inside:
+        from pid_dexpi_aas.sections import _is_title  # local: sections imports this module
+        titled = any(not t.shape_token and (t.style or "").startswith("text;") and _is_title(t.text)
+                     and _contains(shape, t) for t in diagram.shapes)
+        if not titled:
+            return False
+    for e in diagram.edges:
+        if shape.id in (e.source, e.target):
+            return False
+        for pt in (e.source_point, e.target_point):
+            if pt and _near_border(pt, shape):
+                return False
+    return True
 
 
 def classify_name(name: str, ellipse: bool) -> tuple[Category, str, str, str, bool]:
@@ -97,7 +128,13 @@ def classify_name(name: str, ellipse: bool) -> tuple[Category, str, str, str, bo
 
 def find_plain_symbols(diagram: ParsedDiagram) -> dict[str, PlainSymbol]:
     """shape id -> PlainSymbol for every plain-shape symbol in the diagram."""
-    candidates = [s for s in diagram.shapes if _is_closed_bordered(s) and not _is_frame(s, diagram)]
+    library = [s for s in diagram.shapes if s.shape_token]
+    # a box inside a library symbol is part of that symbol's drawing (LightUp's columns X101/X102
+    # carry their body, separator and liquid level as plain boxes), not an item of its own
+    part_of_symbol = lambda s: any(_contains(lib, s) and s.width * s.height < lib.width * lib.height
+                                   for lib in library)
+    candidates = [s for s in diagram.shapes if _is_closed_bordered(s) and not part_of_symbol(s)
+                  and not _is_frame(s, diagram)]
     texts = [s for s in diagram.shapes if not s.shape_token and s.text.strip() and (s.style or "").startswith("text;")]
     # Each text cell names the SMALLEST candidate it sits in (the "Mixing" label is inside
     # both the Mixing box and the reactor container; it belongs to the Mixing box).
@@ -189,3 +226,8 @@ def decode_plain_token(token: str) -> tuple[Category, str, str] | None:
         return None
     cat, cls, label = token[len(PLAIN_PREFIX):].split(":", 2)
     return Category[cat], cls, label
+
+
+def find_frames(diagram: ParsedDiagram) -> list[Shape]:
+    """Boxes drawn around groups of items (see _is_frame) - plant sections."""
+    return [s for s in diagram.shapes if _is_closed_bordered(s) and _is_frame(s, diagram)]

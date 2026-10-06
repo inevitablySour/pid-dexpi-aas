@@ -401,3 +401,29 @@ def test_aasx_follows_idta_02012_and_maps_every_tag(lightup, tmp_path, version):
     assert {e.id_short for e in model01} >= {"ModelMetadata", "ModelFile", "MappingDirectory"}
     assert len(list(model01.get_referable("MappingDirectory"))) == len({e.local_id for e in entries})
     assert any(n.endswith(".xml") for n in zipfile.ZipFile(io.BytesIO(data)).namelist())
+
+
+# ---------------------------------------------------------------- plant sections ---
+@needs_routes
+def test_section_frames_are_sections_not_pipes():
+    d = parse_drawio_file(COMBINED)
+    names = {s.name for s in d.sections}
+    assert names == {"Autoclave", "Back pressure regulator with collecting vessel",
+                     "N2 - H2 Containers and precautionary measures", "Peristaltic pump with precautionary measures",
+                     "Piston, HPLC pump and injection point", "Reactor and lamp"}
+    frames = [e for e in d.edges if e.is_section_frame]
+    assert frames and not any(e.merged_into or e.source or e.target for e in frames)  # never pipes
+    review = from_drawio(d)
+    sec = {s.tag: s.section for s in review.symbols}
+    assert sec["Reactor R301"] == sec["Mixing"] == sec["TIC 301"] == "Reactor and lamp"
+    assert {s.dexpi_class for s in review.symbols if s.tag == "Reactor R301"} == {"Vessel"}  # pipes end on it
+
+
+@needs_routes
+def test_small_titled_frame_and_symbol_parts():
+    # "Injection point" frames one item; the columns' inner boxes on LightUp are parts of the
+    # column symbol, not items
+    d = parse_drawio_file(ROOT / "subprojects" / "Lumen" / "P&ID Lumen New set-up nodes 081122 (1).drawio")
+    assert "Injection point" in {s.name for s in d.sections}
+    lu = parse_drawio_file(LIGHTUP)
+    assert not [s for s in lu.shapes if (s.shape_token or "").startswith("plain:")] and not lu.sections

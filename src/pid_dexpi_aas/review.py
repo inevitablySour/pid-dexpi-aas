@@ -67,6 +67,7 @@ class ReviewSymbol:
     attributes: dict = field(default_factory=dict)
     notes: str = ""
     image_check: str = ""  # both-inputs mode only
+    section: str = ""  # the plant section (frame) it was drawn in - sections.py; editable
     include: bool = True
 
 
@@ -139,9 +140,12 @@ def from_drawio(diagram: ParsedDiagram) -> ReviewDiagram:
     """Rows for every shaped draw.io cell, plus text labels that a pipe ends on (they
     become off-page connectors, e.g. "Fume hood [atm]"). Plain labels that are just a
     shape's tag are folded into that shape's `tag` instead of getting their own row."""
+    from pid_dexpi_aas.sections import section_of
+
     tag_lookup = build_tag_lookup(diagram)
     endpoint_ids = {e.source for e in diagram.edges} | {e.target for e in diagram.edges}
     review = ReviewDiagram(source_name=diagram.source_file, drawio=diagram)
+    sections = section_of(diagram)
 
     for shape in diagram.shapes:
         if shape.is_labeled_only and not (shape.id in endpoint_ids and shape.text):
@@ -164,7 +168,7 @@ def from_drawio(diagram: ParsedDiagram) -> ReviewDiagram:
             attributes={**_instrument_attributes(dexpi_class, tag or ""),
                         **({"specs": "; ".join(sp.text for sp in diagram.specs[shape.id])}
                            if diagram.specs.get(shape.id) else {})},
-            notes=mapping.reason, include=dexpi_class != SKIP,
+            notes=mapping.reason, include=dexpi_class != SKIP, section=sections.get(shape.id, ""),
         ))
 
     known = {s.id for s in review.symbols}
@@ -459,13 +463,21 @@ def to_dexpi(review: ReviewDiagram) -> tuple[ParsedDiagram, BuildResult]:
                             specs=dict(base.specs) if base is not None else {},
                             flow=base.flow if base is not None else None,
                             routes=base.routes if base is not None else (traced or None),
-                            drawn_edges=list(base.edges) if base is not None else None)
+                            drawn_edges=list(base.edges) if base is not None else None,
+                            sections=list(base.sections) if base is not None else [])
     result = build_model(diagram, overrides, tag_overrides)
     # specification fields filled in by the reviewer (dexpi_fields.py), over the drawing's notes
     from pid_dexpi_aas.dexpi_fields import apply_fields
     result.spec_problems = []
     for s in review.symbols:
         obj = result.shape_objects.get(s.id)
+        if obj is not None and s.section and "customAttributes" in type(obj).model_fields:
+            # pyDEXPI 1.2 neither exports nor reads PlantSection structure items, so the plant
+            # section travels as a named attribute on every item (equipment, instruments, valves)
+            from pydexpi.dexpi_classes.pydantic_classes import CustomStringAttribute
+            obj.customAttributes = [a for a in (obj.customAttributes or []) if a.attributeName != "PlantSectionName"] + [
+                CustomStringAttribute(attributeName="PlantSectionName", attributeURI="urn:pid-dexpi-aas:PlantSectionName",
+                                      value=s.section)]
         values, custom = (s.attributes or {}).get("dexpi"), (s.attributes or {}).get("custom")
         if obj is not None and (values or custom):
             result.spec_problems += [f"{s.tag or s.id}: {p}" for p in apply_fields(obj, values, custom)]

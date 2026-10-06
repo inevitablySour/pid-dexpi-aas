@@ -84,6 +84,8 @@ class Edge:
     # 0 unknown; basis "arrow" (drawn on this line) | "implied" (from neighbouring arrows).
     flow: int = 0
     flow_basis: str = ""
+    # a closed frame drawn around a plant section (sections.py) - not a pipe
+    is_section_frame: bool = False
 
 
 @dataclass
@@ -103,6 +105,8 @@ class ParsedDiagram:
     # the drawing's own lines, kept when a reviewed diagram is rebuilt from table rows
     # (review.to_dexpi), so the "after" picture can still draw each pipe as drawn
     drawn_edges: list | None = None
+    # plant sections drawn as frames around groups of items (sections.py)
+    sections: list = field(default_factory=list)
 
 
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -551,6 +555,9 @@ def parse_drawio_xml_resolved(xml_text: str, source_file: str, drawio_path: str 
         from pid_dexpi_aas.line_routes import find_junctions, routes_for
         routes = routes_for(drawio_path, diagram.edges)
         if routes:
+            # section frames first: closed lines around groups of items are not pipes
+            from pid_dexpi_aas.sections import find_sections
+            find_sections(diagram, routes)
             from pid_dexpi_aas.line_routes import find_dash_chains
             by_id = {e.id: e for e in diagram.edges}
             for chain in find_dash_chains(diagram.edges, routes):
