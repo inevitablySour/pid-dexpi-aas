@@ -470,3 +470,62 @@ def test_line_ending_at_a_stream_name_is_a_stream_not_a_loop():
     assert isinstance(result.shape_objects[product.id], piping.FlowOutPipeOffPageConnector)
     tags = {s.tag for s in from_drawio(diagram).symbols if s.dexpi_class != "(off-page connector)"}
     assert "Product" not in tags and "N 2" not in tags
+
+
+def _tracer():
+    pytest.importorskip("scipy")
+    pytest.importorskip("skimage")
+    import sys
+
+    sys.path.insert(0, str(ROOT / "ml" / "pid2graph"))
+    from trace_pipes import trace_connections
+    return trace_connections
+
+
+def test_tracer_joins_symbols_with_a_short_line_between_them():
+    """Stacked instruments: the line is shorter than the erased margins around both."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    trace = _tracer()
+    im = Image.new("L", (400, 400), 255)
+    d = ImageDraw.Draw(im)
+    a, b = (150, 60, 230, 140), (150, 152, 230, 232)
+    d.ellipse(a, outline=0, width=2)
+    d.ellipse(b, outline=0, width=2)
+    d.line((190, 140, 190, 152), fill=0, width=2)
+    assert {(c["a"], c["b"]) for c in trace(np.asarray(im), [a, b])} == {(0, 1)}
+
+
+def test_tracer_follows_a_pipe_through_a_label_written_on_it():
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    trace = _tracer()
+    im = Image.new("L", (600, 300), 255)
+    d = ImageDraw.Draw(im)
+    a, b = (40, 110, 120, 190), (480, 110, 560, 190)
+    d.rectangle(a, outline=0, width=2)
+    d.rectangle(b, outline=0, width=2)
+    d.line((120, 150, 480, 150), fill=0, width=2)
+    label = (250, 135, 350, 165)  # "17 bar" on the pipe, erased as text
+    d.rectangle(label, fill=255)
+    d.text((260, 140), "17 bar", fill=0)
+    assert {(c["a"], c["b"]) for c in trace(np.asarray(im), [a, b], [label])} == {(0, 1)}
+
+
+def test_tracer_does_not_attach_a_frame_running_past_a_symbol():
+    """A section frame passing close alongside a symbol is not a pipe into it."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    trace = _tracer()
+    im = Image.new("L", (700, 400), 255)
+    d = ImageDraw.Draw(im)
+    a, b, c = (100, 200, 180, 280), (300, 200, 380, 280), (500, 200, 580, 280)
+    for box in (a, b, c):
+        d.rectangle(box, outline=0, width=2)
+    d.line((180, 240, 300, 240), fill=0, width=2)  # the real pipe a -> b
+    d.line((20, 195, 680, 195), fill=0, width=3)   # frame edge 5 px above all three
+    pairs = {(x["a"], x["b"]) for x in trace(np.asarray(im), [a, b, c])}
+    assert pairs == {(0, 1)}
