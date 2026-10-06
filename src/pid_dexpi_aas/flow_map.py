@@ -248,7 +248,7 @@ def build_layers(diagram: ParsedDiagram, drawio_path: str | Path, boxes: list | 
     for sec in getattr(diagram, "sections", None) or []:
         pts = [P(p) for p in sec.polygon] + [P(sec.polygon[0])]
         top = min(pts, key=lambda p: (p[1], p[0]))
-        lines.append(Line(pts, SECTION, 3, set(), f"Plant section: {sec.name} ({len(sec.members)} items)",
+        lines.append(Line(pts, SECTION, 3, {f"section:{sec.id}"}, f"Plant section: {sec.name} ({len(sec.members)} items)",
                           dashed=True, word=(sec.name, (top[0] + 6, top[1] + 4)), kind="section"))
     if boxes is None:
         cat_color = {Category.EQUIPMENT: (240, 50, 230), Category.PIPING: (0, 128, 128),

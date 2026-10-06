@@ -982,6 +982,29 @@ def _merge(keep_id: str, other_ids: list) -> None:
     select({keep_id}, (), zoom=True)
 
 
+def _rename_section(sec_id: str, key: str) -> None:
+    new = " ".join((st.session_state.get(key) or "").split())
+    sec = next((x for x in review.drawio.sections if x.id == sec_id), None)
+    if not sec or not new or new == sec.name:
+        return
+    for s in review.symbols:
+        if s.section == sec.name:
+            s.section = new
+    sec.name = new
+    refresh_tables()
+
+
+def _remove_section(sec_id: str) -> None:
+    sec = next((x for x in review.drawio.sections if x.id == sec_id), None)
+    if not sec:
+        return
+    for s in review.symbols:
+        if s.section == sec.name:
+            s.section = ""
+    review.drawio.sections = [x for x in review.drawio.sections if x.id != sec_id]
+    select()
+
+
 def _hide(syms=(), rows=()) -> None:
     """Hide items/lines from the map (not from DEXPI) and drop them from the selection."""
     hs, hr = st.session_state.setdefault("hidden", (set(), set()))
@@ -1006,7 +1029,25 @@ with panel_col:
         k = f"{version}"
         sel_items = [by_sym[i] for i in show_syms if i in by_sym]
         sel_lines = [c for c in review.connections if c.id in show_conns]
-        if not sel_items and not sel_lines:
+        sel_sections = [sec for sec in (review.drawio.sections if review.drawio else [])
+                        if f"section:{sec.id}" in show_conns]
+        if sel_sections and not sel_items and not sel_lines:
+            sec = sel_sections[0]
+            members = [s for s in review.symbols if s.section == sec.name]
+            st.markdown(f"**Plant section: {sec.name}**")
+            st.caption(f"Frame drawn around {len(members)} items on the drawing. Every item in it carries this name "
+                       "into DEXPI (PlantSectionName) and so into the AAS.")
+            st.text_input("Name", sec.name, key=f"secname_{sec.id}_{k}", on_change=_rename_section,
+                          args=(sec.id, f"secname_{sec.id}_{k}"))
+            st.caption(", ".join(item_name(s.id) for s in members[:30]) + (" ..." if len(members) > 30 else ""))
+            c1, c2 = st.columns(2)
+            if c1.button("Select all its items", key=f"secsel_{sec.id}_{k}", width="stretch",
+                         help="Highlights them on the map and ticks them in the table - e.g. to merge or check them"):
+                select({s.id for s in members}, (), zoom=True)
+                st.rerun()
+            c2.button("Remove section", key=f"secdel_{sec.id}_{k}", on_click=_remove_section, args=(sec.id,),
+                      width="stretch", help="Not a plant section after all: its items get no section")
+        elif not sel_items and not sel_lines:
             st.markdown("**Nothing selected**")
             st.caption("Click an item or a line on the map to see and edit it here. "
                        "Hover anything on the map for a quick description.")
