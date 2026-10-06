@@ -762,6 +762,16 @@ def _merge(keep_id: str, other_ids: list) -> None:
             c.to_id = keep_id if c.to_id == o.id else c.to_id
     gone = {o.id for o in others}
     review.symbols = [x for x in review.symbols if x.id not in gone]
+    if not keep.tag and keep.box and review.unattached_tags:
+        # the merged box may now hold a tag no single box claimed ("V101" printed inside)
+        inside = [t for t in review.unattached_tags if t.get("box") and
+                  keep.box[0] <= (t["box"][0] + t["box"][2]) / 2 <= keep.box[2] and
+                  keep.box[1] <= (t["box"][1] + t["box"][3]) / 2 <= keep.box[3]]
+        if inside:
+            best = max(inside, key=lambda t: t.get("conf", 0))
+            keep.tag, keep.tag_source = best["tag"], "OCR inside (after merge)"
+            review.unattached_tags = [t for t in review.unattached_tags if t is not best]
+            keep.attributes = _keep_specs(keep.attributes, _instrument_attributes(keep.dexpi_class, keep.tag))
     kept, pairs = [], set()
     for c in review.connections:
         key = (frozenset((c.from_id, c.to_id)), c.line_type)

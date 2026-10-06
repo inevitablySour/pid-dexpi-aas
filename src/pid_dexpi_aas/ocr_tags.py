@@ -105,26 +105,41 @@ def _distance_to_box(point: tuple[float, float], box) -> float:
     return math.hypot(dx, dy)
 
 
+# what kind of tag a detected class takes (model classes -> classify_tag kinds)
+_CLASS_KIND = {"tank": "equipment", "pump": "equipment", "general": "equipment", "valve": "valve",
+               "instrumentation": "instrument"}
+
+
 def attach_tags(symbol_boxes: dict[str, tuple[float, float, float, float]], tags: list[OcrTag],
-                max_gap_factor: float = 1.0) -> dict[str, tuple[OcrTag, str]]:
+                max_gap_factor: float = 1.0, classes: dict[str, str] | None = None) -> dict[str, tuple[OcrTag, str]]:
     """Assign each symbol at most one tag, each tag to at most one symbol.
 
     Returns {symbol_id: (tag, how)} with how = "inside" | "nearby". Candidates are
     scored by distance from tag center to symbol box (0 when inside); a "nearby" tag
-    must be within max_gap_factor x the symbol's larger side. Greedy, closest first.
+    must be within max_gap_factor x the symbol's larger side. Greedy, best first.
+
+    classes ({symbol id: detected class}): a tag whose kind does not fit the symbol (an
+    instrument tag "FI 102" on a tank, "V101" on a valve) counts as half the symbol's size
+    further away - before this, "FI 102" next to V101 could take the tank box and leave
+    "V101" on nothing.
     """
+    from pid_dexpi_aas.mapping import classify_tag
+
+    kinds = [classify_tag(t.text)[0] for t in tags]
     candidates = []
     for sid, box in symbol_boxes.items():
         size = max(box[2] - box[0], box[3] - box[1])
+        want = _CLASS_KIND.get((classes or {}).get(sid))
         for ti, tag in enumerate(tags):
             d = _distance_to_box(tag.center, box)
             if d <= max_gap_factor * size:
-                candidates.append((d, sid, ti))
+                misfit = want and kinds[ti] and kinds[ti] != want
+                candidates.append((d + (0.5 * size if misfit else 0.0), sid, ti))
     result: dict[str, tuple[OcrTag, str]] = {}
     taken: set[int] = set()
     for d, sid, ti in sorted(candidates):
         if sid in result or ti in taken:
             continue
-        result[sid] = (tags[ti], "inside" if d == 0 else "nearby")
+        result[sid] = (tags[ti], "inside" if _distance_to_box(tags[ti].center, symbol_boxes[sid]) == 0 else "nearby")
         taken.add(ti)
     return result

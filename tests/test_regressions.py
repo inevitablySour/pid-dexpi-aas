@@ -341,3 +341,14 @@ def test_tracer_follows_a_pipe_and_reads_its_arrowhead():
     c = out[0]
     assert (c["flow"] == 1) == (c["b"] == 1)  # flows towards b
     assert len(c["path"]) > 20
+
+
+def test_equipment_tag_goes_to_the_tank_not_the_instrument_tag():
+    # "FI 102" sat closer to the tank box than "V101" and took it, leaving V101 unnamed
+    from pid_dexpi_aas.ocr_tags import OcrTag, attach_tags
+
+    boxes = {"tank": (100, 100, 300, 200), "bubble": (320, 60, 380, 120)}
+    tags = [OcrTag("FI 102", (290, 95, 330, 110), 0.9, ["FI 102"]),   # on the tank's edge
+            OcrTag("V101", (180, 140, 220, 160), 0.9, ["V101"])]      # inside the tank
+    got = attach_tags(boxes, tags, classes={"tank": "tank", "bubble": "instrumentation"})
+    assert got["tank"][0].text == "V101" and got["bubble"][0].text == "FI 102"

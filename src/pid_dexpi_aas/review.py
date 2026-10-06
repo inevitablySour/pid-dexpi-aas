@@ -201,7 +201,7 @@ def from_image(infer: dict, source_name: str) -> ReviewDiagram:
     classifier, and the model's predicted connections."""
     tags = assemble_tags(infer.get("ocr_tokens", []))
     boxes = {s["id"]: tuple(s["box"]) for s in infer["symbols"]}
-    attached = attach_tags(boxes, tags)
+    attached = attach_tags(boxes, tags, classes={s["id"]: s["class"] for s in infer["symbols"]})
     review = ReviewDiagram(source_name=source_name, image_path=infer.get("image"),
                            image_size=tuple(infer["image_size"]))
     claimed = set()
