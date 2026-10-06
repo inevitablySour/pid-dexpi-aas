@@ -30,6 +30,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 from pid_dexpi_aas.parser_drawio import ParsedDiagram
+from pid_dexpi_aas.routing import route
 
 # One colour per meaning, nothing shared: grey is only "flow unknown", red only "left out".
 FLOW_COLORS = {"arrow": (215, 80, 0), "implied": (150, 50, 200), "reviewer": (0, 150, 120), "": (95, 95, 95)}
@@ -92,6 +93,7 @@ class Layers:
     boxes: list
     stats: dict
     legend: list  # (text, colour, kind the map toolbar can hide | None)
+    origin: tuple = (0.0, 0.0)  # sheet pixel = draw.io coordinate + origin (draw.io maps); (0, 0) for pictures
 
 
 def font(size: int):
@@ -278,7 +280,7 @@ def build_layers(diagram: ParsedDiagram, drawio_path: str | Path, boxes: list | 
         legend.insert(2, (f"direction set by you ({stats['reviewer']})", FLOW_COLORS["reviewer"], "flow-reviewer"))
     if stats["excluded"]:
         legend.append((f"line left out of DEXPI ({stats['excluded']})", EXCLUDED, "excluded"))
-    return Layers(Path(png), size, lines, out_boxes, stats, legend)
+    return Layers(Path(png), size, lines, out_boxes, stats, legend, origin=(dx, dy))
 
 
 def image_layers(image_path: str | Path, connections: list, boxes: list[Box]) -> Layers:
@@ -290,11 +292,14 @@ def image_layers(image_path: str | Path, connections: list, boxes: list[Box]) ->
     with Image.open(image_path) as im:
         size = im.size
     centre = {b.id: ((b.box[0] + b.box[2]) / 2, (b.box[1] + b.box[3]) / 2) for b in boxes}
+    box_of = {b.id: b.box for b in boxes}
+    all_boxes = [b.box for b in boxes if b.id]
     lines, n = [], {"traced": 0, "model": 0, "signal": 0, "excluded": 0}
     for rid, a, b, kind, include, tip, path, basis in connections:
         if a not in centre or b not in centre:
             continue
-        pts = [tuple(p) for p in path] if path and len(path) >= 2 else [centre[a], centre[b]]
+        # traced pipes follow the picture; the rest is routed around the items (routing.py)
+        pts = [tuple(p) for p in path] if path and len(path) >= 2 else route(box_of[a], box_of[b], all_boxes)
         if not include:
             n["excluded"] += 1
             lines.append(Line(pts, EXCLUDED, 3, {rid}, tip, dashed=True, ends=(a, b), kind="excluded"))
@@ -415,8 +420,8 @@ def add_edits(layers: Layers, edits: list, replaced_rows: set) -> Layers:
     for rid, a, b, flow, tip in edits:
         if a not in boxes or b not in boxes:
             continue
-        pa, pb = centre(boxes[a]), centre(boxes[b])
-        pts = [pa, (pb[0], pa[1]), pb] if abs(pa[0] - pb[0]) > 1 and abs(pa[1] - pb[1]) > 1 else [pa, pb]
+        # routed like a draw.io connector: around the other items, edge to edge (routing.py)
+        pts = route(boxes[a].box, boxes[b].box, [x.box for x in layers.boxes])
         arrows, _ = _arrows_on(pts, flow)
         layers.lines.append(Line(pts, FLOW_COLORS["reviewer"], 5, {rid}, tip, arrows=arrows, ends=(a, b), kind="edits"))
         n += 1
@@ -560,19 +565,22 @@ def map_markup(layers: Layers, highlight_rows: set | None = None, highlight_symb
         '<button data-act="in" title="Zoom in (or scroll on the map)">+</button>'
         '<button data-act="out" title="Zoom out">&minus;</button>'
         '<button data-act="fit" title="Show the whole sheet">Fit</button>'
+        '<button data-act="add" class="add" title="Draw a box around a symbol that was missed, to add it as an item">'
+        '&#xFF0B; Add item</button>'
         '<span class="sep"></span>'
         '<label title="Names of items: shown when zoomed in far enough to read them">Names '
         '<select data-opt="labels"><option value="auto">when zoomed in</option><option value="on">always</option>'
         '<option value="off">never</option></select></label>'
         '<label title="The words \'arrow\' / \'implied\' / \'?\' next to each pipe">'
         '<input type="checkbox" data-opt="words"> Flow words</label>'
-        '<span class="hint">Scroll to zoom · drag to move · click an item or line to select it</span>'
+        '<span class="hint">Scroll to zoom · drag to move · click an item or line to select it · ＋ Add item, then drag a box around a missed item</span>'
         '</div>'
         f'<div class="chips">{"".join(chips)}</div>')
     markup = (f'{toolbar}<div class="frame" style="height:{height}px">'
               f'<svg class="map" viewBox="{" ".join(map(str, view or full))}" preserveAspectRatio="xMidYMid meet">'
               f'{"".join(parts)}</svg></div>')
-    return {"html": markup, "view": view, "full": full, "key": key, "focus": focus, "names": names}
+    return {"html": markup, "view": view, "full": full, "key": key, "focus": focus, "names": names,
+            "origin": list(layers.origin)}
 
 
 MAP_CSS = """
@@ -589,6 +597,9 @@ MAP_CSS = """
   font:13px var(--st-font,sans-serif)}
 .bar input[type=checkbox]{accent-color:var(--accent)}
 .bar .sep{width:1px;height:22px;background:var(--line);margin:0 4px}
+.bar button.add{padding:0 10px;font-size:13px}
+.bar button.add.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+svg.map.adding{cursor:crosshair}
 .bar .hint{opacity:.6;margin-left:auto;font-size:12px}
 .chips{display:flex;flex-wrap:wrap;gap:4px 6px;padding:0 0 6px;font-size:12px}
 .chip{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:12px;padding:2px 8px;
@@ -661,6 +672,34 @@ export default function (component) {
     const ox = vb[0] + vb[2] / 2 - (r.width / 2) * sc, oy = vb[1] + vb[3] / 2 - (r.height / 2) * sc;
     zoomAt(e.deltaY > 0 ? 1.15 : 1 / 1.15, ox + (e.clientX - r.left) * sc, oy + (e.clientY - r.top) * sc);
   }, { passive: false });
+  // "Add item": drag a box; sent to Python as the trigger "drawn" in map coordinates
+  let adding = false, drawStart = null, rubber = null;
+  const addBtn = root.querySelector('[data-act=add]');
+  const toMap = (e) => { const pt = s.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+    const m = pt.matrixTransform(s.getScreenCTM().inverse()); return [m.x, m.y]; };
+  addBtn.onclick = () => { adding = !adding; addBtn.classList.toggle('on', adding); s.classList.toggle('adding', adding); };
+  s.addEventListener('mousedown', (e) => {
+    if (!adding) return;
+    e.stopImmediatePropagation(); drawStart = toMap(e);
+    rubber = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rubber.setAttribute('fill', 'rgba(255,75,75,0.08)'); rubber.setAttribute('stroke', '#ff4b4b');
+    rubber.setAttribute('stroke-width', '2'); rubber.setAttribute('stroke-dasharray', '6 4');
+    rubber.setAttribute('vector-effect', 'non-scaling-stroke'); s.appendChild(rubber);
+  }, true);
+  s.addEventListener('mousemove', (e) => {
+    if (!adding || !drawStart) return;
+    e.stopImmediatePropagation(); const [x, y] = toMap(e);
+    rubber.setAttribute('x', Math.min(x, drawStart[0])); rubber.setAttribute('y', Math.min(y, drawStart[1]));
+    rubber.setAttribute('width', Math.abs(x - drawStart[0])); rubber.setAttribute('height', Math.abs(y - drawStart[1]));
+  }, true);
+  s.addEventListener('mouseup', (e) => {
+    if (!adding || !drawStart) return;
+    e.stopImmediatePropagation(); const [x, y] = toMap(e), [x0, y0] = drawStart; drawStart = null;
+    adding = false; addBtn.classList.remove('on'); s.classList.remove('adding');
+    if (Math.abs(x - x0) < 4 || Math.abs(y - y0) < 4) { rubber.remove(); return; }
+    setTriggerValue('drawn', JSON.stringify({ box: [Math.min(x, x0), Math.min(y, y0), Math.max(x, x0), Math.max(y, y0)],
+                                               t: Date.now() }));
+  }, true);
   let drag = null, moved = false;
   s.addEventListener('mousedown', (e) => { drag = [e.clientX, e.clientY, vb[0], vb[1]]; moved = false; });
   s.addEventListener('mousemove', (e) => {

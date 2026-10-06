@@ -47,6 +47,7 @@ from pid_dexpi_aas.flow_map import (  # noqa: E402
 from pid_dexpi_aas.decode_drawio import decode_drawio  # noqa: E402
 from pid_dexpi_aas.aas_export import DexpiModelInput, aasx_bytes, check_aasx, drawing_svg, mapping_entries  # noqa: E402
 from pid_dexpi_aas.dexpi_fields import prefill, spec_fields  # noqa: E402
+from pid_dexpi_aas.routing import route  # noqa: E402
 from pid_dexpi_aas.mapping import classify_detection  # noqa: E402
 from pid_dexpi_aas.parser_drawio import parse_drawio_xml_resolved  # noqa: E402
 from pid_dexpi_aas.review import (  # noqa: E402
@@ -278,6 +279,10 @@ def drawio_layers(review: ReviewDiagram) -> Layers | None:
                  item_name(s.id) if status(s) != "left out" else "", 3, _symbol_tip(s), _left_out(s), _box_kind(s))
              for s in review.symbols if (sh := shapes.get(s.id)) is not None]
     extra_legend = []
+    drawn = [s for s in review.symbols if s.source == "manual" and s.box and s.id not in shapes]
+    to_d = _image_to_drawio(review.alignment) if review.alignment and review.image_path else (lambda bx: tuple(bx))
+    boxes += [Box(s.id, to_d(s.box), symbol_color(s, set()), item_name(s.id), 3, _symbol_tip(s) + " (drawn by you)",
+                  _left_out(s), _box_kind(s)) for s in drawn]
     if review.alignment:
         to_drawio = _image_to_drawio(review.alignment)
         model_only = [s for s in review.symbols if s.id not in shapes and s.source == "image model" and s.box]
@@ -309,6 +314,7 @@ def drawio_layers(review: ReviewDiagram) -> Layers | None:
 
 
 AGREE = (0, 140, 70)
+ADDED_BY_YOU = (200, 0, 160)
 DRAWING_ONLY = (40, 100, 220)
 PICTURE_ONLY = BOX_PICTURE
 TYPE_DIFFERS = BOX_CHECK
@@ -351,6 +357,8 @@ def hybrid_picture_layers(review: ReviewDiagram) -> Layers:
                       f"{c.line_type} {('traced on the picture' if c.path else 'predicted by the model')}"
                       + ("; also in the drawing" if row else "; not in the drawing"),
                       c.path, FLOW_BASIS.get(c.flow, "")))
+    boxes += [Box(s.id, tuple(s.box), symbol_color(s, set()), item_name(s.id), 3, _symbol_tip(s) + " (drawn by you)",
+                  False, _box_kind(s)) for s in review.symbols if s.source == "manual" and s.box]
     raw = [Box(s.id, tuple(s.box), BOX_IN, "", 3) for s in pic["symbols"] if s.box]  # centres by picture id
     layers = image_layers(review.image_path, conns, raw)
     for ln in layers.lines:  # clicking a picture line selects its drawing row, when there is one
@@ -394,13 +402,16 @@ def compare_layers(review: ReviewDiagram) -> tuple[Layers, dict] | None:
     item_row, drawing_pairs = _picture_rows(review)
     px = _to_px(review)
     centre = lambda b: ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
-    counts = {"items": {"agree": 0, "drawing": 0, "picture": 0, "type": 0},
+    counts = {"items": {"agree": 0, "drawing": 0, "picture": 0, "type": 0, "added": 0},
               "lines": {"agree": 0, "drawing": 0, "picture": 0}}
     boxes = []
     for s in review.symbols:
         if not s.box or s.dexpi_class == SKIP:
             continue
-        if s.source == "image model":
+        if s.source == "manual":
+            kind, color, dashed = "added", ADDED_BY_YOU, False
+            what = "drawn by you"
+        elif s.source == "image model":
             kind, color, dashed = "picture", PICTURE_ONLY, True
             what = "only in the picture - missing from the drawing?"
         elif s.id not in pic["match"]:
@@ -457,7 +468,9 @@ def compare_layers(review: ReviewDiagram) -> tuple[Layers, dict] | None:
         if frozenset((a, b)) in drawing_pairs or a not in centres or b not in centres:
             continue
         counts["lines"]["picture"] += 1
-        lines.append(Line([centres[a], centres[b]], PICTURE_ONLY, 2, set(), f"{item_name(a)} - {item_name(b)}: "
+        box_of = {bx.id: bx.box for bx in boxes}
+        lines.append(Line(route(box_of[a], box_of[b], list(box_of.values())), PICTURE_ONLY, 2, set(),
+                          f"{item_name(a)} - {item_name(b)}: "
                           "predicted by the model only (not traced), not in the drawing", dashed=True, ends=(a, b),
                           kind="cmp-picture"))
     ci, cl = counts["items"], counts["lines"]
@@ -466,6 +479,8 @@ def compare_layers(review: ReviewDiagram) -> tuple[Layers, dict] | None:
               (f"only in the drawing: {ci['drawing']} items, {cl['drawing']} lines", DRAWING_ONLY, "cmp-drawing", "box"),
               (f"only in the picture: {ci['picture']} items, {cl['picture']} lines", PICTURE_ONLY, "cmp-picture", "box"),
               (f"in both, other type in the picture: {ci['type']} items", TYPE_DIFFERS, "cmp-type", "box")]
+    if ci["added"]:
+        legend.append((f"drawn by you: {ci['added']} items", ADDED_BY_YOU, "cmp-added", "box"))
     with Image.open(review.image_path) as im:
         size = im.size
     return Layers(Path(review.image_path), size, lines, boxes, counts, legend), counts
@@ -580,6 +595,37 @@ def refresh_tables() -> None:
     """After an edit in the panel: rebuild the tables from `review`, keeping the selection."""
     st.session_state["seed_show"] = st.session_state.get("current_show", (set(), set()))
     st.session_state["editor_version"] += 1
+
+
+def add_drawn_item(map_name: str, layers: Layers, box) -> None:
+    """A box drawn on a map ('Add item') becomes a new item: its box in the review's
+    coordinates (picture pixels when there is a picture, else draw.io units), a tag from text
+    the OCR read inside it and no item claimed, and it opens in the panel to set its type."""
+    x1, y1, x2, y2 = box
+    if map_name.startswith("Drawing"):
+        ox, oy = layers.origin
+        b = [x1 - ox, y1 - oy, x2 - ox, y2 - oy]  # draw.io units
+        if review.alignment and review.image_path:  # both inputs: rows live in picture pixels
+            px = _to_px(review)
+            (a1, b1), (a2, b2) = px((b[0], b[1])), px((b[2], b[3]))
+            b = [min(a1, a2), min(b1, b2), max(a1, a2), max(b1, b2)]
+    else:
+        b = [x1, y1, x2, y2]  # picture pixels
+    tag, tag_source = "", "manual"
+    if review.image_path and review.unattached_tags:
+        inside = [t for t in review.unattached_tags if t.get("box") and
+                  b[0] <= (t["box"][0] + t["box"][2]) / 2 <= b[2] and b[1] <= (t["box"][1] + t["box"][3]) / 2 <= b[3]]
+        if inside:
+            best = max(inside, key=lambda t: t.get("conf", 0))
+            tag, tag_source = best["tag"], "OCR inside"
+            review.unattached_tags = [t for t in review.unattached_tags if t is not best]
+    n = 1 + sum(1 for s in review.symbols if s.id.startswith("drawn"))
+    item = ReviewSymbol(id=f"drawn{n}", source="manual", box=b, detected_as="drawn by you", tag=tag,
+                        tag_source=tag_source, dexpi_class="CustomEquipment", identified_by="box drawn by you",
+                        notes="added by drawing a box on the map - set its DEXPI type")
+    item.attributes = _keep_specs({}, _instrument_attributes(item.dexpi_class, item.tag))
+    review.symbols.append(item)
+    select({item.id}, (), zoom=False)
 
 
 seed_syms, seed_conns = st.session_state.get("seed_show", (set(), set()))
@@ -777,7 +823,10 @@ with map_col:
             result = map_component(data=map_markup(layers, show_conns, show_syms, zoom_to_highlight=zoom,
                                                    key=name, height=620,
                                                    names="off" if name.startswith("Drawing") else "auto"),
-                                   key=f"map_{name}", on_clicked_change=lambda: None)
+                                   key=f"map_{name}", on_clicked_change=lambda: None, on_drawn_change=lambda: None)
+            if result.drawn:
+                add_drawn_item(name, layers, json.loads(result.drawn)["box"])
+                st.rerun()
             if result.clicked:
                 click = json.loads(result.clicked)
                 select({click["sym"]} if click.get("sym") else (), click.get("rows") or ())

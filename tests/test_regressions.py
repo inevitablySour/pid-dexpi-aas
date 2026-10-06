@@ -427,3 +427,30 @@ def test_small_titled_frame_and_symbol_parts():
     assert "Injection point" in {s.name for s in d.sections}
     lu = parse_drawio_file(LIGHTUP)
     assert not [s for s in lu.shapes if (s.shape_token or "").startswith("plain:")] and not lu.sections
+
+
+def test_router_goes_around_items_with_right_angles():
+    from pid_dexpi_aas.routing import route
+
+    a, b, wall = (0, 0, 40, 40), (300, 0, 340, 40), (140, -60, 200, 100)
+    pts = route(a, b, [a, b, wall])
+    assert all(abs(p[0] - q[0]) < 1e-6 or abs(p[1] - q[1]) < 1e-6 for p, q in zip(pts, pts[1:]))
+    seg_hits = lambda p, q: (min(p[0], q[0]) < wall[2] and max(p[0], q[0]) > wall[0]
+                             and min(p[1], q[1]) < wall[3] and max(p[1], q[1]) > wall[1])
+    assert not any(seg_hits(p, q) for p, q in zip(pts, pts[1:]))
+
+
+def test_box_drawn_by_reviewer_is_built_and_its_new_line_routed():
+    """An item drawn on the map (Add item) goes into DEXPI with its tag, and a line added to
+    it is drawn with right angles, not straight across the sheet."""
+    from pid_dexpi_aas.review import ReviewConnection, ReviewSymbol, to_dexpi
+
+    review = from_drawio(parse_drawio_file(LIGHTUP))
+    other = next(s for s in review.symbols if s.box and s.include)
+    review.symbols.append(ReviewSymbol(id="drawn1", source="manual", box=[0, 0, 40, 30], detected_as="drawn by you",
+                                       tag="T-999", dexpi_class="Tank", identified_by="box drawn by you"))
+    review.connections.append(ReviewConnection(id="manual_c1", from_id="drawn1", to_id=other.id, source="manual"))
+    diagram, result = to_dexpi(review)
+    assert result.shape_objects["drawn1"].tagName == "T-999"
+    pts = diagram.routes["manual_c1"]
+    assert len(pts) >= 2 and all(abs(p[0] - q[0]) < 1e-6 or abs(p[1] - q[1]) < 1e-6 for p, q in zip(pts, pts[1:]))

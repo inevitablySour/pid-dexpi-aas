@@ -46,8 +46,9 @@ Upload a draw.io file, a P&ID image, or both (sidebar):
 | both | draw.io is the truth; the image checks it (`image check` column) and adds model-only detections as unticked rows |
 
 Every symbol is a row showing its tag, DEXPI class, and **how it was identified** (draw.io
-shape, tag prefix, or model class). Edit tag/class/include, add missed symbols or
-connections, then **Build & validate DEXPI** (export + re-load round trip) and download
+shape, tag prefix, or model class). Edit tag/class/include, add missed symbols (**＋ Add item** on the map, then drag a
+box around the symbol; text the OCR read inside it becomes its tag) or connections (drawn
+with right angles around the other items, like a draw.io connector), then **Build & validate DEXPI** (export + re-load round trip) and download
 the XML. Reviews can be saved as JSON and resumed.
 
 - Image mode needs the ML env (`ml/pid2graph/setup.sh`) and a checkpoint; set
