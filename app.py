@@ -229,6 +229,11 @@ def _left_out(s: ReviewSymbol) -> bool:
     return not s.include or s.dexpi_class == SKIP
 
 
+def _box_kind(s: ReviewSymbol) -> str:
+    """Toolbar layer of an item box (BOX_LEGEND's chips)."""
+    return "box-out" if _left_out(s) else "box-check" if needs_review(s) else "box-in"
+
+
 MODEL_ONLY = BOX_PICTURE
 
 
@@ -269,7 +274,7 @@ def drawio_layers(review: ReviewDiagram) -> Layers | None:
     # names only on items in (or to check for) DEXPI; left-out shapes and picture-only finds
     # keep theirs in the hover text, so labels don't pile up
     boxes = [Box(s.id, (sh.x, sh.y, sh.x + sh.width, sh.y + sh.height), symbol_color(s, set()),
-                 item_name(s.id) if status(s) != "left out" else "", 3, _symbol_tip(s), _left_out(s))
+                 item_name(s.id) if status(s) != "left out" else "", 3, _symbol_tip(s), _left_out(s), _box_kind(s))
              for s in review.symbols if (sh := shapes.get(s.id)) is not None]
     extra_legend = []
     if review.alignment:
@@ -335,7 +340,7 @@ def hybrid_picture_layers(review: ReviewDiagram) -> Layers:
     boxes = [Box(item_row[s.id], tuple(s.box), BOX_IN, s.tag or s.detected_as, 3,
                  f"Found in the picture: {s.tag or '(no tag)'} - {s.detected_as}"
                  + (f"; matches {item_name(item_row[s.id])} in the drawing" if item_row[s.id] in pic["match"] else
-                    "; not in the drawing"), False, "item")
+                    "; not in the drawing"), False, "pic-item")
              for s in pic["symbols"] if s.box]
     conns = []
     for c in pic["connections"]:
@@ -350,8 +355,32 @@ def hybrid_picture_layers(review: ReviewDiagram) -> Layers:
     for ln in layers.lines:  # clicking a picture line selects its drawing row, when there is one
         ln.rows = {r for r in ln.rows if r in {c.id for c in review.connections}}
     layers.boxes = boxes
-    layers.legend = [("item found in the picture", BOX_IN, None, "box")] + layers.legend
+    layers.legend = [("item found in the picture", BOX_IN, "pic-item", "box")] + layers.legend
     return layers
+
+
+def _densify(pts, step: float = 8.0) -> list:
+    """Points every `step` px along a polyline."""
+    out = []
+    for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+        n = max(1, int(((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5 // step))
+        out += [(x1 + (x2 - x1) * k / n, y1 + (y2 - y1) * k / n) for k in range(n)]
+    return out + list(pts[-1:])
+
+
+def _near_index(points, cell: float = 12.0) -> set:
+    """Grid cells holding a point, with their neighbours: 'within ~12 px of a line'."""
+    cells = set()
+    for x, y in points:
+        cx, cy = int(x // cell), int(y // cell)
+        cells.update((cx + i, cy + j) for i in (-1, 0, 1) for j in (-1, 0, 1))
+    return cells
+
+
+def _covered(pts, index, cell: float = 12.0) -> float:
+    """Share of a polyline's length lying near the other source's lines."""
+    dense = _densify(pts)
+    return sum((int(x // cell), int(y // cell)) in index for x, y in dense) / max(len(dense), 1)
 
 
 def compare_layers(review: ReviewDiagram) -> tuple[Layers, dict] | None:
@@ -387,32 +416,49 @@ def compare_layers(review: ReviewDiagram) -> tuple[Layers, dict] | None:
                          f"{item_name(s.id)}: {what}", dashed, f"cmp-{kind}"))
     centres = {b.id: centre(b.box) for b in boxes}
     lines = []
-    routes = (review.drawio.routes or {}) if review.drawio else {}
-    seen_drawing = set()
-    for c in pic["connections"]:
+    # Lines are compared by GEOMETRY, piece by piece: a drawn pipe piece is "in both" when
+    # the picture traced a line along most of its length (and the other way round). Pair by
+    # pair, a pipe network's every pair of ends would be drawn as a straight line - a fan
+    # of diagonals over the sheet.
+    traced = [(c, [tuple(p) for p in c.path]) for c in pic["connections"] if c.path]
+    drawn = []  # (edge, points in picture px, review rows)
+    net_rows: dict = {}
+    for c in review.connections:
+        if c.source == "draw.io" and c.include and c.id.startswith("net"):
+            net_rows.setdefault(c.id.split(":", 1)[0], set()).add(c.id)
+    row_ids = {c.id for c in review.connections if c.include}
+    for e in (review.drawio.edges if review.drawio else []):
+        r = (review.drawio.routes or {}).get(e.id)
+        if not r or e.is_decorative or e.style in ("pipe network", "adjacent"):
+            continue
+        rows = net_rows.get(e.merged_into, set()) if e.merged_into else ({e.id} & row_ids)
+        if rows:
+            drawn.append((e, [px(p) for p in r], rows))
+    near_traced = _near_index([p for _, pts in traced for p in _densify(pts)])
+    near_drawn = _near_index([p for _, pts, _ in drawn for p in _densify(pts)])
+    for e, pts, rows in drawn:
+        both = _covered(pts, near_traced) >= 0.6
+        counts["lines"]["agree" if both else "drawing"] += 1
+        lines.append(Line(pts, AGREE if both else DRAWING_ONLY, 4 if both else 3, rows,
+                          f"{'in the drawing and the picture' if both else 'only in the drawing - not traced on the picture'}",
+                          dashed=e.is_dashed, kind="cmp-agree" if both else "cmp-drawing"))
+    for c, pts in traced:
+        if _covered(pts, near_drawn) >= 0.6:
+            continue  # already shown green from the drawing's side
         a, b = item_row.get(c.from_id) or c.from_id, item_row.get(c.to_id) or c.to_id
-        row = drawing_pairs.get(frozenset((a, b)))
-        if a not in centres or b not in centres:
+        counts["lines"]["picture"] += 1
+        lines.append(Line(pts, PICTURE_ONLY, 3, set(), f"{item_name(a)} - {item_name(b)}: traced on the picture, "
+                          "not in the drawing - missing from it?", dashed=True, ends=(a, b), kind="cmp-picture"))
+    for c in pic["connections"]:  # the model's untraced predictions: only where the drawing has no such pair
+        if c.path:
             continue
-        pts = [tuple(p) for p in c.path] if c.path else [centres[a], centres[b]]
-        if row is not None:
-            seen_drawing.add(row.id)
-            counts["lines"]["agree"] += 1
-            lines.append(Line(pts, AGREE, 4, {row.id}, f"{item_name(a)} - {item_name(b)}: in the drawing and the picture",
-                              ends=(a, b), kind="cmp-agree"))
-        else:
-            counts["lines"]["picture"] += 1
-            lines.append(Line(pts, PICTURE_ONLY, 3, set(), f"{item_name(a)} - {item_name(b)}: only in the picture "
-                              f"({'traced' if c.path else 'model prediction'}) - missing from the drawing?",
-                              dashed=True, ends=(a, b), kind="cmp-picture"))
-    for pair, c in drawing_pairs.items():
-        if c.id in seen_drawing or c.from_id not in centres or c.to_id not in centres:
+        a, b = item_row.get(c.from_id) or c.from_id, item_row.get(c.to_id) or c.to_id
+        if frozenset((a, b)) in drawing_pairs or a not in centres or b not in centres:
             continue
-        r = routes.get(c.id)
-        pts = [px(p) for p in r] if r else [centres[c.from_id], centres[c.to_id]]
-        counts["lines"]["drawing"] += 1
-        lines.append(Line(pts, DRAWING_ONLY, 3, {c.id}, f"{item_name(c.from_id)} - {item_name(c.to_id)}: only in the "
-                          "drawing - the picture does not show this line", ends=(c.from_id, c.to_id), kind="cmp-drawing"))
+        counts["lines"]["picture"] += 1
+        lines.append(Line([centres[a], centres[b]], PICTURE_ONLY, 2, set(), f"{item_name(a)} - {item_name(b)}: "
+                          "predicted by the model only (not traced), not in the drawing", dashed=True, ends=(a, b),
+                          kind="cmp-picture"))
     ci, cl = counts["items"], counts["lines"]
     # chips toggle per agreement class (items and lines together): hide "in both" to see only the differences
     legend = [(f"in both: {ci['agree']} items, {cl['agree']} lines", AGREE, "cmp-agree", "box"),
@@ -435,7 +481,7 @@ def picture_layers(review: ReviewDiagram) -> Layers | None:
     only = lambda s: s.image_check.startswith("only in image")
     boxes = [Box(s.id, tuple(s.box), MODEL_ONLY if only(s) else symbol_color(s, set()),
                  "" if only(s) or status(s) == "left out" else item_name(s.id), 3,
-                 _symbol_tip(s), only(s) or _left_out(s), "model" if only(s) else "item")
+                 _symbol_tip(s), only(s) or _left_out(s), "model" if only(s) else _box_kind(s))
              for s in review.symbols if s.box]
     ocr = _ocr_boxes(review)
     name = {s.id: item_name(s.id) for s in review.symbols}

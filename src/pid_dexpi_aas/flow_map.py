@@ -48,8 +48,8 @@ BOX_CHECK = (225, 150, 0)
 BOX_OUT = EXCLUDED
 BOX_PICTURE = MODEL_LINE
 OCR_TAG = (110, 90, 170)
-BOX_LEGEND = [("item in DEXPI", BOX_IN, None, "box"), ("item to check", BOX_CHECK, None, "box"),
-              ("item left out of DEXPI", BOX_OUT, None, "box")]
+BOX_LEGEND = [("item in DEXPI", BOX_IN, "box-in", "box"), ("item to check", BOX_CHECK, "box-check", "box"),
+              ("item left out of DEXPI", BOX_OUT, "box-out", "box")]
 HIGHLIGHT = (230, 0, 200)
 LEGEND_BAND = 120
 
@@ -229,7 +229,7 @@ def build_layers(diagram: ParsedDiagram, drawio_path: str | Path, boxes: list | 
             up, down = (e.source, e.target) if flow > 0 else (e.target, e.source)
             what = f"{name(up)} -> {name(down)}"
         line = Line(pts, FLOW_COLORS[basis], 5, rows, f"{what}: process pipe, {FLOW_TEXT[basis]}",
-                    arrows=arrows, ends=line_ends)
+                    arrows=arrows, ends=line_ends, kind=f"flow-{basis or 'unknown'}")
         if length >= 80:  # a stub has no room for a word
             mid, u = _along(run, 0.5)
             line.word = (FLOW_WORD[basis], (mid[0] - u[1] * 16 + 4, mid[1] + u[0] * 16 - 8))
@@ -256,15 +256,15 @@ def build_layers(diagram: ParsedDiagram, drawio_path: str | Path, boxes: list | 
         else:
             sid, (x1, y1, x2, y2), color, label, width = b
             out_boxes.append(Box(sid, (x1 + dx, y1 + dy, x2 + dx, y2 + dy), color, label, width, label))
-    legend = [(f"flow from an arrow drawn on the line ({stats['arrow']})", FLOW_COLORS["arrow"], None),
-              (f"flow implied by neighbouring arrows ({stats['implied']})", FLOW_COLORS["implied"], None),
-              (f"flow direction unknown ({stats['']})", FLOW_COLORS[""], None),
+    legend = [(f"flow from an arrow drawn on the line ({stats['arrow']})", FLOW_COLORS["arrow"], "flow-arrow"),
+              (f"flow implied by neighbouring arrows ({stats['implied']})", FLOW_COLORS["implied"], "flow-implied"),
+              (f"flow direction unknown ({stats['']})", FLOW_COLORS[""], "flow-unknown"),
               (f"signal line ({stats['signal']})", SIGNAL, "signal"),
               (f"instrument on a pipe ({stats['tap']})", TAP, "tap"),
               ("tee", (0, 0, 0), None), ("guessed line end", GUESSED, None),
               ("compartments sharing a wall", COMPARTMENT, "compartment")]
     if stats["reviewer"]:
-        legend.insert(2, (f"direction set by you ({stats['reviewer']})", FLOW_COLORS["reviewer"], None))
+        legend.insert(2, (f"direction set by you ({stats['reviewer']})", FLOW_COLORS["reviewer"], "flow-reviewer"))
     if stats["excluded"]:
         legend.append((f"line left out of DEXPI ({stats['excluded']})", EXCLUDED, "excluded"))
     return Layers(Path(png), size, lines, out_boxes, stats, legend)
@@ -294,13 +294,15 @@ def image_layers(image_path: str | Path, connections: list, boxes: list[Box]) ->
             continue
         traced = bool(path)
         n["traced" if traced else "model"] += 1
+        n[f"flow-{basis or 'unknown'}" if traced else "x"] = n.get(f"flow-{basis or 'unknown'}" if traced else "x", 0) + 1
         color = FLOW_COLORS[basis] if traced else MODEL_LINE
         arrows, _ = _arrows_on(pts, 1 if basis else 0)
-        lines.append(Line(pts, color, 5 if traced else 3, {rid}, tip, dashed=not traced, arrows=arrows, ends=(a, b)))
-    legend = [(f"pipe traced on the picture ({n['traced']}): flow from an arrowhead", FLOW_COLORS["arrow"], None),
-              ("flow implied by neighbouring arrows", FLOW_COLORS["implied"], None),
-              ("flow direction unknown", FLOW_COLORS[""], None),
-              (f"predicted by the model, not traced ({n['model']})", MODEL_LINE, None),
+        lines.append(Line(pts, color, 5 if traced else 3, {rid}, tip, dashed=not traced, arrows=arrows, ends=(a, b),
+                          kind=f"flow-{basis or 'unknown'}" if traced else "model-line"))
+    legend = [(f"traced pipe, flow from an arrowhead ({n.get('flow-arrow', 0)})", FLOW_COLORS["arrow"], "flow-arrow"),
+              (f"traced pipe, flow implied ({n.get('flow-implied', 0)})", FLOW_COLORS["implied"], "flow-implied"),
+              (f"traced pipe, flow unknown ({n.get('flow-unknown', 0)})", FLOW_COLORS[""], "flow-unknown"),
+              (f"predicted by the model, not traced ({n['model']})", MODEL_LINE, "model-line"),
               (f"signal line ({n['signal']})", SIGNAL, "signal")]
     if n["excluded"]:
         legend.append((f"line left out of DEXPI ({n['excluded']})", EXCLUDED, "excluded"))
@@ -405,10 +407,10 @@ def add_edits(layers: Layers, edits: list, replaced_rows: set) -> Layers:
         pa, pb = centre(boxes[a]), centre(boxes[b])
         pts = [pa, (pb[0], pa[1]), pb] if abs(pa[0] - pb[0]) > 1 and abs(pa[1] - pb[1]) > 1 else [pa, pb]
         arrows, _ = _arrows_on(pts, flow)
-        layers.lines.append(Line(pts, FLOW_COLORS["reviewer"], 5, {rid}, tip, arrows=arrows, ends=(a, b)))
+        layers.lines.append(Line(pts, FLOW_COLORS["reviewer"], 5, {rid}, tip, arrows=arrows, ends=(a, b), kind="edits"))
         n += 1
     if n:
-        layers.legend.append((f"line you added or changed ({n})", FLOW_COLORS["reviewer"], None))
+        layers.legend.append((f"line you added or changed ({n})", FLOW_COLORS["reviewer"], "edits"))
     return layers
 
 
