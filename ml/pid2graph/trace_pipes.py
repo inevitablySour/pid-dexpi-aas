@@ -91,10 +91,14 @@ def trace_connections(gray: np.ndarray, boxes: list, text_boxes: list | None = N
     slab, n_s = ndi.label(seg_mask, structure=np.ones((3, 3)))
     # Symbol regions grown by 2 px so a segment ending at the margin edge touches them.
     sym_touch = ndi.grey_dilation(sym, size=(5, 5))
+    # An arrowhead sticking out past the margin thins into a little junction blob right
+    # at the symbol: a line ending in such a blob next to a symbol ends at the symbol.
+    sym_near = ndi.grey_dilation(sym, size=(15, 15))
     j_touch = ndi.grey_dilation(jlab, size=(5, 5))
 
     seg_pixels = ndi.find_objects(slab)
     ends: dict[int, list] = {}  # seg -> [(kind, id, direction, (y, x)) for each end]
+    seg_pts: dict[int, np.ndarray] = {}  # seg -> its pixels in order, end 0 -> end 1
     for s in range(1, n_s + 1):
         sl = seg_pixels[s - 1]
         ys, xs = np.nonzero(slab[sl] == s)
@@ -105,11 +109,14 @@ def trace_connections(gray: np.ndarray, boxes: list, text_boxes: list | None = N
         for e, (y, x) in ((0, pts[0]), (1, pts[-1])):
             if sym_touch[y, x]:
                 seg_ends.append(("sym", int(sym_touch[y, x]) - 1, _direction(pts, e), (y, x)))
+            elif j_touch[y, x] and sym_near[y, x]:
+                seg_ends.append(("sym", int(sym_near[y, x]) - 1, _direction(pts, e), (y, x)))
             elif j_touch[y, x]:
                 seg_ends.append(("junc", int(j_touch[y, x]), _direction(pts, e), (y, x)))
             else:
                 seg_ends.append(("free", None, _direction(pts, e), (y, x)))
         ends[s] = (seg_ends, len(pts))
+        seg_pts[s] = pts
 
     # 4. bridge free ends across short, aligned gaps (dashes; small breaks in scans)
     free = [(s, e) for s, (se, _) in ends.items() for e in (0, 1) if se[e][0] == "free"]
@@ -163,13 +170,15 @@ def trace_connections(gray: np.ndarray, boxes: list, text_boxes: list | None = N
             if se0[e0][0] != "sym":
                 continue
             start = se0[e0][1]
-            stack = [(s0, e0, 0, 0)]  # entered segment s0 at end e0; bridges, length so far
+            # entered segment s0 at end e0; bridges, length so far, trail of (segment, entry end)
+            stack = [(s0, e0, 0, 0, ())]
             seen = set()
             while stack:
-                s, e_in, nb, length = stack.pop()
+                s, e_in, nb, length, trail = stack.pop()
                 if (s, e_in) in seen:
                     continue
                 seen.add((s, e_in))
+                trail = trail + ((s, e_in),)
                 seg_ends, seg_len = ends[s]
                 e_out = 1 - e_in
                 kind, ident, _, _ = seg_ends[e_out]
@@ -179,19 +188,73 @@ def trace_connections(gray: np.ndarray, boxes: list, text_boxes: list | None = N
                         key = (min(start, ident), max(start, ident))
                         prev = found.get(key)
                         if prev is None or length < prev["length"]:
-                            found[key] = {"a": key[0], "b": key[1], "bridges": nb, "length": length}
+                            found[key] = {"a": key[0], "b": key[1], "bridges": nb, "length": length,
+                                          "_from": start, "_trail": trail}
                 elif kind == "free" and (s, e_out) in bridge:
                     s2, e2 = bridge[(s, e_out)]
-                    stack.append((s2, e2, nb + 1, length))
+                    stack.append((s2, e2, nb + 1, length, trail))
                 elif kind == "junc":
                     if (s, e_out) in partner:
-                        stack.append((*partner[(s, e_out)], nb, length))
+                        stack.append((*partner[(s, e_out)], nb, length, trail))
                     else:
                         for s2, e2 in arms[ident]:
                             if (s2, e2) != (s, e_out):
-                                stack.append((s2, e2, nb, length))
+                                stack.append((s2, e2, nb, length, trail))
+    raw_ink = gray < dark  # arrowheads are measured on the full ink, symbols not erased
+    arrow_cache: dict[tuple[int, int], bool] = {}
+
+    def has_arrow(seg: int, end: int) -> bool:
+        # only where a line meets a symbol: at a tee the crossing pipe looks just as wide
+        if ends[seg][0][end][0] != "sym":
+            return False
+        if (seg, end) not in arrow_cache:
+            arrow_cache[(seg, end)] = bool(_arrowhead_at(raw_ink, seg_pts[seg], end, margin))
+        return arrow_cache[(seg, end)]
+
     out = []
     for c in found.values():
+        trail = c.pop("_trail")
+        start = c.pop("_from")
+        # the path, oriented start -> end of the walk, every 3rd pixel, as (x, y)
+        path, votes = [], 0
+        for seg, e_in in trail:
+            pts = seg_pts[seg] if e_in == 0 else seg_pts[seg][::-1]
+            path += [(float(x), float(y)) for y, x in pts[::3]] + [(float(pts[-1][1]), float(pts[-1][0]))]
+            votes += int(has_arrow(seg, 1 - e_in)) - int(has_arrow(seg, e_in))  # arrow at the far end: flows onward
+        if start != c["a"]:  # report a -> b
+            path, votes = path[::-1], -votes
+        c["path"] = path
+        c["flow"] = 1 if votes > 0 else -1 if votes < 0 else 0  # +1 a -> b, -1 b -> a, 0 unknown
         c["line_type"] = "signal" if c["bridges"] >= 2 else "process"
         out.append(c)
     return out
+
+
+def _arrowhead_at(ink: np.ndarray, pts: np.ndarray, end: int, margin: float) -> bool:
+    """A filled arrowhead where a line meets a symbol: across the line, the ink there is
+    several times wider than the line further back. The line was cut `margin` px before
+    the symbol (its box was grown by that much and erased), and draw.io's arrowhead sits
+    in exactly that gap - so the unerased ink is measured from a few px back along the
+    line to just short of the symbol's outline."""
+    H, W = ink.shape
+    pts = pts if end == 0 else pts[::-1]
+    if len(pts) < 12:
+        return False
+    u = _direction(pts, 0)  # pointing out of this end
+    n = (-u[1], u[0])
+    y0, x0 = pts[0]
+
+    def width(k: float) -> int:
+        cy, cx = y0 - u[0] * k, x0 - u[1] * k  # k > 0: back along the line; k < 0: beyond the end
+        run = 0
+        for side in (1, -1):
+            for t in range(0 if side == 1 else 1, 14):
+                y, x = int(round(cy + side * n[0] * t)), int(round(cx + side * n[1] * t))
+                if not (0 <= y < H and 0 <= x < W) or not ink[y, x]:
+                    break
+                run += 1
+        return run
+
+    line_w = np.median([width(k) for k in range(min(len(pts) - 1, 24), min(len(pts) - 1, 40))] or [2])
+    near = max(width(k) for k in range(-int(margin) + 2, 5))  # k < 0: into the gap, short of the outline
+    return near >= max(5, 3 * max(line_w, 1))

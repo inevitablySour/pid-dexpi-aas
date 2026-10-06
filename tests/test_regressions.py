@@ -310,3 +310,34 @@ def test_reviewed_spec_values_reach_the_dexpi_file(lightup, tmp_path):
     save_and_verify(result.model, tmp_path, "x")
     xml = next(tmp_path.glob("x*")).read_text()
     assert 'Value="2.5" Units="Litre"' in xml and 'Value="316L"' in xml
+
+
+# ------------------------------------------------------------------- pipe tracer ---
+def test_tracer_follows_a_pipe_and_reads_its_arrowhead():
+    # Runs where scipy + scikit-image are installed (the ML venv; skipped otherwise).
+    pytest.importorskip("scipy")
+    pytest.importorskip("skimage")
+    import sys
+
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    sys.path.insert(0, str(ROOT / "ml" / "pid2graph"))
+    from trace_pipes import trace_connections
+
+    im = Image.new("L", (600, 300), 255)
+    d = ImageDraw.Draw(im)
+    a, b = (40, 110, 120, 190), (480, 110, 560, 190)
+    d.rectangle(a, outline=0, width=2)
+    d.rectangle(b, outline=0, width=2)
+    d.line((120, 150, 300, 150), fill=0, width=2)   # a pipe with a bend, into b
+    d.line((300, 150, 300, 60), fill=0, width=2)
+    d.line((300, 60, 440, 60), fill=0, width=2)
+    d.line((440, 60, 440, 150), fill=0, width=2)
+    d.line((440, 150, 480, 150), fill=0, width=2)
+    d.polygon([(480, 150), (468, 144), (468, 156)], fill=0)  # arrowhead pointing into b
+    out = trace_connections(np.asarray(im), [a, b])
+    assert len(out) == 1 and {out[0]["a"], out[0]["b"]} == {0, 1}
+    c = out[0]
+    assert (c["flow"] == 1) == (c["b"] == 1)  # flows towards b
+    assert len(c["path"]) > 20

@@ -262,22 +262,37 @@ def build_layers(diagram: ParsedDiagram, drawio_path: str | Path, boxes: list | 
 
 
 def image_layers(image_path: str | Path, connections: list, boxes: list[Box]) -> Layers:
-    """Image-only mode: the model's connections as straight lines between box centres.
-    connections: [(row id, from id, to id, line type, include, hover text)]."""
+    """Image mode: pipes traced on the picture along their path, coloured by how their flow
+    direction is known (as on the draw.io map); the model's untraced predictions as
+    straight lines between box centres.
+    connections: [(row id, from id, to id, line type, include, hover text, path | None,
+    flow basis "arrow" | "implied" | "reviewer" | "")] - flow runs from -> to."""
     with Image.open(image_path) as im:
         size = im.size
     centre = {b.id: ((b.box[0] + b.box[2]) / 2, (b.box[1] + b.box[3]) / 2) for b in boxes}
-    lines, n = [], {"process": 0, "signal": 0, "excluded": 0}
-    for rid, a, b, kind, include, tip in connections:
+    lines, n = [], {"traced": 0, "model": 0, "signal": 0, "excluded": 0}
+    for rid, a, b, kind, include, tip, path, basis in connections:
         if a not in centre or b not in centre:
             continue
-        key = "excluded" if not include else kind
-        n[key] = n.get(key, 0) + 1
-        color = EXCLUDED if not include else SIGNAL if kind == "signal" else MODEL_LINE
-        lines.append(Line([centre[a], centre[b]], color, 3, {rid}, tip, dashed=kind == "signal" or not include,
-                          ends=(a, b), kind="excluded" if not include else "signal" if kind == "signal" else "pipe"))
-    legend = [(f"predicted pipe, centre to centre ({n['process']})", MODEL_LINE, None),
-              (f"predicted signal line ({n['signal']})", SIGNAL, "signal")]
+        pts = [tuple(p) for p in path] if path and len(path) >= 2 else [centre[a], centre[b]]
+        if not include:
+            n["excluded"] += 1
+            lines.append(Line(pts, EXCLUDED, 3, {rid}, tip, dashed=True, ends=(a, b), kind="excluded"))
+            continue
+        if kind == "signal":
+            n["signal"] += 1
+            lines.append(Line(pts, SIGNAL, 3, {rid}, tip, dashed=True, ends=(a, b), kind="signal"))
+            continue
+        traced = bool(path)
+        n["traced" if traced else "model"] += 1
+        color = FLOW_COLORS[basis] if traced else MODEL_LINE
+        arrows, _ = _arrows_on(pts, 1 if basis else 0)
+        lines.append(Line(pts, color, 5 if traced else 3, {rid}, tip, dashed=not traced, arrows=arrows, ends=(a, b)))
+    legend = [(f"pipe traced on the picture ({n['traced']}): flow from an arrowhead", FLOW_COLORS["arrow"], None),
+              ("flow implied by neighbouring arrows", FLOW_COLORS["implied"], None),
+              ("flow direction unknown", FLOW_COLORS[""], None),
+              (f"predicted by the model, not traced ({n['model']})", MODEL_LINE, None),
+              (f"signal line ({n['signal']})", SIGNAL, "signal")]
     if n["excluded"]:
         legend.append((f"left out of DEXPI ({n['excluded']})", EXCLUDED, "excluded"))
     return Layers(Path(image_path), size, lines, boxes, n, legend)

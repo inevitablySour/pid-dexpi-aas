@@ -84,6 +84,9 @@ class ReviewConnection:
     # arrows on neighbouring lines, flow_direction.py) | "reviewer"; "" = unknown;
     # "no flow between them" = two legs on the same side of a tee (both fed, or both feeding)
     flow: str = ""
+    # image mode: the pipe as traced on the picture (image pixels, From -> To), for the map
+    # and the re-drawn DEXPI picture
+    path: list | None = None
 
 
 FLOW_KNOWN = ("drawn arrow", "implied", "reviewer")
@@ -222,14 +225,52 @@ def from_image(infer: dict, source_name: str) -> ReviewDiagram:
     review.unattached_tags = [
         {"tag": t.text, "box": list(t.box), "conf": round(t.conf, 3)} for t in tags if id(t) not in claimed
     ]
+    # Pipes traced on the picture (ml/pid2graph/trace_pipes.py) first - they follow the
+    # drawn line across the whole sheet and carry their path and arrowhead direction. Then
+    # the model's own predictions for pairs the tracer did not reach (scored on the team
+    # sheets: tracer alone F1 0.68, model alone 0.70, both 0.84).
+    seen = set()
+    for n, t in enumerate(infer.get("traced", [])):
+        a, b, path = t["from"], t["to"], t.get("path")
+        if t.get("flow", 0) < 0:
+            a, b, path = b, a, (path or [])[::-1]
+        seen.add(frozenset((a, b)))
+        review.connections.append(ReviewConnection(
+            id=f"tc{n}", from_id=a, to_id=b, source="picture tracing", line_type=t.get("line_type", "process"),
+            confidence="dashed line followed" if t.get("line_type") == "signal" else "drawn line followed",
+            flow="drawn arrow" if t.get("flow") else "", path=path,
+        ))
     for n, c in enumerate(infer.get("connections", [])):
+        if frozenset((c["from"], c["to"])) in seen:
+            continue
         review.connections.append(ReviewConnection(
             id=f"mc{n}", from_id=c["from"], to_id=c["to"], source="image model",
             line_type=c.get("line_type", "process"),
-            confidence=f"{c['prob']:.2f}", notes="model-predicted - unreliable in current model, check",
+            confidence=f"{c['prob']:.2f}", notes="predicted by the model, not traced on the picture - check",
         ))
+    _imply_flow(review)
     _exclude_dangling(review)
     return review
+
+
+def _imply_flow(review: ReviewDiagram) -> None:
+    """Carry arrowhead directions to process lines without one (flow_direction rules:
+    an item with two pipes passes the flow on)."""
+    from pid_dexpi_aas.flow_direction import Leg, propagate
+
+    by_id = {s.id: s for s in review.symbols}
+    lines = [c for c in review.connections if c.line_type == "process" and c.from_id in by_id and c.to_id in by_id]
+    legs = [Leg(by_id[c.from_id], by_id[c.to_id], 1 if c.flow == "drawn arrow" else 0,
+                "arrow" if c.flow == "drawn arrow" else "") for c in lines]
+    instrument = lambda s: category_for_class(s.dexpi_class) == Category.INSTRUMENTATION
+    propagate(legs, passes=lambda s: not instrument(s), junction=lambda s: False)
+    for c, leg in zip(lines, legs):
+        if c.flow or not leg.dir:
+            continue
+        c.flow = "implied"
+        if leg.dir < 0:
+            c.from_id, c.to_id = c.to_id, c.from_id
+            c.path = (c.path or [])[::-1] or None
 
 
 # ------------------------------------------------------------------------ cross-check ---
@@ -405,10 +446,12 @@ def to_dexpi(review: ReviewDiagram) -> tuple[ParsedDiagram, BuildResult]:
         edge.flow = 1 if c.flow in FLOW_KNOWN else 0
         edge.flow_basis = "arrow" if c.flow == "drawn arrow" else "implied" if edge.flow else ""
         edges.append(edge)
+    if base is None:  # image mode: the redraw follows the pipes traced on the picture
+        traced = {c.id: [tuple(p) for p in c.path] for c in review.connections if c.include and c.path}
     diagram = ParsedDiagram(source_file=review.source_name, shapes=shapes, edges=edges,
                             specs=dict(base.specs) if base is not None else {},
                             flow=base.flow if base is not None else None,
-                            routes=base.routes if base is not None else None,
+                            routes=base.routes if base is not None else (traced or None),
                             drawn_edges=list(base.edges) if base is not None else None)
     result = build_model(diagram, overrides, tag_overrides)
     # specification fields filled in by the reviewer (dexpi_fields.py), over the drawing's notes

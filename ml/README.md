@@ -408,3 +408,31 @@ has no GT edges.
   `connected` predicate class (`NUM_REL_CLS: 1`). Splitting it into two predicate classes
   is a one-line config change plus a loader tweak, if dashed/signal lines matter for the
   DEXPI output.
+
+## Image-only connections: model + pipe tracer
+
+The model only links symbols that share a tile, so long pipes are invisible to it.
+`trace_pipes.py` follows the drawn lines over the whole sheet (no tiles): linework only
+(text and symbol insides erased), thinned to 1 px, cut at junctions, short gaps bridged
+(many bridges = dashed = signal line), then walked from every symbol - straight on at
+crossings, down every branch at tees. It returns each pipe's path and its flow direction
+from arrowheads where a line meets a symbol. `infer_sheet.py` runs it after the model and
+OCR; the review app uses traced pipes first and the model's predictions for pairs the
+tracer did not reach.
+
+Scored on the 6 team sheets against their draw.io labels (`eval_tracer.py`):
+
+| connections from | precision | recall | F1 |
+|---|---|---|---|
+| model only | 0.92 | 0.56 | 0.70 |
+| tracer only | 0.82 | 0.60 | 0.69 |
+| both | 0.84 | 0.86 | 0.85 |
+
+Flow directions from arrowheads: 95 of 141 pipes with a known direction called, 0 wrong.
+
+## Before a training run
+
+`check_data.py` checks everything a fine-tune run trains and validates on, through the
+training code's own loading: no sheet shared between train / val / test in any fold, the
+team test drawing never in training, every label file sane (classes, boxes inside the
+image, connections), no patch with more symbols than queries.

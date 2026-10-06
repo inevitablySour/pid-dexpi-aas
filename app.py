@@ -101,8 +101,8 @@ def _digest(*parts: bytes) -> str:
 
 
 # Bump when the model's input handling changes, so results cached by an older version
-# are redone (v2: dark-theme exports keep their light lines - sheet_image.py).
-INFER_VERSION = b"v2"
+# are redone (v2: dark-theme exports keep their light lines - sheet_image.py; v3: traced pipes).
+INFER_VERSION = b"v3"
 
 
 @st.cache_data(show_spinner=False)
@@ -192,8 +192,9 @@ if review.moved:
                f"each. Boxes there won't line up - use matching files, or treat the image checks around them "
                f"with care.")
 if image_file is not None and drawio_file is None:
-    st.warning("Image-only mode: connections come from the current model and are unreliable "
-               "(known label issue, fix pending) - review them carefully or rebuild them by hand.")
+    st.info("Image only: symbols from the model, tags from OCR, pipes traced along the drawn lines "
+            "(flow from arrowheads). Pipes the tracer could not follow come from the model's predictions - "
+            "dashed orange on the map; check those first.")
 
 # ------------------------------------------------------------------ needs-review logic ---
 def needs_review(s: ReviewSymbol) -> bool:
@@ -310,9 +311,11 @@ def picture_layers(review: ReviewDiagram) -> Layers | None:
              for s in review.symbols if s.box]
     ocr = _ocr_boxes(review)
     name = {s.id: item_name(s.id) for s in review.symbols}
+    basis = {"drawn arrow": "arrow", "implied": "implied", "reviewer": "reviewer"}
     conns = [(c.id, c.from_id, c.to_id, c.line_type, c.include,
-              f"{name.get(c.from_id, c.from_id)} - {name.get(c.to_id, c.to_id)}: {c.line_type} ({c.source})")
-             for c in review.connections]
+              f"{name.get(c.from_id, c.from_id)} -> {name.get(c.to_id, c.to_id)}: {LINE_LABELS.get(c.line_type, c.line_type)}"
+              f", {found_by(c)}" + (f", flow: {FLOW_LABELS.get(c.flow, c.flow)}" if c.flow else ""),
+              c.path, basis.get(c.flow, "")) for c in review.connections]
     layers = image_layers(review.image_path, conns, boxes + ocr)
     layers.legend.append((f"text read in the picture, not on any item ({len(ocr)})", OCR_TAG, "ocr"))
     return layers
@@ -369,7 +372,9 @@ LINE_LABELS = {"process": "process pipe", "signal": "signal line"}
 
 def found_by(c: ReviewConnection) -> str:
     if c.source == "image model":
-        return f"model ({c.confidence})"
+        return f"model prediction ({c.confidence})"
+    if c.source == "picture tracing":
+        return "traced on the picture"
     if c.source == "manual":
         return "added by you"
     return {"explicit": "draw.io: line snapped to both items", "junction": "draw.io: joined at a tee",

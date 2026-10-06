@@ -444,15 +444,18 @@ def sample_weights(samples: list[tuple[Path, Path]], config, cache_path: Path) -
     from collections import Counter
     from concurrent.futures import ProcessPoolExecutor
 
+    # keyed by path AND modification time: labels regenerated in place (Team v3) must not
+    # be weighted with the class counts of the old file
+    key = lambda g: f"{g}|{Path(g).stat().st_mtime_ns}"
     cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
-    missing = [str(g) for _, g in samples if str(g) not in cache]
+    missing = [str(g) for _, g in samples if key(g) not in cache]
     if missing:
         with ProcessPoolExecutor() as pool:
             for path, labels in zip(missing, pool.map(_labels_of, missing, chunksize=64)):
-                cache[path] = labels
+                cache[key(path)] = labels
         cache_path.write_text(json.dumps(cache))
 
-    freq = Counter(l for _, g in samples for l in cache[str(g)])
+    freq = Counter(l for _, g in samples for l in cache[key(g)])
     median = float(np.median(list(freq.values()))) if freq else 1.0
     cap = float(_cfg(config, "DATA", "RARITY_CAP", 4.0))
     real_w = float(_cfg(config, "DATA", "REAL_WEIGHT", 1.0))
@@ -461,7 +464,7 @@ def sample_weights(samples: list[tuple[Path, Path]], config, cache_path: Path) -
     team_keys = list(_cfg(config, "DATA", "EXTRA_TRAIN_SUBSETS", []))
     weights = []
     for _, g in samples:
-        labels = cache[str(g)]
+        labels = cache[key(g)]
         rarity = max((min(cap, (median / freq[l]) ** 0.5) for l in labels), default=1.0)
         source = real_w if real_key in str(g) else team_w if any(k in str(g) for k in team_keys) else 1.0
         weights.append(max(rarity, 1.0) * source)

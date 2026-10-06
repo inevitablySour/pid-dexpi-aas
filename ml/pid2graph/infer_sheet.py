@@ -32,6 +32,7 @@ from PIL import Image
 RF_DIR = Path(__file__).resolve().parent.parent / "relationformer"
 sys.path.insert(0, str(RF_DIR))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))  # pid_dexpi_aas.sheet_image
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # trace_pipes
 
 from inference import graph_infer  # noqa: E402
 from models import build_model  # noqa: E402
@@ -255,10 +256,18 @@ def main() -> None:
     sheet = load_sheet(args.image)
     symbols, connections = detect(sheet, args.checkpoint, args.tile, args.stride, args.device)
     tokens = [] if args.no_ocr else run_ocr(sheet, use_gpu=args.device != "cpu")
+    # Pipes followed across the whole sheet (trace_pipes.py): the model only links symbols
+    # that share a tile; the tracer has no tiles. Paths and arrowhead directions included.
+    from trace_pipes import trace_connections
+    ids = [s["id"] for s in symbols]
+    traced = [{"from": ids[t["a"]], "to": ids[t["b"]], "line_type": t["line_type"], "flow": t["flow"],
+               "path": [[round(x, 1), round(y, 1)] for x, y in t["path"]], "bridges": t["bridges"]}
+              for t in trace_connections(np.asarray(sheet.convert("L")), [s["box"] for s in symbols],
+                                         [t["box"] for t in tokens])]
     out = {"image": os.path.abspath(args.image), "image_size": list(sheet.size), "checkpoint": args.checkpoint,
-           "symbols": symbols, "connections": connections, "ocr_tokens": tokens}
+           "symbols": symbols, "connections": connections, "traced": traced, "ocr_tokens": tokens}
     Path(args.out).write_text(json.dumps(out, indent=1))
-    print(json.dumps({"symbols": len(symbols), "connections": len(connections), "ocr_tokens": len(tokens)}))
+    print(json.dumps({"symbols": len(symbols), "connections": len(connections), "traced": len(traced), "ocr_tokens": len(tokens)}))
 
 
 if __name__ == "__main__":
