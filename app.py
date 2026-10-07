@@ -1037,6 +1037,91 @@ def _to_stream(cid: str, end: str, key: str) -> None:
     select((), {cid}, zoom=True)
 
 
+def _new_stream_id() -> str:
+    n = 1 + sum(1 for x in review.symbols if x.id.startswith("stream"))
+    while f"stream{n}" in by_sym:
+        n += 1
+    return f"stream{n}"
+
+
+_OPPOSITE = {"left": "right", "right": "left", "top": "bottom", "bottom": "top"}
+_ACROSS = {"left": ("top", "bottom"), "right": ("bottom", "top"), "top": ("left", "right"), "bottom": ("right", "left")}
+
+
+def _side_towards(box, point) -> str:
+    """Which side of `box` faces `point` (taking the box's shape into account)."""
+    x1, y1, x2, y2 = box
+    dx, dy = point[0] - (x1 + x2) / 2, point[1] - (y1 + y2) / 2
+    if abs(dx) * max(y2 - y1, 1) >= abs(dy) * max(x2 - x1, 1):
+        return "right" if dx > 0 else "left"
+    return "bottom" if dy > 0 else "top"
+
+
+def _stream_side(sid: str, out: bool) -> str:
+    """Where a new stream goes on item `sid`: opposite its existing lines of the other
+    direction (an inlet opposite the outlets, an outlet opposite the inlets); if that side
+    is taken, a free side; with every side taken, the least used one. No lines of the other
+    direction: outlets right, inlets left (the usual flow on a P&ID)."""
+    s = by_sym[sid]
+    used: dict = {}
+    ins, outs = {}, {}
+    for c in review.connections:
+        if not c.include or sid not in (c.from_id, c.to_id) or c.from_id == c.to_id:
+            continue
+        other = by_sym.get(c.to_id if c.from_id == sid else c.from_id)
+        if other is None or not other.box:
+            continue
+        side = _side_towards(s.box, ((other.box[0] + other.box[2]) / 2, (other.box[1] + other.box[3]) / 2))
+        used[side] = used.get(side, 0) + 1
+        if c.flow in FLOW_KNOWN:
+            bucket = outs if c.from_id == sid else ins
+            bucket[side] = bucket.get(side, 0) + 1
+    against = ins if out else outs
+    first = _OPPOSITE[max(against, key=against.get)] if against else ("right" if out else "left")
+    order = [first, *_ACROSS[first], _OPPOSITE[first]]
+    free = [x for x in order if not used.get(x)]
+    return free[0] if free else min(order, key=lambda x: used.get(x, 0))
+
+
+def _add_stream(sid: str, direction: str, key: str) -> None:
+    """A stream into or out of the drawing at an item (feed, product, vent): a new off-page
+    row beside it, on the side _stream_side picks (stacked next to anything already there),
+    and a line with its direction set (DEXPI: FlowIn / FlowOut connector)."""
+    s = by_sym[sid]
+    out = direction == "out"
+    name = (st.session_state.get(key) or "").strip() or ("Product" if out else "Feed")
+    stream_id = _new_stream_id()
+    box = None
+    if s.box:
+        x1, y1, x2, y2 = s.box
+        w = max(60.0, 0.6 * (x2 - x1))
+        h = w / 2
+        side = _stream_side(sid, out)
+        # streams already on that side of this item: stack the new one beside them
+        here = [o for c in review.connections if c.include and sid in (c.from_id, c.to_id)
+                for o in [by_sym.get(c.to_id if c.from_id == sid else c.from_id)]
+                if o is not None and o.box and o.dexpi_class == OFF_PAGE
+                and _side_towards(s.box, ((o.box[0] + o.box[2]) / 2, (o.box[1] + o.box[3]) / 2)) == side]
+        gap = max(40.0, 0.5 * max(x2 - x1, y2 - y1))
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        if side in ("left", "right"):
+            bx = x2 + gap if side == "right" else x1 - gap - w
+            by = cy - h / 2 + len(here) * 1.6 * h
+        else:
+            bx = cx - w / 2 + len(here) * 1.3 * w
+            by = y2 + gap if side == "bottom" else y1 - gap - h
+        box = [bx, by, bx + w, by + h]
+    review.symbols.append(ReviewSymbol(
+        id=stream_id, source="manual", box=box, detected_as="stream in/out", tag=name, tag_source="manual",
+        dexpi_class=OFF_PAGE, identified_by=f"added by you as a stream {'out of' if out else 'into'} the drawing",
+        notes=f"stream {'out of' if out else 'into'} {item_name(sid)}"))
+    a, b = (sid, stream_id) if out else (stream_id, sid)
+    cid = f"manual_c{len(review.connections) + 1}_{a[-4:]}_{b[-4:]}"
+    review.connections.append(ReviewConnection(id=cid, from_id=a, to_id=b, line_type="process", source="manual",
+                                               flow="reviewer", notes=f"stream {name} added by you"))
+    select((), {cid}, zoom=True)  # the new line: its panel shows both ends and the direction
+
+
 def _reverse(cid: str) -> None:
     c = next(x for x in review.connections if x.id == cid)
     c.from_id, c.to_id, c.flow = c.to_id, c.from_id, "reviewer"
@@ -1306,6 +1391,18 @@ with panel_col:
                                if pre else "") + ". Written into the DEXPI file when you build.")
                     for f in fields:
                         _spec_widget(s, f, (cust if f.custom else vals).get(f.name) or pre.get(f.name), k)
+            if s.dexpi_class not in INSTRUMENT_CLASSES and s.dexpi_class not in (OFF_PAGE, SKIP):
+                with st.expander("Streams in / out of the drawing"):
+                    st.caption("A feed, product or vent stream at this item: a named stream next to it, joined by "
+                               "a line with its direction set. In DEXPI: a Flow In / Flow Out off-page connector.")
+                    st.text_input("Stream name", "", placeholder="e.g. Product, N2, Vent", key=f"stream_name_{s.id}_{k}")
+                    c1, c2 = st.columns(2)
+                    c1.button("Add stream out →", key=f"stream_out_{s.id}_{k}", width="stretch", on_click=_add_stream,
+                              args=(s.id, "out", f"stream_name_{s.id}_{k}"),
+                              help=f"Something leaves the drawing from {item_name(s.id)} (default name: Product)")
+                    c2.button("→ Add stream in", key=f"stream_in_{s.id}_{k}", width="stretch", on_click=_add_stream,
+                              args=(s.id, "in", f"stream_name_{s.id}_{k}"),
+                              help=f"Something enters the drawing into {item_name(s.id)} (default name: Feed)")
             st.markdown("**Change the line-up**")
             others = [o for o in review.symbols if o.id != s.id and o.include and o.dexpi_class != SKIP]
             target = st.selectbox("Connect to", [""] + [item_option(o.id) for o in others], key=f"conn_to_{s.id}_{k}",
