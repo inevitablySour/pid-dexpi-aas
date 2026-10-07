@@ -600,3 +600,39 @@ def test_refine_lets_a_tag_inside_a_box_set_its_class_but_not_an_off_page_arrow(
               {"text": "V204", "conf": 0.99, "box": [320, 115, 380, 135], "angle": 0}]
     out, _ = refine(gray, syms, tokens, fixes=("tag",))
     assert [s["class"] for s in out] == ["pump", "inlet/outlet"]
+
+
+# --------------------------------------------------------------- training-data export ---
+def test_reviewed_picture_exports_as_training_data(tmp_path):
+    """A reviewed picture -> PID2Graph tiles: reviewed items with their class, arrows kept,
+    left-out items and added streams dropped, connections with their path as corners."""
+    import io
+    import zipfile
+
+    import networkx as nx
+    from PIL import Image
+
+    from pid_dexpi_aas.image.training_export import review_training_zip
+    from pid_dexpi_aas.review import OFF_PAGE, SKIP, ReviewConnection, ReviewDiagram, ReviewSymbol
+
+    img = tmp_path / "sheet.png"
+    Image.new("RGB", (900, 600), "white").save(img)
+    sym = lambda i, box, cls, **kw: ReviewSymbol(id=i, source=kw.pop("source", "image model"), box=list(box),
+                                                 detected_as=kw.pop("det", "valve"), dexpi_class=cls, **kw)
+    review = ReviewDiagram(source_name="sheet.png", image_path=str(img), image_size=(900, 600), symbols=[
+        sym("v", (100, 100, 185, 185), "GateValve"),
+        sym("t", (500, 100, 585, 185), "Tank", det="tank"),
+        sym("a", (300, 300, 330, 320), SKIP, det="arrow", include=False),          # flow arrow: kept
+        sym("x", (700, 400, 785, 485), "GateValve", include=False),               # left out: dropped
+        sym("s", (600, 120, 660, 150), OFF_PAGE, source="manual", det="stream in/out"),  # added stream: dropped
+    ], connections=[
+        ReviewConnection(id="c1", from_id="v", to_id="t", path=[(185, 142), (300, 142), (400, 142), (500, 142)]),
+        ReviewConnection(id="c2", from_id="v", to_id="x"),
+    ])
+    data, summary = review_training_zip(review, subset="Reviewed test")
+    assert summary["classes"] == {"arrow": 1, "tank": 1, "valve": 1} and summary["connections"] == 1
+    z = zipfile.ZipFile(io.BytesIO(data))
+    g = nx.read_graphml(io.BytesIO(z.read("Complete/Reviewed test/sheet.graphml")))
+    (_, _, d), = g.edges(data=True)
+    assert d["edge_label"] == "solid" and len(__import__("json").loads(d["path"])) == 2  # a straight pipe: 2 corners
+    assert any(n.startswith("Patched/Reviewed test/sheet/") for n in z.namelist())

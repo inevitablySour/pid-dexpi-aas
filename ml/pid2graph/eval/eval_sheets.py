@@ -44,6 +44,9 @@ SETS = {
     # connections and is kept only to compare with older scores.
     "team": {"dir": DATA / "Complete" / "Team v3 test", "scale": 1.0},
     "team-v1": {"dir": DATA / "Complete" / "Team test", "scale": 1.0},
+    # pictures checked in the review app and held out (the app's "held-out test" export, e.g. the
+    # MEM4CHEM sheets): already scaled to the team drawings' symbol size
+    "reviewed": {"dir": DATA / "Complete" / "Reviewed test", "scale": 1.0},
 }
 
 

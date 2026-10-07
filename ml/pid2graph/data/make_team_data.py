@@ -29,7 +29,6 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from xml.etree import ElementTree as ET
 
 import numpy as np
 from PIL import Image
@@ -42,6 +41,7 @@ from align import register_offset  # noqa: E402
 from pid_dexpi_aas.image.export_pid2graph import labelled_symbols  # noqa: E402
 from pid_dexpi_aas.drawio.line_routes import DRAWIO_APP  # noqa: E402  (finds the installed app)
 from pid_dexpi_aas.drawio.parser import parse_drawio_xml_resolved  # noqa: E402
+from pid_dexpi_aas.image.training_export import dir_writer, write_sheet  # noqa: E402
 
 
 def render_png(drawio_path: Path, out_png: Path) -> None:
@@ -49,64 +49,20 @@ def render_png(drawio_path: Path, out_png: Path) -> None:
                     "-o", str(out_png), str(drawio_path)], check=True, capture_output=True)
 
 
-def write_graphml(path: Path, symbols: list[tuple[str, str, tuple]], edges: list[tuple[str, str, str]]) -> None:
-    ns = "http://graphml.graphdrawing.org/xmlns"
-    ET.register_namespace("", ns)
-    root = ET.Element(f"{{{ns}}}graphml")
-    for kid, name, typ in [("d0", "label", "string"), ("d1", "xmin", "double"), ("d2", "xmax", "double"),
-                           ("d3", "ymin", "double"), ("d4", "ymax", "double")]:
-        ET.SubElement(root, f"{{{ns}}}key", id=kid, attrib={"for": "node", "attr.name": name, "attr.type": typ})
-    ET.SubElement(root, f"{{{ns}}}key", id="d9", attrib={"for": "edge", "attr.name": "edge_label", "attr.type": "string"})
-    graph = ET.SubElement(root, f"{{{ns}}}graph", edgedefault="undirected")
-    for sid, label, (x1, y1, x2, y2) in symbols:
-        node = ET.SubElement(graph, f"{{{ns}}}node", id=sid)
-        for kid, val in (("d0", label), ("d1", x1), ("d2", x2), ("d3", y1), ("d4", y2)):
-            ET.SubElement(node, f"{{{ns}}}data", key=kid).text = str(round(val, 2)) if kid != "d0" else val
-    for a, b, line in edges:
-        e = ET.SubElement(graph, f"{{{ns}}}edge", source=a, target=b)
-        ET.SubElement(e, f"{{{ns}}}data", key="d9").text = line
-    ET.ElementTree(root).write(path, xml_declaration=True, encoding="utf-8")
-
-
-def tile_starts(total: int, tile: int, stride: int) -> list[int]:
-    if total <= tile:
-        return [0]
-    s = list(range(0, total - tile + 1, stride))
-    return s if s[-1] == total - tile else s + [total - tile]
-
-
 def process(drawio_path: Path, out_root: Path, subset: str, tile: int, stride: int) -> dict:
     diagram = parse_drawio_xml_resolved(decode_drawio(drawio_path)[0], source_file=drawio_path.name, drawio_path=drawio_path)
     syms, edges = labelled_symbols(diagram)  # the same labelling as docs/examples/pid2graph_export
 
     name = drawio_path.stem.strip()
-    complete_dir = out_root / "Complete" / subset
-    complete_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
         png_tmp = Path(tmp) / "sheet.png"
         render_png(drawio_path, png_tmp)
         ox, oy, cov = register_offset([b for _, _, b, _ in syms], png_tmp)
         sheet = Image.open(png_tmp).convert("RGB")
-    sheet.save(complete_dir / f"{name}.png")
     px = [(sid, lab, (b[0] - ox, b[1] - oy, b[2] - ox, b[3] - oy)) for sid, lab, b, _ in syms]
-    write_graphml(complete_dir / f"{name}.graphml", px, edges)
-
-    patch_dir = out_root / "Patched" / subset / name
-    patch_dir.mkdir(parents=True, exist_ok=True)
+    # the same writer as pictures reviewed in the app (pid_dexpi_aas.image.training_export)
+    n = write_sheet(dir_writer(out_root), sheet, name, subset, px, edges, tile, stride)
     W, H = sheet.size
-    n = 0
-    for y0 in tile_starts(H, tile, stride):
-        for x0 in tile_starts(W, tile, stride):
-            x1, y1 = x0 + min(tile, W), y0 + min(tile, H)
-            kept = []
-            for sid, lab, (a, b, c, d) in px:
-                ia = max(0.0, min(c, x1) - max(a, x0)) * max(0.0, min(d, y1) - max(b, y0))
-                if ia >= 0.5 * (c - a) * (d - b):
-                    kept.append((sid, lab, (max(a, x0) - x0, max(b, y0) - y0, min(c, x1) - x0, min(d, y1) - y0)))
-            ids = {k[0] for k in kept}
-            sheet.crop((x0, y0, x1, y1)).save(patch_dir / f"{n}.png")
-            write_graphml(patch_dir / f"{n}.graphml", kept, [e for e in edges if e[0] in ids and e[1] in ids])
-            n += 1
     return {"file": drawio_path.name, "subset": subset, "size": (W, H), "symbols": len(px), "edges": len(edges),
             "patches": n, "offset": (round(ox), round(oy)), "ink_coverage": round(cov, 3)}
 
