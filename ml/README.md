@@ -180,6 +180,19 @@ Each fold is scored only on its own 3 held-out sheets, so the pooled number cove
 12 sheets, each by a model that never saw it. Every fold also scores LightUp (team test,
 never trained on). `DEBUG=1` runs a 30-patch smoke test of the whole chain.
 
+The model for the app is then trained once on everything - all 12 OPEN100 sheets and
+every team drawing, LightUp included (`--fold -1`) - with real/team patches showing a pump
+drawn 3x more often (`pid2graph_final.yaml`, `DATA.CLASS_BOOST`; OPEN100 pumps scored ~0).
+Nothing is held out, so the 4-fold scores are its estimate:
+
+```bash
+ml/pid2graph/run_final.sh ml/relationformer/trained_weights/runs/sheetsplit_bs4_10/models/checkpoint_epoch=150.pt
+# -> ml/models/pid2graph_final.pt (~4 h)
+```
+
+Team v3 4-fold results (2026-10-07): LightUp node 0.931 / edge 0.489 (team-v1 labels'
+run: 0.911 / 0.347), OPEN100 0.689 / 0.281 (0.687 / 0.271).
+
 Notes: OPEN100 patches are the complete sheets enlarged 2.65x, so whole-sheet scoring
 tiles at 1500/2.65 px. `exports/pid2graph_export/*.graphml` (draw.io coordinates) and the
 training data (`make_team_data.py`, image pixels) share one labelling,

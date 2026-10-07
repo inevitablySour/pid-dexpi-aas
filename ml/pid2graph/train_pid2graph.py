@@ -64,7 +64,9 @@ def parse_args():
                              "'team_test' = the held-out team drawing (DATA.TEAM_TEST_SUBSETS)")
     parser.add_argument('--fold', type=int, default=None,
                         help='OPEN100 cross-validation fold (0-3): 8 real sheets join training, 1 validation, '
-                             '3 are this fold\'s test set; also adds DATA.EXTRA_TRAIN_SUBSETS to training')
+                             '3 are this fold\'s test set; also adds DATA.EXTRA_TRAIN_SUBSETS to training. '
+                             '-1 = the final model: all 12 real sheets and every team drawing (incl. '
+                             'DATA.TEAM_TEST_SUBSETS) train, nothing is held out')
     return parser.parse_args()
 
 

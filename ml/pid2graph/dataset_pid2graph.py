@@ -340,13 +340,16 @@ def real_fold_sheets(config, fold: int, seed: int = 10) -> dict[str, list[str]]:
     """The real (OPEN100) sheets of a cross-validation fold: {"test", "val", "train"} ->
     sheet directory names. 12 sheets, 4 folds: 3 test sheets per fold, the next sheet
     (cyclically) as a real validation sheet for checkpoint selection, 8 for training.
-    Every sheet is tested by exactly one fold, always by a model that never saw it."""
+    Every sheet is tested by exactly one fold, always by a model that never saw it.
+    fold -1: the final model - every real sheet trains, none is held out."""
     import random
 
     root = Path(config.DATA.DATA_PATH)
     real_dir = root / _cfg(config, "DATA", "REAL_SUBSET", "Patched/PID2Graph OPEN100")
     names = sorted((d.name for d in real_dir.iterdir() if d.is_dir()), key=lambda n: int(n) if n.isdigit() else n)
     random.Random(seed).shuffle(names)
+    if fold == -1:
+        return {"test": [], "val": [], "train": names}
     n_folds = int(_cfg(config, "DATA", "NUM_FOLDS", 4))
     per = len(names) // n_folds
     test = names[fold * per:(fold + 1) * per]
@@ -427,6 +430,8 @@ def build_pid2graph_data(config, mode: str = "split", split: float = 0.9, seed: 
         train_pairs += [p for p in real_pairs if p[1].parent.name in real["train"]]
         val_pairs += [p for p in real_pairs if p[1].parent.name in real["val"]]
         train_pairs += _discover_pairs(root, list(_cfg(config, "DATA", "EXTRA_TRAIN_SUBSETS", [])))
+        if fold == -1:  # the final model also learns from the held-out team drawing(s)
+            train_pairs += _discover_pairs(root, list(_cfg(config, "DATA", "TEAM_TEST_SUBSETS", [])))
 
     random.shuffle(train_pairs)
     return ds(train_pairs, train_transform), ds(val_pairs, val_transform)
@@ -461,13 +466,20 @@ def sample_weights(samples: list[tuple[Path, Path]], config, cache_path: Path) -
     real_w = float(_cfg(config, "DATA", "REAL_WEIGHT", 1.0))
     team_w = float(_cfg(config, "DATA", "TEAM_WEIGHT", 1.0))
     real_key = _cfg(config, "DATA", "REAL_SUBSET", "Patched/PID2Graph OPEN100")
-    team_keys = list(_cfg(config, "DATA", "EXTRA_TRAIN_SUBSETS", []))
+    team_keys = list(_cfg(config, "DATA", "EXTRA_TRAIN_SUBSETS", [])) + list(_cfg(config, "DATA", "TEAM_TEST_SUBSETS", []))
+    # DATA.CLASS_BOOST {class: factor}: real/team patches showing that class are drawn that
+    # much more often - real pumps look unlike the synthetic ones and are few (OPEN100
+    # pumps scored ~0: drawn as circles, read as instruments)
+    boost = _cfg(config, "DATA", "CLASS_BOOST", None) or {}
+    boost = boost if isinstance(boost, dict) else vars(boost)  # yaml -> dict2obj object
     weights = []
     for _, g in samples:
         labels = cache[key(g)]
         rarity = max((min(cap, (median / freq[l]) ** 0.5) for l in labels), default=1.0)
-        source = real_w if real_key in str(g) else team_w if any(k in str(g) for k in team_keys) else 1.0
-        weights.append(max(rarity, 1.0) * source)
+        real = real_key in str(g)
+        source = real_w if real else team_w if any(k in str(g) for k in team_keys) else 1.0
+        extra = max((float(boost[l]) for l in set(labels) if l in boost), default=1.0) if source != 1.0 else 1.0
+        weights.append(max(rarity, 1.0) * source * extra)
     return weights
 
 
