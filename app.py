@@ -1247,8 +1247,9 @@ with panel_col:
                 cust = (s.attributes or {}).get("custom", {})
                 pre = prefill(s.dexpi_class, (s.attributes or {}).get("specs", ""))
                 filled = sum(1 for f in fields if (cust if f.custom else vals).get(f.name) or pre.get(f.name))
+                # closed by default: the panel stays short; the title says how much is filled in
                 with st.expander(f"Specifications · {s.dexpi_class} ({filled} of {len(fields)} filled)",
-                                 expanded=True):
+                                 expanded=False):
                     st.caption("Fields DEXPI defines for this type" + (", pre-filled from the drawing's notes"
                                if pre else "") + ". Written into the DEXPI file when you build.")
                     for f in fields:
@@ -1320,7 +1321,7 @@ with panel_col:
             vals, cust = (c.attributes or {}).get("dexpi", {}), (c.attributes or {}).get("custom", {})
             filled = sum(1 for f in fields if (cust if f.custom else vals).get(f.name))
             with st.expander(f"{'Pipe' if is_pipe else 'Signal line'} specifications ({filled} of {len(fields)} filled)",
-                             expanded=bool(filled)):
+                             expanded=False):
                 st.caption(("Size, piping class, fluid, insulation and more - DEXPI's pipe segment fields, plus "
                             "design pressure, rating and material as custom attributes. " if is_pipe else
                             "DEXPI's signal line fields. ") + "Written into the DEXPI file when you build."
