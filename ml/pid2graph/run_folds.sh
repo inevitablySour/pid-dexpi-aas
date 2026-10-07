@@ -6,6 +6,7 @@
 #
 #   ml/pid2graph/run_folds.sh <base_checkpoint.pt> [folds...]     e.g.  ... ckpt.pt 0 1 2 3
 #   DEBUG=1 ml/pid2graph/run_folds.sh <ckpt> 0                    # 30-patch smoke test
+#   TAG=finetune_v4 CONFIG=pid2graph_finetune_v4.yaml TEAM_SET=team-v4 ml/pid2graph/run_folds.sh <ckpt>
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RF="$HERE/../relationformer"
@@ -13,13 +14,15 @@ BASE="$(realpath "$1")"; shift
 FOLDS=("${@:-0 1 2 3}"); [ $# -eq 0 ] && FOLDS=(0 1 2 3)
 PY="$RF/.venv/bin/python"
 TAG="${TAG:-finetune}"
+CONFIG="${CONFIG:-pid2graph_finetune.yaml}"
+TEAM_SET="${TEAM_SET:-team}"  # eval_sheets.py set for the held-out team drawing
 EXTRA=(); [ -n "${DEBUG:-}" ] && EXTRA=(--debug --epochs 1) && TAG="${TAG}_debug"
 RESULTS="$RF/trained_weights/results_${TAG}"
 mkdir -p "$RESULTS"
 
 cp "$HERE/model/dataset_pid2graph.py" "$RF/pid2graph_data/"
 cp "$HERE/model/train_pid2graph.py" "$HERE/model/evaluator_pid2graph.py" "$RF/"
-cp "$HERE/pid2graph_finetune.yaml" "$RF/configs/"
+cp "$HERE/$CONFIG" "$RF/configs/"
 
 cd "$RF"
 for f in "${FOLDS[@]}"; do
@@ -27,14 +30,14 @@ for f in "${FOLDS[@]}"; do
   rm -rf "trained_weights/runs/${exp}_10"
   echo "=== fold $f: training ($(date)) ==="
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "$PY" train_pid2graph.py \
-    --config configs/pid2graph_finetune.yaml --exp_name "$exp" -b 4 --fold "$f" \
+    --config "configs/$CONFIG" --exp_name "$exp" -b 4 --fold "$f" \
     --init_from "$BASE" "${EXTRA[@]}" 2>&1 | tee "$RESULTS/train_fold${f}.log" | tr '\r' '\n' | grep -aE "Epoch\[|val_node_mAP|edge_mAP:" || true
   # Last epoch's checkpoint: checkpoint selection on a 1-sheet real val set is too noisy
   # to trust, and the LR schedule is fixed, so the final state is the honest choice.
   ckpt="$(ls -t trained_weights/runs/${exp}_10/models/checkpoint_epoch=*.pt | head -1)"
   echo "=== fold $f: scoring $ckpt ==="
   "$PY" "$HERE/eval/eval_sheets.py" --checkpoint "$ckpt" --set open100 --fold "$f" --out "$RESULTS/open100_fold${f}.json" > /dev/null
-  "$PY" "$HERE/eval/eval_sheets.py" --checkpoint "$ckpt" --set team --out "$RESULTS/team_fold${f}.json" > /dev/null
+  "$PY" "$HERE/eval/eval_sheets.py" --checkpoint "$ckpt" --set "$TEAM_SET" --out "$RESULTS/team_fold${f}.json" > /dev/null
 done
 
 "$PY" - "$RESULTS" <<'EOF'
