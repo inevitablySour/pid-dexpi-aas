@@ -103,17 +103,63 @@ def pick_device(choice: str) -> str:
 Image.MAX_IMAGE_PIXELS = None
 
 st.set_page_config(page_title="P&ID to DEXPI converter", layout="wide")
-if APP_PASSWORD and not st.session_state.get("authed"):
+
+# ------------------------------------------------------------------------------- login ---
+# Password screen when shared (scripts/serve_public.sh). Logged in stays logged in across
+# reloads through a cookie: an expiry time signed with the password (so it cannot be made
+# up, and a new password ends every login), moved 48 h ahead on every visit and every hour
+# of use - after 48 h without use the password is asked again. Streamlit reads cookies but
+# cannot set them; a tiny page script (AUTH_COOKIE_JS) does.
+AUTH_COOKIE = "pid_dexpi_auth"
+AUTH_IDLE_S = 48 * 3600
+AUTH_RENEW_S = 3600
+AUTH_COOKIE_JS = """
+export default function ({ data }) {
+  if (!data || !data.cookie) return;
+  document.cookie = data.cookie + (location.protocol === 'https:' ? '; Secure' : '');
+}
+"""
+
+
+def _auth_token(expiry: int) -> str:
     import hmac
-    st.markdown("### P&ID to DEXPI converter")
-    with st.form("login"):
-        pw = st.text_input("Password", type="password")
-        if st.form_submit_button("Open"):
-            if hmac.compare_digest(pw.encode(), APP_PASSWORD.encode()):
-                st.session_state["authed"] = True
-                st.rerun()
-            st.error("Wrong password.")
-    st.stop()
+    sig = hmac.new(APP_PASSWORD.encode(), f"pid-dexpi|{expiry}".encode(), "sha256").hexdigest()[:40]
+    return f"{expiry}.{sig}"
+
+
+def _auth_cookie_ok(value: str | None) -> bool:
+    import hmac
+    import time
+    try:
+        expiry = int((value or "").split(".", 1)[0])
+    except ValueError:
+        return False
+    return expiry > time.time() and hmac.compare_digest(value, _auth_token(expiry))
+
+
+if APP_PASSWORD:
+    import time
+
+    auth_cookie = st.components.v2.component("pid_auth_cookie", html="", js=AUTH_COOKIE_JS)
+    if not st.session_state.get("authed") and _auth_cookie_ok(st.context.cookies.get(AUTH_COOKIE)):
+        st.session_state["authed"] = True  # still within 48 h of the last visit
+    if not st.session_state.get("authed"):
+        import hmac
+        st.markdown("### P&ID to DEXPI converter")
+        with st.form("login"):
+            pw = st.text_input("Password", type="password")
+            if st.form_submit_button("Open"):
+                if hmac.compare_digest(pw.encode(), APP_PASSWORD.encode()):
+                    st.session_state["authed"] = True
+                    st.rerun()
+                st.error("Wrong password.")
+        st.stop()
+    # every visit, and every hour of use: 48 h more
+    if time.time() - st.session_state.get("auth_renewed", 0) > AUTH_RENEW_S:
+        expiry = int(time.time()) + AUTH_IDLE_S
+        auth_cookie(data={"cookie": f"{AUTH_COOKIE}={_auth_token(expiry)}; Max-Age={AUTH_IDLE_S}; Path=/; SameSite=Strict"},
+                    key=f"auth_cookie_{expiry}")
+        st.session_state["auth_renewed"] = time.time()
 st.markdown("### P&ID to DEXPI converter")
 st.html("""<style>
 /* the edit panel stays in view while scrolling the page */
@@ -124,6 +170,12 @@ div[data-testid="stMetricValue"] {font-size: 1.6rem;}
 
 # ------------------------------------------------------------------------------ inputs ---
 with st.sidebar:
+    if APP_PASSWORD and st.button("Log out", type="tertiary", help="Forget this browser's login"):
+        auth_cookie(data={"cookie": f"{AUTH_COOKIE}=; Max-Age=0; Path=/; SameSite=Strict"}, key="auth_cookie_logout")
+        st.session_state["authed"] = False
+        st.session_state["auth_renewed"] = 0
+        st.info("Logged out - reload the page.")
+        st.stop()
     st.header("Input")
     drawio_file = st.file_uploader("draw.io file (optional)", type=["drawio", "xml"])
     image_file = st.file_uploader("P&ID image (optional)", type=["png", "jpg", "jpeg"])
