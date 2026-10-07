@@ -5,7 +5,8 @@
 #   ./scripts/serve_public.sh                      # random password, printed below the link
 #   APP_PASSWORD='something' ./scripts/serve_public.sh
 #   PORT=8601 ./scripts/serve_public.sh
-#   ./scripts/serve_public.sh --reload             # after a code change: restart the app, same link
+#   ./scripts/serve_public.sh --reload             # after a code change: restart the app, same link,
+#                                                  # once nobody has it open (--reload --force: now)
 #
 # The app listens on 127.0.0.1 only - the tunnel is the one way in. Model settings are
 # hidden (APP_PUBLIC=1) and image mode uses the GPU only when it has room (a training run
@@ -31,6 +32,19 @@ if [ ! -x "$CLOUDFLARED" ]; then
 fi
 
 if [ "${1:-}" = "--reload" ]; then  # restart the running app with the current code; link stays
+  # A restart drops every open page: a picture being processed, and unsaved review edits.
+  # So wait until no picture is running and nobody has the app open (each open page is
+  # one live connection to the app); --force restarts at once.
+  if [ "${2:-}" != "--force" ]; then
+    waited=0
+    while true; do
+      running=$(pgrep -fc "^[^ ]*python[^ ]* [^ ]*infer_sheet\.py --image" || true)
+      pages=$(ss -tnH state established "( sport = :$PORT )" 2>/dev/null | wc -l)
+      [ "$running" -eq 0 ] && [ "$pages" -eq 0 ] && break
+      [ $((waited % 60)) -eq 0 ] && echo "Waiting: $pages open page(s), $running picture(s) running - Ctrl+C to cancel, --reload --force to restart now."
+      sleep 10; waited=$((waited + 10))
+    done
+  fi
   pkill -f "streamlit run app.py --server.address 127.0.0.1 --server.port $PORT" && echo "App restarting (same link)." \
     || echo "No shared app running on port $PORT."
   exit 0
