@@ -5,6 +5,7 @@
 #   ./scripts/serve_public.sh                      # random password, printed below the link
 #   APP_PASSWORD='something' ./scripts/serve_public.sh
 #   PORT=8601 ./scripts/serve_public.sh
+#   ./scripts/serve_public.sh --reload             # after a code change: restart the app, same link
 #
 # The app listens on 127.0.0.1 only - the tunnel is the one way in. Model settings are
 # hidden (APP_PUBLIC=1) and image mode uses the GPU only when it has room (a training run
@@ -29,6 +30,12 @@ if [ ! -x "$CLOUDFLARED" ]; then
   fi
 fi
 
+if [ "${1:-}" = "--reload" ]; then  # restart the running app with the current code; link stays
+  pkill -f "streamlit run app.py --server.address 127.0.0.1 --server.port $PORT" && echo "App restarting (same link)." \
+    || echo "No shared app running on port $PORT."
+  exit 0
+fi
+
 if [ -z "${APP_PASSWORD:-}" ]; then
   APP_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(9))')"
 fi
@@ -36,13 +43,24 @@ mkdir -p "$HOME/.streamlit"
 [ -f "$HOME/.streamlit/credentials.toml" ] || printf '[general]\nemail = ""\n' > "$HOME/.streamlit/credentials.toml"
 
 LOG="$(mktemp -d)"
-cleanup() { kill "${APP_PID:-}" "${TUNNEL_PID:-}" 2>/dev/null || true; }
+cleanup() {
+  kill "${APP_PID:-}" "${TUNNEL_PID:-}" 2>/dev/null || true
+  pkill -f "streamlit run app.py --server.address 127.0.0.1 --server.port $PORT" 2>/dev/null || true
+}
 trap cleanup EXIT INT TERM
 
-APP_PUBLIC=1 APP_PASSWORD="$APP_PASSWORD" .venv/bin/streamlit run app.py \
-  --server.address 127.0.0.1 --server.port "$PORT" --server.headless true \
-  --client.toolbarMode viewer --browser.gatherUsageStats false --server.maxUploadSize 50 \
-  > "$LOG/app.log" 2>&1 &
+# The app restarts by itself when it stops, so new code goes live without a new link:
+#   ./scripts/serve_public.sh --reload     (from another terminal)
+# (Streamlit reloads app.py on change, but not always the package modules it imports.)
+(
+  while true; do
+    APP_PUBLIC=1 APP_PASSWORD="$APP_PASSWORD" .venv/bin/streamlit run app.py \
+      --server.address 127.0.0.1 --server.port "$PORT" --server.headless true \
+      --client.toolbarMode viewer --browser.gatherUsageStats false --server.maxUploadSize 50 \
+      >> "$LOG/app.log" 2>&1
+    sleep 1
+  done
+) &
 APP_PID=$!
 
 "$CLOUDFLARED" tunnel --no-autoupdate --url "http://127.0.0.1:$PORT" > "$LOG/tunnel.log" 2>&1 &
