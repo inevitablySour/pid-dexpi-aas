@@ -33,9 +33,9 @@ CLASSES = {  # PID2Graph class -> box colour
 LEGEND_GAP = 60
 
 
-def _box_style(cls: str) -> str:
+def _box_style(cls: str, font: int = 11) -> str:
     return (f"rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor={CLASSES.get(cls, '#6b6b6b')};"
-            "strokeWidth=2;fontSize=11;fontColor=#000000;verticalAlign=bottom;labelPosition=center;"
+            f"strokeWidth=2;fontSize={font};fontColor=#000000;verticalAlign=bottom;labelPosition=center;"
             "verticalLabelPosition=top;align=center;labelBackgroundColor=#ffffffcc;")
 
 
@@ -68,9 +68,16 @@ def review_to_drawio(review, name: str | None = None) -> str:
                         style=f"shape=image;imageAspect=0;aspect=fixed;image=data:image/png,{data};")
     ET.SubElement(pic, "mxGeometry", x="0", y="0", width=str(W), height=str(H), **{"as": "geometry"})
 
+    # text and legend sized to the picture's symbols, not fixed pixels: a typical symbol is
+    # the unit (small scans and large sheets both get readable, proportionate labels)
+    sizes = sorted(max(b[2] - b[0], b[3] - b[1]) for _, _, b in symbols)
+    unit = sizes[len(sizes) // 2] if sizes else max(W, H) / 30
+    label_font = max(6, min(14, round(unit * 0.13)))
+    note_font = max(7, min(16, round(unit * 0.15)))
+
     def vertex(cid, label, cls, box, parent="labels"):
         obj = ET.SubElement(cells, "object", id=cid, label=html.escape(label or ""), pid2graph_class=cls)
-        cell = ET.SubElement(obj, "mxCell", style=_box_style(cls), vertex="1", parent=parent)
+        cell = ET.SubElement(obj, "mxCell", style=_box_style(cls, label_font), vertex="1", parent=parent)
         x1, y1, x2, y2 = box
         ET.SubElement(cell, "mxGeometry", x=f"{x1:.1f}", y=f"{y1:.1f}", width=f"{x2 - x1:.1f}", height=f"{y2 - y1:.1f}",
                       **{"as": "geometry"})
@@ -89,18 +96,21 @@ def review_to_drawio(review, name: str | None = None) -> str:
                 ET.SubElement(pts, "mxPoint", x=f"{x:.1f}", y=f"{y:.1f}")
     # legend: one box per class to copy, and how-to notes, left of the picture (outside it)
     legend = ET.SubElement(cells, "mxCell", id="legend", value="Legend (not labels)", parent="0")
-    lx = -260
+    note_w, gap = 3.2 * unit, 0.6 * unit
+    lx = -(note_w + gap)
     note = ET.SubElement(cells, "mxCell", id="howto", parent="legend", vertex="1", style=(
-        "text;html=1;align=left;verticalAlign=top;whiteSpace=wrap;fontSize=12;"), value=(
+        f"text;html=1;align=left;verticalAlign=top;whiteSpace=wrap;fontSize={note_font};"), value=(
         "<b>Correct the labels</b><br>- resize / move boxes to fit each symbol<br>- drag a line's bend points onto "
         "the drawn pipe (click a line, drag the handles; drag the middle of a segment for a new bend)<br>- signal "
         "line: Edit Style, dashed=1 (or the Line dashed option)<br>- missed item: copy the box of its class below, "
         "paste, place<br>- missing line: hover a box, drag from its blue arrow to the other box<br>- wrong item or "
         "line: select, Delete<br>The picture layer is locked."))
-    ET.SubElement(note, "mxGeometry", x=str(lx), y="0", width="230", height="250", **{"as": "geometry"})
+    note_h = note_font * 16  # ~13 lines of wrapped text
+    ET.SubElement(note, "mxGeometry", x=f"{lx:.1f}", y="0", width=f"{note_w:.1f}", height=f"{note_h:.1f}",
+                  **{"as": "geometry"})
     for k, cls in enumerate(CLASSES):
-        y = 280 + k * 70
-        vertex(f"legend_{k}", cls, cls, (lx, y, lx + 60, y + 50), parent="legend")
+        y = note_h + gap + k * 1.4 * unit
+        vertex(f"legend_{k}", cls, cls, (lx, y, lx + unit, y + 0.8 * unit), parent="legend")
     out = ET.Element("mxfile", host="pid-dexpi-aas")
     diagram = ET.SubElement(out, "diagram", id="labels", name=(name or Path(review.source_name).stem))
     diagram.append(root)
