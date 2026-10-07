@@ -51,7 +51,7 @@ from pid_dexpi_aas.routing import route  # noqa: E402
 from pid_dexpi_aas.mapping import classify_detection  # noqa: E402
 from pid_dexpi_aas.parser_drawio import parse_drawio_xml_resolved  # noqa: E402
 from pid_dexpi_aas.review import (  # noqa: E402
-    DEXPI_CLASS_CHOICES, FLOW_KNOWN, INSTRUMENT_CLASSES, OFF_PAGE, SKIP, ReviewConnection, ReviewDiagram, ReviewSymbol,
+    DEXPI_CLASS_CHOICES, FLOW_KNOWN, INSTRUMENT_CLASSES, OFF_PAGE, SKIP, VALVE_CLASSES, ReviewConnection, ReviewDiagram, ReviewSymbol,
     _instrument_attributes, _short_token, cross_check, from_drawio, from_image, to_dexpi, validate_rows,
 )
 from pid_dexpi_aas.serialize import save_and_verify  # noqa: E402
@@ -1365,20 +1365,36 @@ with panel_col:
                          key=f"lt_{c.id}_{k}", on_change=_set_line, args=(c.id, "line_type", f"lt_{c.id}_{k}"))
             st.toggle("In DEXPI", c.include, key=f"cinc_{c.id}_{k}", on_change=_set_line,
                       args=(c.id, "include", f"cinc_{c.id}_{k}"))
-            # what the line becomes in DEXPI decides its fields: a pipe segment, or (dashed, or
-            # touching an instrument) a measuring / signal line
-            to_instrument = any(by_sym[x].dexpi_class in INSTRUMENT_CLASSES for x in (c.from_id, c.to_id) if x in by_sym)
-            is_pipe = c.line_type == "process" and not to_instrument
-            fields = spec_fields("PipingNetworkSegment" if is_pipe else "SignalLineFunction")
+            # the fields follow what the line becomes in DEXPI (build_model._wire_instruments):
+            # a line touching an instrument is a measuring or signal line, never a pipe; a line
+            # between two non-instruments is a pipe, even when drawn dashed
+            inst_ends = [x for x in (c.from_id, c.to_id) if x in by_sym and by_sym[x].dexpi_class in INSTRUMENT_CLASSES]
+            other = next((x for x in (c.from_id, c.to_id) if x not in inst_ends), None)
+            if len(inst_ends) == 2:
+                kind, cls, why = "Signal line", "SignalLineFunction", ""
+            elif inst_ends and c.line_type == "signal" and other in by_sym and by_sym[other].dexpi_class in VALVE_CLASSES:
+                kind, cls, why = "Signal line", "SignalLineFunction", (
+                    f"{item_name(inst_ends[0])} drives {item_name(other)}'s actuator over this line.")
+            elif inst_ends:
+                kind, cls, why = "Measuring line", "MeasuringLineFunction", (
+                    f"This line connects to instrument {item_name(inst_ends[0])}, so DEXPI records it as a "
+                    "measuring line (where the instrument measures), not as a pipe.")
+            else:
+                kind, cls, why = "Pipe", "PipingNetworkSegment", (
+                    "Drawn as a signal line, but neither end is an instrument, so DEXPI builds it as a pipe."
+                    if c.line_type == "signal" else "")
+            is_pipe = cls == "PipingNetworkSegment"
+            fields = spec_fields(cls)
             vals, cust = (c.attributes or {}).get("dexpi", {}), (c.attributes or {}).get("custom", {})
             filled = sum(1 for f in fields if (cust if f.custom else vals).get(f.name))
-            with st.expander(f"{'Pipe' if is_pipe else 'Signal line'} specifications ({filled} of {len(fields)} filled)",
-                             expanded=False):
-                st.caption(("Size, piping class, fluid, insulation and more - DEXPI's pipe segment fields, plus "
-                            "design pressure, rating and material as custom attributes. " if is_pipe else
-                            "DEXPI's signal line fields. ") + "Written into the DEXPI file when you build."
-                           + (" This line is part of a pipe network: the values go on all of its pipe segments."
-                              if is_pipe and c.id.startswith("net") else ""))
+            with st.expander(f"{kind} specifications ({filled} of {len(fields)} filled)", expanded=False):
+                st.caption(" ".join(x for x in (
+                    why,
+                    "Size, piping class, fluid, insulation and more - DEXPI's pipe segment fields, plus design "
+                    "pressure, rating and material as custom attributes." if is_pipe else f"DEXPI's {kind.lower()} fields.",
+                    "Written into the DEXPI file when you build.",
+                    "This line is part of a pipe network: the values go on all of its pipe segments."
+                    if is_pipe and c.id.startswith("net") else "") if x))
                 for f in fields:
                     _spec_widget(c, f, (cust if f.custom else vals).get(f.name), k)
             st.text_input("Notes", c.notes, key=f"cnote_{c.id}_{k}", on_change=_set_line,
