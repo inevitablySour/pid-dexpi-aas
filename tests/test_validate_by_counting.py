@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from pid_dexpi_aas.validate_by_counting import report_for_directory, report_for_file
+from pid_dexpi_aas.dexpi.validate_by_counting import report_for_directory, report_for_file
 
-DECODED_DIR = Path(__file__).parent.parent / "handoff" / "decoded_xml"
+DECODED_DIR = Path(__file__).parent / "fixtures" / "decoded_xml"
 FIXTURE = DECODED_DIR / "PFD combined set up 301122__diagram0.xml"
 
 

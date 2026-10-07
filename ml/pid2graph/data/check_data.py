@@ -9,7 +9,7 @@ it checks exactly what each fold sees:
   - no patch with more symbols than the model has queries (they would be dropped);
   - team data: patch labels agree with the whole-sheet labels they were cut from.
 
-Usage (ML venv): ml/relationformer/.venv/bin/python ml/pid2graph/check_data.py
+Usage (ML venv): ml/relationformer/.venv/bin/python ml/pid2graph/data/check_data.py
 """
 from __future__ import annotations
 
@@ -21,14 +21,14 @@ import yaml
 from PIL import Image
 
 HERE = Path(__file__).resolve().parent
-RF = HERE.parent / "relationformer"
+RF = HERE.parents[1] / "relationformer"
 sys.path.insert(0, str(RF))
 from pid2graph_data.dataset_pid2graph import (  # noqa: E402
     _collapse_graph, _discover_pairs, build_pid2graph_data, real_fold_sheets)
 from train_pid2graph import dict2obj  # noqa: E402
 import networkx as nx  # noqa: E402
 
-DATA = HERE.parents[1] / "data" / "PID2Graph"
+DATA = HERE.parents[2] / "data" / "PID2Graph"
 CLASSES = {"arrow", "general", "inlet/outlet", "instrumentation", "pump", "tank", "valve"}
 
 

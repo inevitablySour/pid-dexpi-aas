@@ -1,7 +1,7 @@
 """Run the full P&ID -> DEXPI pipeline on one .drawio file.
 
 Usage:
-    .venv/bin/python run_pipeline.py "path/to/your.drawio" output_dir/
+    .venv/bin/python scripts/run_pipeline.py "path/to/your.drawio" output_dir/
 
 Decodes the drawio file (if needed), parses it, builds a DexpiModel, prints the
 validate-by-counting report, writes Proteus XML to <output_dir>/<name>.xml, and
@@ -13,15 +13,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from pid_dexpi_aas.build_diagram import build_diagram
-from pid_dexpi_aas.build_model import build_model
-from pid_dexpi_aas.decode_drawio import decode_drawio
-from pid_dexpi_aas.parser_drawio import parse_drawio_xml_resolved
-from pid_dexpi_aas.render_svg import render_diagram_svg
-from pid_dexpi_aas.serialize import save_and_verify
-from pid_dexpi_aas.validate_by_counting import format_report, report_for_diagram
+from pid_dexpi_aas.render.build_diagram import build_diagram
+from pid_dexpi_aas.dexpi.build_model import build_model
+from pid_dexpi_aas.drawio.decode import decode_drawio
+from pid_dexpi_aas.drawio.parser import parse_drawio_xml_resolved
+from pid_dexpi_aas.render.render_svg import render_diagram_svg
+from pid_dexpi_aas.dexpi.serialize import save_and_verify
+from pid_dexpi_aas.dexpi.validate_by_counting import format_report, report_for_diagram
 
 
 def main() -> None:

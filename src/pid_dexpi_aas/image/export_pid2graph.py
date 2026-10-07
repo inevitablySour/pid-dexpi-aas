@@ -41,9 +41,9 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 from xml.dom import minidom
 
-from .mapping import Category, classify_tag
-from .parser_drawio import ParsedDiagram, Shape, parse_drawio_file
-from .review import OFF_PAGE, SKIP, category_for_class, from_drawio
+from pid_dexpi_aas.dexpi.mapping import Category, classify_tag
+from pid_dexpi_aas.drawio.parser import ParsedDiagram, Shape, parse_drawio_file
+from pid_dexpi_aas.review import OFF_PAGE, SKIP, category_for_class, from_drawio
 
 GRAPHML_NS = "http://graphml.graphdrawing.org/xmlns"
 XSI_NS = "http://www.w3.org/2001/XMLSchema-instance"
@@ -185,8 +185,8 @@ def export_drawio_file_to_pid2graph(drawio_path: str | Path, output_path: str | 
     """Accepts a real .drawio file (compressed diagram, decoded first) or already-decoded
     mxGraph XML. Reading a .drawio directly as XML finds no cells and writes an empty
     graph - which is exactly what happened when regenerating these exports."""
-    from .decode_drawio import decode_drawio
-    from .parser_drawio import parse_drawio_xml_resolved
+    from pid_dexpi_aas.drawio.decode import decode_drawio
+    from pid_dexpi_aas.drawio.parser import parse_drawio_xml_resolved
 
     path = Path(drawio_path)
     if path.suffix == ".drawio":

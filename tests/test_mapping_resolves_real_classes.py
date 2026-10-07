@@ -1,6 +1,6 @@
 from pydexpi.dexpi_classes import equipment, instrumentation, piping
 
-from pid_dexpi_aas.mapping import EQUIPMENT_SHAPE_MAP, VALVE_TAG_PREFIX_MAP
+from pid_dexpi_aas.dexpi.mapping import EQUIPMENT_SHAPE_MAP, VALVE_TAG_PREFIX_MAP
 
 _MODULES = [equipment, piping, instrumentation]
 

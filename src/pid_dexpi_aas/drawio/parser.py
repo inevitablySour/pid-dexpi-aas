@@ -466,8 +466,8 @@ def redirect_label_endpoints(diagram: ParsedDiagram) -> None:
       2. label that is a real tag (GV204, PI 102 ...) associated with a symbol -> it.
     Anything else ("Fume hood [atm]", "Product") stays: a genuine off-page destination.
     """
-    from pid_dexpi_aas.mapping import classify_tag
-    from pid_dexpi_aas.tag_association import associate_tags
+    from pid_dexpi_aas.dexpi.mapping import classify_tag
+    from pid_dexpi_aas.drawio.tag_association import associate_tags
 
     shapes = {sh.id: sh for sh in diagram.shapes}
     symbols = [sh for sh in diagram.shapes if sh.shape_token]
@@ -497,7 +497,7 @@ def join_pipe_networks(diagram: ParsedDiagram, routes: dict) -> None:
     """Lines whose loose ends sit on other lines' routes form pipe networks. Every pair of
     symbols at a network's ends is connected (a tee joins all its legs); the member lines
     are marked merged_into and the connections added as derived "net:" edges."""
-    from pid_dexpi_aas.line_routes import find_junctions
+    from pid_dexpi_aas.drawio.line_routes import find_junctions
 
     joins = find_junctions(diagram.edges, routes)
     if not joins:
@@ -549,9 +549,9 @@ def parse_drawio_xml_resolved(xml_text: str, source_file: str, drawio_path: str 
     one call - the entry point build_model.py/run_pipeline.py/app.py should use, so
     floating (non-snapped) edges aren't silently dropped, and decorative symbol linework
     isn't wrongly resolved into a fake piping connection."""
-    from pid_dexpi_aas.plain_shapes import mark_plain_symbols  # local: plain_shapes imports this module
+    from pid_dexpi_aas.drawio.plain_shapes import mark_plain_symbols  # local: plain_shapes imports this module
 
-    from pid_dexpi_aas.spec_labels import attach_specs
+    from pid_dexpi_aas.dexpi.spec_labels import attach_specs
 
     diagram = parse_drawio_xml(xml_text, source_file=source_file)
     mark_plain_symbols(diagram)  # reactor/compartment boxes etc. become real symbols first
@@ -565,13 +565,13 @@ def parse_drawio_xml_resolved(xml_text: str, source_file: str, drawio_path: str 
     classify_decorative_edges(diagram)
     routes = None
     if drawio_path is not None:
-        from pid_dexpi_aas.line_routes import find_junctions, routes_for
+        from pid_dexpi_aas.drawio.line_routes import find_junctions, routes_for
         routes = routes_for(drawio_path, diagram.edges)
         if routes:
             # section frames first: closed lines around groups of items are not pipes
-            from pid_dexpi_aas.sections import find_sections
+            from pid_dexpi_aas.drawio.sections import find_sections
             find_sections(diagram, routes)
-            from pid_dexpi_aas.line_routes import find_dash_chains
+            from pid_dexpi_aas.drawio.line_routes import find_dash_chains
             by_id = {e.id: e for e in diagram.edges}
             for chain in find_dash_chains(diagram.edges, routes):
                 for eid in chain:  # a hand-drawn dashed line: signal, not decoration
@@ -588,7 +588,7 @@ def parse_drawio_xml_resolved(xml_text: str, source_file: str, drawio_path: str 
     redirect_label_endpoints(diagram)
     if routes:
         join_pipe_networks(diagram, routes)
-    from pid_dexpi_aas.flow_direction import infer_flow
+    from pid_dexpi_aas.drawio.flow_direction import infer_flow
     diagram.flow = infer_flow(diagram)
     diagram.routes = routes or None
     return diagram
@@ -599,6 +599,6 @@ def parse_drawio_file(path: str | Path) -> ParsedDiagram:
     the draw.io app is available)."""
     path = Path(path)
     if path.suffix == ".drawio":
-        from pid_dexpi_aas.decode_drawio import decode_drawio
+        from pid_dexpi_aas.drawio.decode import decode_drawio
         return parse_drawio_xml_resolved(decode_drawio(path)[0], source_file=path.name, drawio_path=path)
     return parse_drawio_xml_resolved(path.read_text(encoding="utf-8"), source_file=path.name)

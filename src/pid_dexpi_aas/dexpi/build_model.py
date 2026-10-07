@@ -25,9 +25,9 @@ from pydexpi.dexpi_classes.dexpiModel import ConceptualModel, DexpiModel
 from pydexpi.dexpi_classes.pydantic_classes import CustomStringAttribute, MetaData
 from pydexpi.toolkits import piping_toolkit as pt
 
-from pid_dexpi_aas.mapping import Category, MappingResult, map_shape
-from pid_dexpi_aas.parser_drawio import ParsedDiagram, Shape
-from pid_dexpi_aas.tag_association import build_tag_lookup
+from pid_dexpi_aas.dexpi.mapping import Category, MappingResult, map_shape
+from pid_dexpi_aas.drawio.parser import ParsedDiagram, Shape
+from pid_dexpi_aas.drawio.tag_association import build_tag_lookup
 
 _EQUIPMENT_CLASSES = {name: getattr(eq, name) for name in dir(eq) if not name.startswith("_")}
 _PIPING_CLASSES = {name: getattr(piping, name) for name in dir(piping) if not name.startswith("_")}
@@ -230,7 +230,7 @@ def build_shapes(
                 BuildRecord(shape.id, "shape", "skipped", mapping.dexpi_class_name, mapping.reason)
             )
         if obj is not None and diagram.specs.get(shape.id):
-            from pid_dexpi_aas.spec_labels import apply_specs
+            from pid_dexpi_aas.dexpi.spec_labels import apply_specs
             apply_specs(obj, diagram.specs[shape.id])
 
     return result
@@ -357,7 +357,7 @@ def _as_pipe_end(obj, as_source: bool, ctx: str = ""):
 
 
 def _add_network_links(diagram, build_result, shapes_by_id, links, instrument_links=None) -> None:
-    """Pipe networks (lines joined at junctions, parser_drawio.join_pipe_networks) arrive as
+    """Pipe networks (lines joined at junctions, drawio.parser.join_pipe_networks) arrive as
     pairwise "net" edges. Build each network ONCE: 2 items -> one link; k >= 3 items ->
     k - 2 PipeTee fittings in a chain, one link per leg - instead of k(k-1)/2 parallel
     segments, which wrote every item into several segments."""
@@ -524,7 +524,7 @@ def _wire_instruments(build_result, instrument_links, system) -> None:
 def _propagate_link_flow(links) -> None:
     """Carry known flow directions across the built links (through in-line items and the
     tee fittings of pipe networks) - same rules as on the drawing, flow_direction.py."""
-    from pid_dexpi_aas.flow_direction import Leg, propagate
+    from pid_dexpi_aas.drawio.flow_direction import Leg, propagate
 
     legs = [Leg(ln.a, ln.b, ln.dir, ln.basis) for ln in links]
     propagate(legs, passes=lambda o: not _is_instrument(o), junction=lambda o: isinstance(o, piping.PipeTee))
@@ -728,7 +728,7 @@ def wire_edges(diagram: ParsedDiagram, build_result: BuildResult) -> None:
             )
             continue
         if edge.is_decorative:
-            # Classified by parser_drawio.classify_decorative_edges: a cluster of tiny
+            # Classified by drawio.parser.classify_decorative_edges: a cluster of tiny
             # edges hugging one shape's boundary, almost certainly hand-drawn symbol
             # detail (e.g. a safety valve's spring/relief indicator) rather than piping -
             # confirmed by manual inspection against the source drawing. Reported

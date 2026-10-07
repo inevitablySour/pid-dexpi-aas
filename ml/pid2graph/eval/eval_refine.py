@@ -3,7 +3,7 @@ tank boxes (good / loose / missed), node mAP per class, and the connections mode
 get from the refined boxes. Uses eval_tracer.py's cache (model + OCR per sheet), so run
 eval_tracer.py once first.
 
-Usage (ML venv): ml/relationformer/.venv/bin/python ml/pid2graph/eval_refine.py --cache <dir>
+Usage (ML venv): ml/relationformer/.venv/bin/python ml/pid2graph/eval/eval_refine.py --cache <dir>
        ... --set open100 --fold 1 --checkpoint <fold 1 ckpt> --cache <dir>   (runs model + OCR if not cached)
 """
 from __future__ import annotations
@@ -17,9 +17,10 @@ import networkx as nx
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent / "relationformer"))
+sys.path.insert(0, str(HERE.parents[1] / "relationformer"))
 sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(HERE.parents[1] / "src"))
+sys.path.insert(0, str(HERE.parent / "pipeline"))  # infer_sheet, trace_pipes, refine_symbols
+sys.path.insert(0, str(HERE.parents[2] / "src"))
 
 from eval_sheets import SETS, sheet_paths  # noqa: E402
 from eval_tracer import DATA, match, prf  # noqa: E402

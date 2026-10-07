@@ -37,9 +37,9 @@ fi
 # 3. Copy in our own files. They live outside the clone in git because
 #    relationformer's own .gitignore has a '*data' rule that swallows pid2graph_data/.
 mkdir -p "$RF_DIR/pid2graph_data"
-cp "$MINE/dataset_pid2graph.py"    "$RF_DIR/pid2graph_data/"
-cp "$MINE/train_pid2graph.py"      "$RF_DIR/"
-cp "$MINE/evaluator_pid2graph.py"  "$RF_DIR/"
+cp "$MINE/model/dataset_pid2graph.py"    "$RF_DIR/pid2graph_data/"
+cp "$MINE/model/train_pid2graph.py"      "$RF_DIR/"
+cp "$MINE/model/evaluator_pid2graph.py"  "$RF_DIR/"
 cp "$MINE/pid2graph_2d.yaml"       "$RF_DIR/configs/"
 
 # 4. Virtualenv.
@@ -82,7 +82,7 @@ fi
 "$PY" -m pip install -q ignite pytorch_ignite numpy scipy matplotlib PyYAML \
     scikit-image tensorboardX timm einops networkx pillow ninja \
     tensorboard loguru pycocotools
-# EasyOCR reads tags for the review app (ml/pid2graph/infer_sheet.py). --no-deps: its
+# EasyOCR reads tags for the review app (ml/pid2graph/pipeline/infer_sheet.py). --no-deps: its
 # metadata pulls an unpinned torch, which would replace the cu121 build above.
 "$PY" -m pip install -q --no-deps easyocr==1.7.2
 "$PY" -m pip install -q opencv-python-headless python-bidi Shapely pyclipper

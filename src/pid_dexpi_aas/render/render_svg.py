@@ -20,7 +20,7 @@ re-deriving), this module renders normally via DrawDiagram, then overwrites the 
 <svg>'s width/height/viewBox attributes using the ALREADY-CORRECT global bounds
 build_diagram.py computed from the original drawio shape geometry.
 
-Importing pid_dexpi_aas.svg_renderer_patch (for its side effect) fixes a separate,
+Importing pid_dexpi_aas.render.svg_renderer_patch (for its side effect) fixes a separate,
 unrelated pyDEXPI rendering bug: dashed lines and filled polygons (needed for arrowheads)
 never rendering correctly. See that module's docstring for why a class-level monkeypatch
 was needed instead of subclassing DrawDiagram.
@@ -33,7 +33,7 @@ from xml.etree import ElementTree as ET
 from pydexpi.dexpi_classes.graphics import Diagram
 from pydexpi.loaders.svg_loader import DrawDiagram
 
-import pid_dexpi_aas.svg_renderer_patch  # noqa: F401 - import applies the monkeypatch
+import pid_dexpi_aas.render.svg_renderer_patch  # noqa: F401 - import applies the monkeypatch
 
 
 def render_diagram_svg(diagram: Diagram, output_path: str | Path, padding: float = 20.0) -> Path:

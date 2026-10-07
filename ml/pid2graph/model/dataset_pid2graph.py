@@ -7,7 +7,7 @@ is needed since PID2Graph ships plain GraphML + image pairs already.
 
 Real schema confirmed by downloading the dataset and inspecting a genuine sample
 (PID2Graph/Complete/PID2Graph OPEN100/3.graphml), not guessed from the paper's prose -
-see pid-dexpi-aas/src/pid_dexpi_aas/export_pid2graph.py's module docstring for the
+see pid-dexpi-aas/src/pid_dexpi_aas/image/export_pid2graph.py's module docstring for the
 same finding, reused here:
   - node data: d0=label (string), d1-d4=xmin/xmax/ymin/ymax (double) for real symbol
     nodes; connector/crossing/background nodes use d5-d8 (long) instead.

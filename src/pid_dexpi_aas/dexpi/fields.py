@@ -166,7 +166,7 @@ def prefill(class_name: str, specs_text: str) -> dict:
     """Field values the drawing's spec notes give ("Volume = 5 L", "18 bar" on a PSV,
     "1 to 10 ml/minute" on a pump) - the same typed fields spec_labels.apply_specs fills,
     shown in the panel so the reviewer sees and can correct them."""
-    from pid_dexpi_aas.spec_labels import _PER_TO_S, _VOLUME_TO_L, parse_specs
+    from pid_dexpi_aas.dexpi.spec_labels import _PER_TO_S, _VOLUME_TO_L, parse_specs
 
     names = {f.name for f in spec_fields(class_name)}
     out = {}

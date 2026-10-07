@@ -9,14 +9,13 @@ confidence - never claim silent full automation for hand-drawn input.
 """
 from pathlib import Path
 
-from pid_dexpi_aas.build_model import build_model
-from pid_dexpi_aas.parser_drawio import parse_drawio_file, parse_drawio_xml
-from pid_dexpi_aas.validate_by_counting import report_for_diagram
+from pid_dexpi_aas.dexpi.build_model import build_model
+from pid_dexpi_aas.drawio.parser import parse_drawio_file, parse_drawio_xml
+from pid_dexpi_aas.dexpi.validate_by_counting import report_for_diagram
 
 GRAMFLOW = (
-    Path(__file__).parent.parent
-    / "handoff"
-    / "decoded_xml"
+    Path(__file__).parent
+    / "fixtures" / "decoded_xml"
     / "P&ID gramflow reactor V3__diagram0.xml"
 )
 

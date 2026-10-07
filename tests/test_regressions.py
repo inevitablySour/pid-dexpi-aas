@@ -11,12 +11,12 @@ from pathlib import Path
 import pytest
 from pydexpi.dexpi_classes import piping
 
-from pid_dexpi_aas import line_routes
-from pid_dexpi_aas.build_model import _segment_by_hand, build_model
-from pid_dexpi_aas.parser_drawio import Edge, parse_drawio_file
+from pid_dexpi_aas.drawio import line_routes
+from pid_dexpi_aas.dexpi.build_model import _segment_by_hand, build_model
+from pid_dexpi_aas.drawio.parser import Edge, parse_drawio_file
 from pid_dexpi_aas.review import from_drawio
-from pid_dexpi_aas.serialize import save_and_verify
-from pid_dexpi_aas.spec_labels import parse_specs
+from pid_dexpi_aas.dexpi.serialize import save_and_verify
+from pid_dexpi_aas.dexpi.spec_labels import parse_specs
 
 ROOT = Path(__file__).parent.parent
 DRAWINGS = sorted((ROOT / "subprojects").glob("*/*.drawio"))
@@ -162,7 +162,7 @@ def test_dexpi_export_is_valid(drawing, tmp_path):
 
 # ------------------------------------------------------------- flow direction ---
 def test_flow_passes_through_inline_items_and_conserves_at_tees():
-    from pid_dexpi_aas.flow_direction import Leg, propagate
+    from pid_dexpi_aas.drawio.flow_direction import Leg, propagate
 
     feed, valve, tee, out1, out2 = "feed", "valve", "tee", "out1", "out2"
     legs = [Leg(feed, valve, 1, "arrow"), Leg(valve, tee), Leg(tee, out1, 1, "arrow"), Leg(out2, tee)]
@@ -173,7 +173,7 @@ def test_flow_passes_through_inline_items_and_conserves_at_tees():
 
 
 def test_tee_with_all_known_legs_inflowing_sends_the_last_one_out():
-    from pid_dexpi_aas.flow_direction import Leg, propagate
+    from pid_dexpi_aas.drawio.flow_direction import Leg, propagate
 
     legs = [Leg("a", "tee", 1, "arrow"), Leg("b", "tee", 1, "arrow"), Leg("tee", "c")]
     propagate(legs, passes=lambda n: False, junction=lambda n: n == "tee")
@@ -205,7 +205,7 @@ def test_flow_orients_dexpi_segments(lightup):
 def test_flow_map_draws_routes_and_reviewer_edits(lightup):
     import copy
 
-    from pid_dexpi_aas.flow_map import flow_map, review_overrides
+    from pid_dexpi_aas.render.flow_map import flow_map, review_overrides
 
     lightup = copy.deepcopy(lightup)  # the edits below must not leak into other tests
     diagram = lightup.drawio
@@ -224,7 +224,7 @@ def test_flow_map_draws_routes_and_reviewer_edits(lightup):
 
 @needs_routes
 def test_map_markup_selects_by_row(lightup):
-    from pid_dexpi_aas.flow_map import build_layers, map_markup
+    from pid_dexpi_aas.render.flow_map import build_layers, map_markup
 
     layers = build_layers(lightup.drawio, LIGHTUP)
     net_line = next(ln for ln in layers.lines if any(r.startswith("net") for r in ln.rows))
@@ -254,7 +254,7 @@ def test_dark_theme_export_keeps_its_lines():
     # draw.io dark theme: white lines on transparent. Laid on white they vanished and the
     # model drew giant boxes around the remaining fills.
     import numpy as np
-    from pid_dexpi_aas.sheet_image import to_dark_on_white
+    from pid_dexpi_aas.image.sheet_image import to_dark_on_white
 
     out = np.asarray(to_dark_on_white(_sheet((255, 255, 255), (40, 40, 40))).convert("L"))
     assert out[60, 10] < 80 and out[5, 5] > 200  # the pipe is dark, the background white
@@ -262,7 +262,7 @@ def test_dark_theme_export_keeps_its_lines():
 
 def test_normal_export_with_white_fills_is_not_inverted():
     import numpy as np
-    from pid_dexpi_aas.sheet_image import to_dark_on_white
+    from pid_dexpi_aas.image.sheet_image import to_dark_on_white
 
     out = np.asarray(to_dark_on_white(_sheet((0, 0, 0), (255, 255, 255))).convert("L"))
     assert out[60, 10] < 80 and out[5, 5] > 200
@@ -270,7 +270,7 @@ def test_normal_export_with_white_fills_is_not_inverted():
 
 @needs_routes
 def test_hidden_items_and_lines_leave_the_map(lightup):
-    from pid_dexpi_aas.flow_map import build_layers, hide
+    from pid_dexpi_aas.render.flow_map import build_layers, hide
 
     layers = build_layers(lightup.drawio, LIGHTUP)
     box = next(b for b in layers.boxes)
@@ -285,7 +285,7 @@ def test_hidden_items_and_lines_leave_the_map(lightup):
 
 # ------------------------------------------------------------ specification fields ---
 def test_each_dexpi_class_gets_its_own_spec_fields():
-    from pid_dexpi_aas.dexpi_fields import spec_fields
+    from pid_dexpi_aas.dexpi.fields import spec_fields
 
     names = lambda c: {f.name for f in spec_fields(c)}
     assert "nominalCapacityVolume" in names("Tank")
@@ -322,7 +322,7 @@ def test_tracer_follows_a_pipe_and_reads_its_arrowhead():
     import numpy as np
     from PIL import Image, ImageDraw
 
-    sys.path.insert(0, str(ROOT / "ml" / "pid2graph"))
+    sys.path.insert(0, str(ROOT / "ml" / "pid2graph" / "pipeline"))
     from trace_pipes import trace_connections
 
     im = Image.new("L", (600, 300), 255)
@@ -345,7 +345,7 @@ def test_tracer_follows_a_pipe_and_reads_its_arrowhead():
 
 def test_equipment_tag_goes_to_the_tank_not_the_instrument_tag():
     # "FI 102" sat closer to the tank box than "V101" and took it, leaving V101 unnamed
-    from pid_dexpi_aas.ocr_tags import OcrTag, attach_tags
+    from pid_dexpi_aas.image.ocr_tags import OcrTag, attach_tags
 
     boxes = {"tank": (100, 100, 300, 200), "bubble": (320, 60, 380, 120)}
     tags = [OcrTag("FI 102", (290, 95, 330, 110), 0.9, ["FI 102"]),   # on the tank's edge
@@ -357,7 +357,7 @@ def test_equipment_tag_goes_to_the_tank_not_the_instrument_tag():
 @needs_routes
 def test_map_with_a_selection_it_does_not_draw(lightup):
     # selecting a picture-only item (or a line another tab draws) crashed the other maps
-    from pid_dexpi_aas.flow_map import build_layers, map_markup
+    from pid_dexpi_aas.render.flow_map import build_layers, map_markup
 
     layers = build_layers(lightup.drawio, LIGHTUP)
     m = map_markup(layers, highlight_rows={"not-on-this-map"}, highlight_symbols={"picture-only-item"})
@@ -374,7 +374,7 @@ def test_aasx_follows_idta_02012_and_maps_every_tag(lightup, tmp_path, version):
 
     from basyx.aas.adapter import aasx
 
-    from pid_dexpi_aas.aas_export import DexpiModelInput, aasx_bytes, check_aasx, mapping_entries
+    from pid_dexpi_aas.aas.export import DexpiModelInput, aasx_bytes, check_aasx, mapping_entries
     from pid_dexpi_aas.review import to_dexpi
 
     _, result = to_dexpi(lightup)
@@ -430,7 +430,7 @@ def test_small_titled_frame_and_symbol_parts():
 
 
 def test_router_goes_around_items_with_right_angles():
-    from pid_dexpi_aas.routing import route
+    from pid_dexpi_aas.render.routing import route
 
     a, b, wall = (0, 0, 40, 40), (300, 0, 340, 40), (140, -60, 200, 100)
     pts = route(a, b, [a, b, wall])
@@ -477,7 +477,7 @@ def _tracer():
     pytest.importorskip("skimage")
     import sys
 
-    sys.path.insert(0, str(ROOT / "ml" / "pid2graph"))
+    sys.path.insert(0, str(ROOT / "ml" / "pid2graph" / "pipeline"))
     from trace_pipes import trace_connections
     return trace_connections
 
@@ -536,7 +536,7 @@ def _refine():
     pytest.importorskip("scipy")
     import sys
 
-    sys.path.insert(0, str(ROOT / "ml" / "pid2graph"))
+    sys.path.insert(0, str(ROOT / "ml" / "pid2graph" / "pipeline"))
     sys.path.insert(0, str(ROOT / "src"))
     from refine_symbols import refine
     return refine

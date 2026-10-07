@@ -1,4 +1,4 @@
-from pid_dexpi_aas.mapping import Category, classify_valve_tag, map_shape
+from pid_dexpi_aas.dexpi.mapping import Category, classify_valve_tag, map_shape
 
 
 def test_reactor_maps_to_vessel():

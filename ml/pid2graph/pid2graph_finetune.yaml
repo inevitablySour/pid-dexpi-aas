@@ -35,7 +35,7 @@ DATA:
   SEED: 10
   REAL_SUBSET: 'Patched/PID2Graph OPEN100'
   NUM_FOLDS: 4
-  EXTRA_TRAIN_SUBSETS: ['Patched/Team v3']       # made by ml/pid2graph/make_team_data.py
+  EXTRA_TRAIN_SUBSETS: ['Patched/Team v3']       # made by ml/pid2graph/data/make_team_data.py
   TEAM_TEST_SUBSETS: ['Patched/Team v3 test']
   STYLE_AUGMENT: True
   BALANCED_SAMPLING: True

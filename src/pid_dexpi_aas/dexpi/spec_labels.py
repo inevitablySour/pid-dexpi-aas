@@ -21,7 +21,7 @@ import math
 import re
 from dataclasses import dataclass, field
 
-from pid_dexpi_aas.parser_drawio import ParsedDiagram, Shape
+from pid_dexpi_aas.drawio.parser import ParsedDiagram, Shape
 
 _NUM = r"(\d+(?:[.,]\d+)?)"
 _PATTERNS = [
@@ -88,7 +88,7 @@ def _dist(p, b) -> float:
 
 def attach_specs(diagram: ParsedDiagram) -> SpecResult:
     """Find spec notes, attach them to items, strip them from mixed tag cells (in place)."""
-    from pid_dexpi_aas.mapping import Category, map_shape
+    from pid_dexpi_aas.dexpi.mapping import Category, map_shape
 
     result = SpecResult()
     # Only real items: never a decorative part of a symbol (P101's base trapezoid took the

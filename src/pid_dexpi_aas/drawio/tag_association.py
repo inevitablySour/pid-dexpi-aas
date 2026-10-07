@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from pid_dexpi_aas.parser_drawio import ParsedDiagram, Shape
+from pid_dexpi_aas.drawio.parser import ParsedDiagram, Shape
 
 
 @dataclass
@@ -61,7 +61,7 @@ def associate_tags(diagram: ParsedDiagram) -> list[TagAssociation]:
     report shapes with more than one associated tag as needing manual review, not
     silently trust every association.
     """
-    from pid_dexpi_aas.mapping import classify_tag
+    from pid_dexpi_aas.dexpi.mapping import classify_tag
 
     labeled_shapes = [s for s in diagram.shapes if not s.is_labeled_only]
     associations: list[TagAssociation] = []

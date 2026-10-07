@@ -14,13 +14,12 @@ DIFFERENT, distant shape (confirmed: PSV201's real vent line to "safe location" 
 """
 from pathlib import Path
 
-from pid_dexpi_aas.build_model import build_model
-from pid_dexpi_aas.parser_drawio import parse_drawio_file, parse_drawio_xml
+from pid_dexpi_aas.dexpi.build_model import build_model
+from pid_dexpi_aas.drawio.parser import parse_drawio_file, parse_drawio_xml
 
 GRAMFLOW = (
-    Path(__file__).parent.parent
-    / "handoff"
-    / "decoded_xml"
+    Path(__file__).parent
+    / "fixtures" / "decoded_xml"
     / "P&ID gramflow reactor V3__diagram0.xml"
 )
 

@@ -16,7 +16,7 @@ dependencies = [
     "openpyxl",
     "cairosvg",  # check sheet "after" drawing; needs the cairo library (macOS: brew install cairo)
     "networkx",
-    # AAS export (aas_export.py): 2.0.x writes AAS metamodel 3.0, what IDTA 02012-1-0 and the
+    # AAS export (aas/export.py): 2.0.x writes AAS metamodel 3.0, what IDTA 02012-1-0 and the
     # IDTA's own test engine use; 2.1+ writes 3.1, which that test engine rejects
     "basyx-python-sdk>=2.0.1,<2.1",
     "aas-core3.0",  # metamodel verification of the AAS 3.0 / 3.1 output

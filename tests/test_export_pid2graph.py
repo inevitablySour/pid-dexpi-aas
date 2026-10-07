@@ -7,10 +7,10 @@ from pathlib import Path
 
 import networkx as nx
 
-from pid_dexpi_aas.export_pid2graph import export_pid2graph_graphml, labelled_symbols
-from pid_dexpi_aas.parser_drawio import parse_drawio_file
+from pid_dexpi_aas.image.export_pid2graph import export_pid2graph_graphml, labelled_symbols
+from pid_dexpi_aas.drawio.parser import parse_drawio_file
 
-DECODED_DIR = Path(__file__).parent.parent / "handoff" / "decoded_xml"
+DECODED_DIR = Path(__file__).parent / "fixtures" / "decoded_xml"
 PFD = DECODED_DIR / "PFD combined set up 301122__diagram0.xml"
 
 
@@ -82,8 +82,8 @@ def test_text_labels_are_not_exported_as_symbols():
 
 
 def test_rotated_shape_box_swaps_width_and_height():
-    from pid_dexpi_aas.export_pid2graph import rotated_box
-    from pid_dexpi_aas.parser_drawio import Shape
+    from pid_dexpi_aas.image.export_pid2graph import rotated_box
+    from pid_dexpi_aas.drawio.parser import Shape
     s = Shape(id="a", shape_token="x", text="", x=0, y=0, width=100, height=30, style="rotation=-90;")
     assert rotated_box(s) == (35.0, -35.0, 65.0, 65.0)
 
@@ -91,7 +91,7 @@ def test_rotated_shape_box_swaps_width_and_height():
 def test_compressed_drawio_file_exports_its_symbols(tmp_path):
     """Regression: exporting a real (compressed) .drawio file read it as plain XML, found
     no cells, and silently wrote an empty graph."""
-    from pid_dexpi_aas.export_pid2graph import export_drawio_file_to_pid2graph
+    from pid_dexpi_aas.image.export_pid2graph import export_drawio_file_to_pid2graph
     src = Path(__file__).parent.parent / "subprojects" / "LightUp" / "P&ID gramflow reactor V3.drawio"
     out = tmp_path / "x.graphml"
     export_drawio_file_to_pid2graph(src, out)

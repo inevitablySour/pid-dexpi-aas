@@ -11,7 +11,7 @@ from pathlib import Path
 
 from pydexpi.dexpi_classes.dexpiModel import DexpiModel
 
-from pid_dexpi_aas.proteus_patch import PatchedProteusSerializer
+from pid_dexpi_aas.dexpi.proteus_patch import PatchedProteusSerializer
 
 
 def save_and_verify(model: DexpiModel, dir_path: str | Path, filename: str) -> DexpiModel:

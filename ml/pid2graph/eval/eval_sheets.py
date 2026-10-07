@@ -11,8 +11,8 @@ sheet, ~103 px in a patch), so tiles are taken at 1500/2.65 px to show the model
 was trained on. The team's own drawings were patched at 1:1.
 
 Usage (ML venv):
-    ml/relationformer/.venv/bin/python ml/pid2graph/eval_sheets.py --checkpoint <ckpt> --set open100 [--fold 0]
-    ml/relationformer/.venv/bin/python ml/pid2graph/eval_sheets.py --checkpoint <ckpt> --set team
+    ml/relationformer/.venv/bin/python ml/pid2graph/eval/eval_sheets.py --checkpoint <ckpt> --set open100 [--fold 0]
+    ml/relationformer/.venv/bin/python ml/pid2graph/eval/eval_sheets.py --checkpoint <ckpt> --set team
 """
 from __future__ import annotations
 
@@ -26,16 +26,17 @@ import numpy as np
 import yaml
 
 HERE = Path(__file__).resolve().parent
-RF_DIR = HERE.parent / "relationformer"
+RF_DIR = HERE.parents[1] / "relationformer"
 sys.path.insert(0, str(RF_DIR))
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "pipeline"))  # infer_sheet, trace_pipes, refine_symbols
 
 from evaluator_pid2graph import NodeEdgeMeanAP  # noqa: E402
 from infer_sheet import CLASS_NAMES, box_iou, detect, load_sheet  # noqa: E402
 from pid2graph_data.dataset_pid2graph import _collapse_graph, real_fold_sheets  # noqa: E402
 from train_pid2graph import dict2obj  # noqa: E402
 
-DATA = HERE.parents[1] / "data" / "PID2Graph"
+DATA = HERE.parents[2] / "data" / "PID2Graph"
 SETS = {
     "open100": {"dir": DATA / "Complete" / "PID2Graph OPEN100", "scale": 2.65},
     # LightUp, held out. "Team v3 test" = the corrected labels (reactor and compartments,

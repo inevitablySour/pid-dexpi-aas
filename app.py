@@ -39,28 +39,28 @@ import streamlit as st  # noqa: E402
 import streamlit.components.v2  # noqa: E402,F401  (st.components.v2: the clickable map)
 from PIL import Image  # noqa: E402
 
-from pid_dexpi_aas.check_sheet import build_check_sheet, number_items, numbered_overlay, render_after_png  # noqa: E402
-from pid_dexpi_aas.flow_map import (  # noqa: E402
+from pid_dexpi_aas.render.check_sheet import build_check_sheet, number_items, numbered_overlay, render_after_png  # noqa: E402
+from pid_dexpi_aas.render.flow_map import (  # noqa: E402
     BOX_CHECK, BOX_IN, BOX_LEGEND, BOX_OUT, BOX_PICTURE, MAP_CSS, MAP_JS, OCR_TAG, Box, Layers, add_edits,
     Line, build_layers, hide, image_layers, map_markup, review_overrides,
 )
-from pid_dexpi_aas.decode_drawio import decode_drawio  # noqa: E402
-from pid_dexpi_aas.aas_export import DexpiModelInput, aasx_bytes, check_aasx, drawing_svg, mapping_entries  # noqa: E402
-from pid_dexpi_aas.dexpi_fields import prefill, spec_fields  # noqa: E402
-from pid_dexpi_aas.routing import route  # noqa: E402
-from pid_dexpi_aas.mapping import classify_detection  # noqa: E402
-from pid_dexpi_aas.parser_drawio import parse_drawio_xml_resolved  # noqa: E402
+from pid_dexpi_aas.drawio.decode import decode_drawio  # noqa: E402
+from pid_dexpi_aas.aas.export import DexpiModelInput, aasx_bytes, check_aasx, drawing_svg, mapping_entries  # noqa: E402
+from pid_dexpi_aas.dexpi.fields import prefill, spec_fields  # noqa: E402
+from pid_dexpi_aas.render.routing import route  # noqa: E402
+from pid_dexpi_aas.dexpi.mapping import classify_detection  # noqa: E402
+from pid_dexpi_aas.drawio.parser import parse_drawio_xml_resolved  # noqa: E402
 from pid_dexpi_aas.review import (  # noqa: E402
     DEXPI_CLASS_CHOICES, FLOW_KNOWN, INSTRUMENT_CLASSES, OFF_PAGE, SKIP, VALVE_CLASSES, ReviewConnection, ReviewDiagram, ReviewSymbol,
     _instrument_attributes, _short_token, cross_check, from_drawio, from_image, to_dexpi, validate_rows,
 )
-from pid_dexpi_aas.serialize import save_and_verify  # noqa: E402
-from pid_dexpi_aas.validate_by_counting import report_for_diagram  # noqa: E402
+from pid_dexpi_aas.dexpi.serialize import save_and_verify  # noqa: E402
+from pid_dexpi_aas.dexpi.validate_by_counting import report_for_diagram  # noqa: E402
 
 _ML_VENV = ROOT / "ml" / "relationformer" / ".venv"
 ML_PYTHON = next((p for p in (_ML_VENV / "bin" / "python", _ML_VENV / "Scripts" / "python.exe") if p.exists()),
                  _ML_VENV / "bin" / "python")
-INFER_SCRIPT = ROOT / "ml" / "pid2graph" / "infer_sheet.py"
+INFER_SCRIPT = ROOT / "ml" / "pid2graph" / "pipeline" / "infer_sheet.py"
 # The released model (ml/get_model.sh downloads it): the final all-data model when present,
 # else the fold-1 one; PID_MODEL_CHECKPOINT points elsewhere.
 DEFAULT_CHECKPOINT = os.environ.get("PID_MODEL_CHECKPOINT", str(next(
@@ -401,7 +401,7 @@ def _ocr_boxes(review: ReviewDiagram, to_map=lambda b: tuple(b)) -> list[Box]:
 
 def drawio_layers(review: ReviewDiagram) -> Layers | None:
     """The draw.io flow map: every pipe along its drawn route with its flow direction
-    (pid_dexpi_aas.flow_map) - automatic, reflects the table edits. In both-inputs mode it
+    (pid_dexpi_aas.render.flow_map) - automatic, reflects the table edits. In both-inputs mode it
     also shows what the image adds: symbols only the model found (dashed orange) and OCR
     tags nothing claimed (dashed grey), mapped onto the drawing via the tag alignment."""
     if drawio_file is None or review.drawio is None:

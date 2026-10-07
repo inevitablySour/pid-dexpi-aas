@@ -10,9 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from pid_dexpi_aas.build_model import BuildResult, build_model
-from pid_dexpi_aas.parser_drawio import ParsedDiagram, parse_drawio_file
-from pid_dexpi_aas.tag_association import build_tag_lookup
+from pid_dexpi_aas.dexpi.build_model import BuildResult, build_model
+from pid_dexpi_aas.drawio.parser import ParsedDiagram, parse_drawio_file
+from pid_dexpi_aas.drawio.tag_association import build_tag_lookup
 
 
 @dataclass
@@ -25,7 +25,7 @@ class FileReport:
     multi_tag_shapes: list[str]  # shape ids with >1 associated tag - needs manual review
     skipped_details: list[str]  # "<element_id> (<kind>): <reason>"
     # Built EDGE connections broken down by how trustworthy their resolution is - see
-    # build_model.BuildRecord.confidence and parser_drawio.Edge's *_resolution fields.
+    # build_model.BuildRecord.confidence and drawio.parser.Edge's *_resolution fields.
     # "explicit": the drawio file states the connection directly - ground truth.
     # "exit_fraction": a tight (<=10 unit) geometric match - high confidence but inferred.
     # "nearest_shape": a looser proximity guess - confirmed (by manual cross-checking
@@ -121,7 +121,7 @@ def report_for_directory(directory: str | Path) -> list[FileReport]:
 if __name__ == "__main__":
     import sys
 
-    target = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("handoff/decoded_xml")
+    target = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("tests/fixtures/decoded_xml")
     reports = report_for_directory(target) if target.is_dir() else [report_for_file(target)]
     for report in reports:
         print(format_report(report))

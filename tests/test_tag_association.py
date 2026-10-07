@@ -1,12 +1,11 @@
 from pathlib import Path
 
-from pid_dexpi_aas.parser_drawio import parse_drawio_file
-from pid_dexpi_aas.tag_association import associate_tags, build_tag_lookup
+from pid_dexpi_aas.drawio.parser import parse_drawio_file
+from pid_dexpi_aas.drawio.tag_association import associate_tags, build_tag_lookup
 
 FIXTURE = (
-    Path(__file__).parent.parent
-    / "handoff"
-    / "decoded_xml"
+    Path(__file__).parent
+    / "fixtures" / "decoded_xml"
     / "PFD combined set up 301122__diagram0.xml"
 )
 

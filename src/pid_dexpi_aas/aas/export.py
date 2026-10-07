@@ -341,8 +341,8 @@ def drawing_svg(diagram, result) -> bytes | None:
     """The P&ID re-drawn from the DEXPI model (ModelRepresentation), as SVG bytes."""
     import tempfile
 
-    from pid_dexpi_aas.build_diagram import build_diagram
-    from pid_dexpi_aas.render_svg import render_diagram_svg
+    from pid_dexpi_aas.render.build_diagram import build_diagram
+    from pid_dexpi_aas.render.render_svg import render_diagram_svg
 
     try:
         with tempfile.TemporaryDirectory() as tmp:
@@ -358,9 +358,9 @@ def model_from_drawio(path: str | Path) -> DexpiModelInput:
     parse -> review rows -> DEXPI (verified by re-loading) -> SVG."""
     import tempfile
 
-    from pid_dexpi_aas.parser_drawio import parse_drawio_file
+    from pid_dexpi_aas.drawio.parser import parse_drawio_file
     from pid_dexpi_aas.review import from_drawio, to_dexpi
-    from pid_dexpi_aas.serialize import save_and_verify
+    from pid_dexpi_aas.dexpi.serialize import save_and_verify
 
     path = Path(path)
     diagram, result = to_dexpi(from_drawio(parse_drawio_file(path)))
@@ -371,7 +371,7 @@ def model_from_drawio(path: str | Path) -> DexpiModelInput:
 
 
 def main() -> None:
-    """Bundle one plant's drawings into one AAS: python -m pid_dexpi_aas.aas_export ..."""
+    """Bundle one plant's drawings into one AAS: python -m pid_dexpi_aas.aas.export ..."""
     import argparse
 
     ap = argparse.ArgumentParser(description="P&ID drawings (.drawio) -> AASX with the IDTA 02012-1-0 DEXPI Submodel")

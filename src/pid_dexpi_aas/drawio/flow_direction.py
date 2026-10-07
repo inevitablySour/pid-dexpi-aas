@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from pid_dexpi_aas.parser_drawio import Edge, ParsedDiagram
+from pid_dexpi_aas.drawio.parser import Edge, ParsedDiagram
 
 
 @dataclass
@@ -92,7 +92,7 @@ class FlowSummary:
 def infer_flow(diagram: ParsedDiagram) -> FlowSummary:
     """Set Edge.flow / flow_basis on the drawing's process connections, in place: direct
     lines and the derived "net:" edges of pipe networks."""
-    from pid_dexpi_aas.mapping import Category, map_shape
+    from pid_dexpi_aas.dexpi.mapping import Category, map_shape
 
     shapes = {s.id: s for s in diagram.shapes}
     instruments = {sid for sid, s in shapes.items() if s.shape_token

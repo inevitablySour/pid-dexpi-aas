@@ -1,6 +1,6 @@
 """Turn raw OCR tokens into plant tags, and attach tags to detected symbols.
 
-Input tokens come from ml/pid2graph/infer_sheet.py (EasyOCR): {"text", "conf", "box"}
+Input tokens come from ml/pid2graph/pipeline/infer_sheet.py (EasyOCR): {"text", "conf", "box"}
 with box = [x1, y1, x2, y2] in image pixels. Two P&ID conventions shape this module:
 
   - Instrument bubbles stack the ISA letters above the loop number ("PI" over "102"),
@@ -123,7 +123,7 @@ def attach_tags(symbol_boxes: dict[str, tuple[float, float, float, float]], tags
     further away - before this, "FI 102" next to V101 could take the tank box and leave
     "V101" on nothing.
     """
-    from pid_dexpi_aas.mapping import classify_tag
+    from pid_dexpi_aas.dexpi.mapping import classify_tag
 
     kinds = [classify_tag(t.text)[0] for t in tags]
     candidates = []

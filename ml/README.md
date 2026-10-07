@@ -171,7 +171,7 @@ fine-tune fixes what that run measured as wrong, starting from its weights:
 
 ```bash
 # once: team drawings -> data/PID2Graph/{Complete,Patched}/Team[ test] (needs ml/tools/drawio.AppImage)
-.venv/bin/python ml/pid2graph/make_team_data.py
+.venv/bin/python ml/pid2graph/data/make_team_data.py
 # all 4 folds (~4 h each on a 4070), then pooled scores:
 ml/pid2graph/run_folds.sh ml/relationformer/trained_weights/runs/sheetsplit_bs4_10/models/checkpoint_epoch=150.pt
 ```
@@ -194,7 +194,7 @@ Team v3 4-fold results (2026-10-07): LightUp node 0.931 / edge 0.489 (team-v1 la
 run: 0.911 / 0.347), OPEN100 0.689 / 0.281 (0.687 / 0.271).
 
 Notes: OPEN100 patches are the complete sheets enlarged 2.65x, so whole-sheet scoring
-tiles at 1500/2.65 px. `exports/pid2graph_export/*.graphml` (draw.io coordinates) and the
+tiles at 1500/2.65 px. `docs/examples/pid2graph_export/*.graphml` (draw.io coordinates) and the
 training data (`make_team_data.py`, image pixels) share one labelling,
 `export_pid2graph.labelled_symbols`: real symbols only. The first exports labelled every
 draw.io cell, text labels included, as "general" (LightUp: 113 nodes -> 59 symbols). For the app, point `PID_MODEL_CHECKPOINT` at a fine-tuned checkpoint.

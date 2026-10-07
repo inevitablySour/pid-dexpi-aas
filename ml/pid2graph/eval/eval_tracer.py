@@ -8,7 +8,7 @@ Two runs per sheet:
 A predicted pair counts when both ends match labelled symbols (box IoU >= 0.5) that the
 labels connect. OCR and model runs are cached in --cache.
 
-Usage (ML venv): ml/relationformer/.venv/bin/python ml/pid2graph/eval_tracer.py --checkpoint ml/models/pid2graph_fold1.pt
+Usage (ML venv): ml/relationformer/.venv/bin/python ml/pid2graph/eval/eval_tracer.py --checkpoint ml/models/pid2graph_fold1.pt
 """
 from __future__ import annotations
 
@@ -22,10 +22,11 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "pipeline"))  # infer_sheet, trace_pipes, refine_symbols
 from infer_sheet import box_iou, detect, load_sheet, run_ocr  # noqa: E402
 from trace_pipes import trace_connections  # noqa: E402
 
-DATA = HERE.parents[1] / "data" / "PID2Graph" / "Complete"
+DATA = HERE.parents[2] / "data" / "PID2Graph" / "Complete"
 
 
 def prf(pred: set, truth: set) -> tuple[int, int, int]:

@@ -12,14 +12,13 @@ from pydexpi.dexpi_classes.dexpiModel import ConceptualModel, DexpiModel
 from pydexpi.dexpi_classes.pydantic_classes import MetaData
 from pydexpi.toolkits import piping_toolkit as pt
 
-from pid_dexpi_aas.build_model import build_model
-from pid_dexpi_aas.parser_drawio import parse_drawio_file
-from pid_dexpi_aas.proteus_patch import PatchedProteusSerializer
+from pid_dexpi_aas.dexpi.build_model import build_model
+from pid_dexpi_aas.drawio.parser import parse_drawio_file
+from pid_dexpi_aas.dexpi.proteus_patch import PatchedProteusSerializer
 
 FIXTURE = (
-    Path(__file__).parent.parent
-    / "handoff"
-    / "decoded_xml"
+    Path(__file__).parent
+    / "fixtures" / "decoded_xml"
     / "PFD combined set up 301122__diagram0.xml"
 )
 
@@ -184,7 +183,7 @@ def test_multi_item_segment_with_tee_branch_round_trips(tmp_path):
     model.conceptualModel.taggedPlantItems.extend([a, b, c])
     model.conceptualModel.pipingNetworkSystems.append(piping.PipingNetworkSystem(segments=[run, branch]))
 
-    from pid_dexpi_aas.serialize import save_and_verify
+    from pid_dexpi_aas.dexpi.serialize import save_and_verify
     reloaded = save_and_verify(model, tmp_path, "multi_item")
     seg_run, seg_branch = reloaded.conceptualModel.pipingNetworkSystems[0].segments
     assert [type(i).__name__ for i in seg_run.items] == ["GateValve", "PipeTee", "CheckValve"]
@@ -201,12 +200,12 @@ def test_instrument_wiring_survives_export_and_reload(tmp_path):
 
     from pydexpi.dexpi_classes import instrumentation as inst
 
-    from pid_dexpi_aas.build_model import build_model
-    from pid_dexpi_aas.parser_drawio import parse_drawio_file
-    from pid_dexpi_aas.serialize import save_and_verify
+    from pid_dexpi_aas.dexpi.build_model import build_model
+    from pid_dexpi_aas.drawio.parser import parse_drawio_file
+    from pid_dexpi_aas.dexpi.serialize import save_and_verify
 
     root = Path(__file__).parent.parent
-    diagram = parse_drawio_file(root / "handoff" / "decoded_xml" / "P&ID gramflow reactor V3__diagram0.xml")
+    diagram = parse_drawio_file(root / "tests" / "fixtures" / "decoded_xml" / "P&ID gramflow reactor V3__diagram0.xml")
     model = build_model(diagram).model
 
     def wiring(m):
@@ -226,12 +225,12 @@ def test_pipe_specifications_and_choice_fields_survive_reload(tmp_path):
     """A line's specifications land on its pipe segment and come back from the reader -
     choice fields too: pyDEXPI writes them by value but read them by member name, and a
     failed lookup dropped the object's whole attribute set (proteus_patch's reader fix)."""
-    from pid_dexpi_aas.dexpi_fields import spec_fields
+    from pid_dexpi_aas.dexpi.fields import spec_fields
     from pid_dexpi_aas.review import from_drawio, to_dexpi
-    from pid_dexpi_aas.serialize import save_and_verify
+    from pid_dexpi_aas.dexpi.serialize import save_and_verify
 
     root = Path(__file__).parent.parent
-    review = from_drawio(parse_drawio_file(root / "handoff" / "decoded_xml" / "P&ID gramflow reactor V3__diagram0.xml"))
+    review = from_drawio(parse_drawio_file(root / "tests" / "fixtures" / "decoded_xml" / "P&ID gramflow reactor V3__diagram0.xml"))
     line = next(c for c in review.connections if c.include and c.line_type == "process" and not c.id.startswith("net"))
     values = {f.name: ({"value": 10, "unit": f.units[0]} if f.kind == "quantity" else
                        f.options[-1] if f.kind == "choice" else "X1")

@@ -6,3 +6,5 @@ tools/
 # trained model for the review app - published as a GitHub release asset (ml/get_model.sh)
 models/
 /run_folds.log
+/run_final.log
+/run_folds_v3.log

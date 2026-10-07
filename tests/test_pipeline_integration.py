@@ -5,12 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from pid_dexpi_aas.build_model import build_model
-from pid_dexpi_aas.parser_drawio import parse_drawio_file
-from pid_dexpi_aas.serialize import save_and_verify
-from pid_dexpi_aas.validate_by_counting import report_for_diagram
+from pid_dexpi_aas.dexpi.build_model import build_model
+from pid_dexpi_aas.drawio.parser import parse_drawio_file
+from pid_dexpi_aas.dexpi.serialize import save_and_verify
+from pid_dexpi_aas.dexpi.validate_by_counting import report_for_diagram
 
-DECODED_DIR = Path(__file__).parent.parent / "handoff" / "decoded_xml"
+DECODED_DIR = Path(__file__).parent / "fixtures" / "decoded_xml"
 ALL_FILES = sorted(DECODED_DIR.glob("*.xml"))
 
 

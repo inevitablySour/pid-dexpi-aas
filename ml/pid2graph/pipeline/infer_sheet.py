@@ -4,7 +4,7 @@ Runs inside the ML venv (ml/relationformer/.venv) because it needs the compiled
 deformable-attention op; the Streamlit app (main venv) calls it as a subprocess and
 reads the JSON. Usage:
 
-    ml/relationformer/.venv/bin/python ml/pid2graph/infer_sheet.py \
+    ml/relationformer/.venv/bin/python ml/pid2graph/pipeline/infer_sheet.py \
         --image drawing.png --checkpoint <ckpt.pt> --out result.json
 
 The model was trained on 2000px PID2Graph patches, so the sheet is tiled the same way
@@ -13,7 +13,7 @@ from overlapping tiles are merged (greedy, class-agnostic, IoU >= 0.5, majority 
 vote), and per-tile connection probabilities are mapped onto the merged symbols.
 
 OCR output is raw tokens only - assembling them into tags and attaching tags to symbols
-happens in pid_dexpi_aas.ocr_tags (main venv), where it is unit-testable.
+happens in pid_dexpi_aas.image.ocr_tags (main venv), where it is unit-testable.
 """
 from __future__ import annotations
 
@@ -29,9 +29,9 @@ import torch
 import yaml
 from PIL import Image
 
-RF_DIR = Path(__file__).resolve().parent.parent / "relationformer"
+RF_DIR = Path(__file__).resolve().parents[2] / "relationformer"
 sys.path.insert(0, str(RF_DIR))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))  # pid_dexpi_aas.sheet_image
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))  # pid_dexpi_aas.image.sheet_image
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # trace_pipes
 
 from inference import graph_infer  # noqa: E402
@@ -47,7 +47,7 @@ CLASS_NAMES = ["arrow", "general", "inlet/outlet", "instrumentation", "pump", "t
 def load_sheet(path: str) -> Image.Image:
     # Dark ink on white, whatever came in: transparent exports, and draw.io dark-theme
     # exports / dark screenshots (light lines - laid on white they vanished).
-    from pid_dexpi_aas.sheet_image import to_dark_on_white
+    from pid_dexpi_aas.image.sheet_image import to_dark_on_white
     return to_dark_on_white(Image.open(path))
 
 

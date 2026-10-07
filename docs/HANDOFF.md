@@ -237,14 +237,14 @@ was required.
 Local build (parser, mapping, tag-association, model construction) completed against
 pyDEXPI **1.2.0** (newer than the 1.1.0 above; pinned in `pyproject.toml`). Full API
 inspection of `model_toolkit`/`piping_toolkit`/`instrumentation_toolkit`/`ProteusSerializer`
-resolved all "NOT YET INSPECTED" items above - see `src/pid_dexpi_aas/build_model.py` for
+resolved all "NOT YET INSPECTED" items above - see `src/pid_dexpi_aas/dexpi/build_model.py` for
 the confirmed working construction pattern.
 
 **New blocking finding**: pyDEXPI 1.2.0's Proteus *exporter* only supports
 MetaData/Equipment/Nozzle - piping and instrumentation are silently dropped on
 `ProteusSerializer().save()`. Confirmed against GitHub `master`, not just the PyPI release;
 no open issue, framed as future work in their README. Full details and the chosen
-workaround (a local exporter patch, see `src/pid_dexpi_aas/proteus_patch.py`) are in the
+workaround (a local exporter patch, see `src/pid_dexpi_aas/dexpi/proteus_patch.py`) are in the
 top-level `README.md`. **Do not treat `pydexpi`'s Proteus export as trustworthy for
 piping/instrumentation without checking that file first.**
 

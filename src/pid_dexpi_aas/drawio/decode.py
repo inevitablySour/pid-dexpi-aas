@@ -1,7 +1,7 @@
 """Decode draw.io's compressed <diagram> payload into plain mxGraph XML.
 
 draw.io stores each diagram tab as base64(deflate(urlencode(xml))) inside
-<diagram>...</diagram>. Copied from handoff/decode.py (confirmed working on all 8 team
+<diagram>...</diagram>. Started from the handoff's decode script (confirmed working on all 8 team
 files during the handoff) into the package so run_pipeline.py can import it directly.
 """
 from __future__ import annotations

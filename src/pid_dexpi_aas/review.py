@@ -22,11 +22,11 @@ import numpy as np
 from pydexpi.dexpi_classes import equipment as eq
 from pydexpi.dexpi_classes import piping
 
-from pid_dexpi_aas.build_model import BuildResult, _tag_name, build_model
-from pid_dexpi_aas.mapping import Category, MappingResult, classify_detection, classify_instrument_tag, map_shape
-from pid_dexpi_aas.ocr_tags import OcrTag, assemble_tags, attach_tags
-from pid_dexpi_aas.parser_drawio import Edge, ParsedDiagram, Shape
-from pid_dexpi_aas.tag_association import build_tag_lookup
+from pid_dexpi_aas.dexpi.build_model import BuildResult, _tag_name, build_model
+from pid_dexpi_aas.dexpi.mapping import Category, MappingResult, classify_detection, classify_instrument_tag, map_shape
+from pid_dexpi_aas.image.ocr_tags import OcrTag, assemble_tags, attach_tags
+from pid_dexpi_aas.drawio.parser import Edge, ParsedDiagram, Shape
+from pid_dexpi_aas.drawio.tag_association import build_tag_lookup
 
 SKIP = "(skip - not in DEXPI)"
 OFF_PAGE = "(off-page connector)"
@@ -81,7 +81,7 @@ class ReviewConnection:
     confidence: str = ""  # draw.io: explicit/inferred resolution; model: probability
     notes: str = ""
     include: bool = True
-    # specifications of the pipe / signal line (dexpi_fields.py): {"dexpi": {...}, "custom": {...}},
+    # specifications of the pipe / signal line (dexpi/fields.py): {"dexpi": {...}, "custom": {...}},
     # written onto the PipingNetworkSegment(s) or signal line it becomes
     attributes: dict = field(default_factory=dict)
     # Process flow runs From -> To, and how that is known: "drawn arrow" | "implied" (from
@@ -143,7 +143,7 @@ def from_drawio(diagram: ParsedDiagram) -> ReviewDiagram:
     """Rows for every shaped draw.io cell, plus text labels that a pipe ends on (they
     become off-page connectors, e.g. "Fume hood [atm]"). Plain labels that are just a
     shape's tag are folded into that shape's `tag` instead of getting their own row."""
-    from pid_dexpi_aas.sections import section_of
+    from pid_dexpi_aas.drawio.sections import section_of
 
     tag_lookup = build_tag_lookup(diagram)
     endpoint_ids = {e.source for e in diagram.edges} | {e.target for e in diagram.edges}
@@ -208,7 +208,7 @@ def _exclude_dangling(review: ReviewDiagram) -> None:
 
 # ----------------------------------------------------------------------------- image ---
 def from_image(infer: dict, source_name: str) -> ReviewDiagram:
-    """Rows from ml/pid2graph/infer_sheet.py output: model symbols + OCR tags + name
+    """Rows from ml/pid2graph/pipeline/infer_sheet.py output: model symbols + OCR tags + name
     classifier, and the model's predicted connections."""
     tags = assemble_tags(infer.get("ocr_tokens", []))
     boxes = {s["id"]: tuple(s["box"]) for s in infer["symbols"]}
@@ -237,7 +237,7 @@ def from_image(infer: dict, source_name: str) -> ReviewDiagram:
     review.unattached_tags = [
         {"tag": t.text, "box": list(t.box), "conf": round(t.conf, 3)} for t in tags if id(t) not in claimed
     ]
-    # Pipes traced on the picture (ml/pid2graph/trace_pipes.py) first - they follow the
+    # Pipes traced on the picture (ml/pid2graph/pipeline/trace_pipes.py) first - they follow the
     # drawn line across the whole sheet and carry their path and arrowhead direction. Then
     # the model's own predictions for pairs the tracer did not reach (scored on the team
     # sheets: tracer alone F1 0.68, model alone 0.70, both 0.84).
@@ -268,7 +268,7 @@ def from_image(infer: dict, source_name: str) -> ReviewDiagram:
 def _imply_flow(review: ReviewDiagram) -> None:
     """Carry arrowhead directions to process lines without one (flow_direction rules:
     an item with two pipes passes the flow on)."""
-    from pid_dexpi_aas.flow_direction import Leg, propagate
+    from pid_dexpi_aas.drawio.flow_direction import Leg, propagate
 
     by_id = {s.id: s for s in review.symbols}
     lines = [c for c in review.connections if c.line_type == "process" and c.from_id in by_id and c.to_id in by_id]
@@ -467,7 +467,7 @@ def to_dexpi(review: ReviewDiagram) -> tuple[ParsedDiagram, BuildResult]:
         traced = {}
     # every other line without a drawn route (added, re-pointed, untraced) is routed around the
     # items like a draw.io connector, so the re-drawn picture has no straight lines across it
-    from pid_dexpi_aas.routing import route
+    from pid_dexpi_aas.render.routing import route
     drawn_routes = (base.routes or {}) if base is not None else {}
     original = {e.id: e for e in base.edges} if base is not None else {}
     item_box = {sh.id: (sh.x, sh.y, sh.x + sh.width, sh.y + sh.height) for sh in shapes if sh.width and sh.height}
@@ -490,8 +490,8 @@ def to_dexpi(review: ReviewDiagram) -> tuple[ParsedDiagram, BuildResult]:
                             drawn_edges=list(base.edges) if base is not None else None,
                             sections=list(base.sections) if base is not None else [])
     result = build_model(diagram, overrides, tag_overrides)
-    # specification fields filled in by the reviewer (dexpi_fields.py), over the drawing's notes
-    from pid_dexpi_aas.dexpi_fields import apply_fields
+    # specification fields filled in by the reviewer (dexpi/fields.py), over the drawing's notes
+    from pid_dexpi_aas.dexpi.fields import apply_fields
     result.spec_problems = []
     # a line's specifications go onto what it became: its pipe segment(s) (a pipe network:
     # all of the network's segments), or its measuring / signal line

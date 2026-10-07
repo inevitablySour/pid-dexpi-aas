@@ -23,12 +23,12 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.worksheet.datavalidation import DataValidation
 from PIL import Image, ImageDraw, ImageFont
 
-from pid_dexpi_aas.build_diagram import build_diagram
-from pid_dexpi_aas.build_model import BuildResult
-from pid_dexpi_aas.parser_drawio import ParsedDiagram
-from pid_dexpi_aas.render_svg import render_diagram_svg
+from pid_dexpi_aas.render.build_diagram import build_diagram
+from pid_dexpi_aas.dexpi.build_model import BuildResult
+from pid_dexpi_aas.drawio.parser import ParsedDiagram
+from pid_dexpi_aas.render.render_svg import render_diagram_svg
 from pid_dexpi_aas.review import OFF_PAGE, SKIP, ReviewDiagram, ReviewSymbol, category_for_class
-from pid_dexpi_aas.mapping import Category
+from pid_dexpi_aas.dexpi.mapping import Category
 
 FONT = "Arial"
 FILL_IN = PatternFill("solid", fgColor="FFF2CC")  # yellow: cells the reviewer fills in

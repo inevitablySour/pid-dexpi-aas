@@ -6,7 +6,7 @@ remain, so the model drew large, wrong boxes around them. Screenshots of a dark-
 page have the same problem without the transparency. Both are detected from the ink's
 brightness and inverted.
 
-numpy + Pillow only, so ml/pid2graph/infer_sheet.py (ML venv) and the app share it.
+numpy + Pillow only, so ml/pid2graph/pipeline/infer_sheet.py (ML venv) and the app share it.
 """
 from __future__ import annotations
 

@@ -34,7 +34,7 @@ def _find_drawio() -> Path:
     """The draw.io desktop app: $DRAWIO_APP, the repo's ml/tools/drawio.AppImage
     (scripts/get_drawio.sh), or a normal install on Linux, macOS or Windows."""
     candidates = [os.environ.get("DRAWIO_APP"),
-                  Path(__file__).resolve().parents[2] / "ml" / "tools" / "drawio.AppImage",
+                  Path(__file__).resolve().parents[3] / "ml" / "tools" / "drawio.AppImage",
                   shutil.which("drawio"), shutil.which("draw.io"),
                   "/Applications/draw.io.app/Contents/MacOS/draw.io",
                   Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "draw.io" / "draw.io.exe",

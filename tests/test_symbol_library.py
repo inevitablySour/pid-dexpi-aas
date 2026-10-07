@@ -1,5 +1,5 @@
-from pid_dexpi_aas.mapping import EQUIPMENT_SHAPE_MAP, VALVE_TAG_PREFIX_MAP
-from pid_dexpi_aas.symbol_library import (
+from pid_dexpi_aas.dexpi.mapping import EQUIPMENT_SHAPE_MAP, VALVE_TAG_PREFIX_MAP
+from pid_dexpi_aas.render.symbol_library import (
     SYMBOL_BUILDERS,
     build_primitives_for_class,
     compute_local_bounding_box,

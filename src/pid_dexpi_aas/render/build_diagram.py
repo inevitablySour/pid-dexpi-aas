@@ -4,7 +4,7 @@ pyDEXPI 1.2.0's own Proteus/loaders code never populates DexpiModel.diagram - co
 by direct inspection (proteus_serializer.py never references Diagram/Shape, and there is
 no ConceptualModel -> Diagram builder anywhere in the installed package). This module is
 that missing builder, using symbol_library.py's hand-drawn ISO-10628-style shapes and the
-original drawio x/y/width/height coordinates (already parsed by parser_drawio.py) for
+original drawio x/y/width/height coordinates (already parsed by drawio/parser.py) for
 layout, so DrawDiagram (pydexpi.loaders.svg_loader) can render a real, recognizable P&ID
 picture rather than an empty canvas.
 
@@ -40,10 +40,10 @@ from pydexpi.dexpi_classes.graphics import (
 from pydexpi.dexpi_classes import piping
 from pydexpi.dexpi_classes.pydantic_classes import DexpiBaseModel, DexpiModel
 
-from pid_dexpi_aas.build_model import BuildResult
-from pid_dexpi_aas.parser_drawio import Edge, ParsedDiagram
-from pid_dexpi_aas.symbol_library import build_primitives_for_class, compute_local_bounding_box
-from pid_dexpi_aas.tag_association import build_tag_lookup
+from pid_dexpi_aas.dexpi.build_model import BuildResult
+from pid_dexpi_aas.drawio.parser import Edge, ParsedDiagram
+from pid_dexpi_aas.render.symbol_library import build_primitives_for_class, compute_local_bounding_box
+from pid_dexpi_aas.drawio.tag_association import build_tag_lookup
 
 _BACKGROUND = Color(r=255, g=255, b=255)
 _PADDING = 20.0

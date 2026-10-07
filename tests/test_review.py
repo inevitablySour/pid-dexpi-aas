@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from pid_dexpi_aas.build_model import build_model
-from pid_dexpi_aas.decode_drawio import decode_drawio
-from pid_dexpi_aas.mapping import Category, classify_detection, classify_tag
-from pid_dexpi_aas.ocr_tags import assemble_tags, attach_tags, normalize_token
-from pid_dexpi_aas.parser_drawio import parse_drawio_xml_resolved
+from pid_dexpi_aas.dexpi.build_model import build_model
+from pid_dexpi_aas.drawio.decode import decode_drawio
+from pid_dexpi_aas.dexpi.mapping import Category, classify_detection, classify_tag
+from pid_dexpi_aas.image.ocr_tags import assemble_tags, attach_tags, normalize_token
+from pid_dexpi_aas.drawio.parser import parse_drawio_xml_resolved
 from pid_dexpi_aas.review import (
     SKIP, ReviewConnection, ReviewDiagram, ReviewSymbol, from_drawio, from_image, to_dexpi, validate_rows,
 )

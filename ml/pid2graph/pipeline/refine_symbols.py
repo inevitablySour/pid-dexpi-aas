@@ -91,8 +91,8 @@ def refine(gray: np.ndarray, symbols: list[dict], tokens: list[dict] | None = No
 def _classes_from_tags(syms: list[dict], tokens: list[dict], only: set | None = None) -> None:
     """A tag read INSIDE a symbol's box sets its class when the tag's kind is clear. Only
     inside: a tag next to a box may belong to the neighbour."""
-    from pid_dexpi_aas.mapping import classify_tag
-    from pid_dexpi_aas.ocr_tags import assemble_tags, attach_tags
+    from pid_dexpi_aas.dexpi.mapping import classify_tag
+    from pid_dexpi_aas.image.ocr_tags import assemble_tags, attach_tags
 
     tags = assemble_tags(tokens)
     boxes = {k: tuple(s["box"]) for k, s in enumerate(syms) if only is None or k in only}

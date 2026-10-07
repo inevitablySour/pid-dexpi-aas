@@ -23,8 +23,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from pid_dexpi_aas.mapping import Category, classify_tag
-from pid_dexpi_aas.parser_drawio import ParsedDiagram, Shape
+from pid_dexpi_aas.dexpi.mapping import Category, classify_tag
+from pid_dexpi_aas.drawio.parser import ParsedDiagram, Shape
 
 _CLOSED_STYLES = ("rounded=", "whiteSpace=", "ellipse", "rhombus", "shape=process", "triangle", "hexagon")
 _STROKE_RE = re.compile(r"(?:^|;)strokeColor=([^;]+)")
@@ -93,7 +93,7 @@ def _is_frame(shape: Shape, diagram: ParsedDiagram) -> bool:
     item_ids = {o.id for o in items}
     lines_inside = any(e.source in item_ids or e.target in item_ids for e in diagram.edges)
     if len(items) < 2 and not lines_inside:
-        from pid_dexpi_aas.sections import _is_title  # local: sections imports this module
+        from pid_dexpi_aas.drawio.sections import _is_title  # local: sections imports this module
         titled = any(not t.shape_token and (t.style or "").startswith("text;") and _is_title(t.text)
                      and _contains(shape, t) for t in diagram.shapes)
         if not titled:
@@ -195,7 +195,7 @@ def mark_plain_symbols(diagram: ParsedDiagram) -> None:
         is cleared, so tag association can't also hang it on a neighbouring symbol
       - boxes sharing a wall inside one container get an "adjacent" connection edge
     """
-    from pid_dexpi_aas.parser_drawio import Edge
+    from pid_dexpi_aas.drawio.parser import Edge
 
     plain = find_plain_symbols(diagram)
     if not plain:

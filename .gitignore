@@ -7,11 +7,10 @@ __pycache__/
 /research/
 /data/
 
-# review images from ml/pid2graph/render_labels.py
+# review images from ml/pid2graph/data/render_labels.py
 /label_check/
 
 # downloaded helper programs (scripts/serve_public.sh)
 /tools/
-# the shared app's link and password (scripts/serve_public.sh)
-/ml/serve_public.log
-/ml/serve_reload.log
+# run and server logs (the shared app's log holds its link and password)
+/ml/logs/

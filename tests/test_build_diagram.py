@@ -1,11 +1,11 @@
 from pathlib import Path
 
-from pid_dexpi_aas.build_diagram import _route_orthogonal, build_diagram
-from pid_dexpi_aas.build_model import build_model
-from pid_dexpi_aas.parser_drawio import parse_drawio_file
-from pid_dexpi_aas.render_svg import render_diagram_svg
+from pid_dexpi_aas.render.build_diagram import _route_orthogonal, build_diagram
+from pid_dexpi_aas.dexpi.build_model import build_model
+from pid_dexpi_aas.drawio.parser import parse_drawio_file
+from pid_dexpi_aas.render.render_svg import render_diagram_svg
 
-DECODED_DIR = Path(__file__).parent.parent / "handoff" / "decoded_xml"
+DECODED_DIR = Path(__file__).parent / "fixtures" / "decoded_xml"
 FIXTURE = DECODED_DIR / "PFD combined set up 301122__diagram0.xml"
 
 

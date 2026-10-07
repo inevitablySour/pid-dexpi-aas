@@ -8,10 +8,10 @@ incorrect" / "why did it skip so many" on the LightUp gramflow reactor file, whi
 """
 from pathlib import Path
 
-from pid_dexpi_aas.build_model import build_model
-from pid_dexpi_aas.parser_drawio import parse_drawio_file, parse_drawio_xml
+from pid_dexpi_aas.dexpi.build_model import build_model
+from pid_dexpi_aas.drawio.parser import parse_drawio_file, parse_drawio_xml
 
-DECODED_DIR = Path(__file__).parent.parent / "handoff" / "decoded_xml"
+DECODED_DIR = Path(__file__).parent / "fixtures" / "decoded_xml"
 GRAMFLOW = DECODED_DIR / "P&ID gramflow reactor V3__diagram0.xml"
 
 

@@ -29,8 +29,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from pid_dexpi_aas.parser_drawio import ParsedDiagram
-from pid_dexpi_aas.routing import route
+from pid_dexpi_aas.drawio.parser import ParsedDiagram
+from pid_dexpi_aas.render.routing import route
 
 # One colour per meaning, nothing shared: grey is only "flow unknown", red only "left out".
 FLOW_COLORS = {"arrow": (215, 80, 0), "implied": (150, 50, 200), "reviewer": (0, 150, 120), "": (95, 95, 95)}
@@ -159,8 +159,8 @@ def build_layers(diagram: ParsedDiagram, drawio_path: str | Path, boxes: list | 
       a reviewer-set direction in teal.
     names: {shape id: what to call it in hover texts} (default: its text).
     """
-    from pid_dexpi_aas.line_routes import routes_for, sheet_png
-    from pid_dexpi_aas.mapping import Category, map_shape
+    from pid_dexpi_aas.drawio.line_routes import routes_for, sheet_png
+    from pid_dexpi_aas.dexpi.mapping import Category, map_shape
 
     got = sheet_png(drawio_path, diagram.edges)
     routes = routes_for(drawio_path, diagram.edges)
@@ -390,7 +390,7 @@ def _rgb(c, a=None):
 
 def _flatten(im: Image.Image) -> Image.Image:
     """Dark ink on white, as the model saw it (sheet_image.to_dark_on_white)."""
-    from pid_dexpi_aas.sheet_image import to_dark_on_white
+    from pid_dexpi_aas.image.sheet_image import to_dark_on_white
     return to_dark_on_white(im)
 
 

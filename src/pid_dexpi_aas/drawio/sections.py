@@ -20,7 +20,7 @@ import math
 import re
 from dataclasses import dataclass, field
 
-from pid_dexpi_aas.parser_drawio import ParsedDiagram
+from pid_dexpi_aas.drawio.parser import ParsedDiagram
 
 _STROKE = re.compile(r"(?:^|;)strokeColor=([^;]+)")
 
@@ -50,8 +50,8 @@ def inside(p, poly) -> bool:
 
 
 def _is_title(text: str) -> bool:
-    from pid_dexpi_aas.mapping import classify_tag
-    from pid_dexpi_aas.spec_labels import parse_specs
+    from pid_dexpi_aas.dexpi.mapping import classify_tag
+    from pid_dexpi_aas.dexpi.spec_labels import parse_specs
 
     t = " ".join(text.split())
     if len(t) < 6 or len(t.split()) < 1:
@@ -81,7 +81,7 @@ def find_sections(diagram: ParsedDiagram, routes: dict) -> list[Section]:
     line weight: it encloses at least two items (or one item with lines, or one item and a
     title - "Injection point" around V201), and no line connects to the outline itself -
     pipes go to the items inside."""
-    from pid_dexpi_aas.plain_shapes import find_frames
+    from pid_dexpi_aas.drawio.plain_shapes import find_frames
 
     centre = lambda s: (s.x + s.width / 2, s.y + s.height / 2)
     symbols = [s for s in diagram.shapes if s.shape_token]

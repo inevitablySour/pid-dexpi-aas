@@ -7,7 +7,7 @@ desktop app for rendering (ml/tools/drawio.AppImage, see ml/README.md). For each
      grey-shaded vessels, filled valves, coloured columns, which the synthetic training
      data never shows.
   2. Labels come from export_pid2graph.labelled_symbols - the same labelling as the
-     (regenerated) exports/pid2graph_export files: only real symbols, with their
+     (regenerated) docs/examples/pid2graph_export files: only real symbols, with their
      PID2Graph class; connections keep their line type (dashed = "non-solid").
   3. draw.io's export origin is NOT simply the min of the parsed geometry (stray points
      stretch it), so the draw.io -> pixel offset is found by sliding the symbol boxes
@@ -19,7 +19,7 @@ desktop app for rendering (ml/tools/drawio.AppImage, see ml/README.md). For each
      connections whose two ends are both kept.
 
 Usage:
-    .venv/bin/python ml/pid2graph/make_team_data.py --out data/PID2Graph \
+    .venv/bin/python ml/pid2graph/data/make_team_data.py --out data/PID2Graph \
         --test "P&ID gramflow reactor V3"
 """
 from __future__ import annotations
@@ -34,14 +34,14 @@ from xml.etree import ElementTree as ET
 import numpy as np
 from PIL import Image
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "src"))
 
-from pid_dexpi_aas.decode_drawio import decode_drawio  # noqa: E402
+from pid_dexpi_aas.drawio.decode import decode_drawio  # noqa: E402
 from align import register_offset  # noqa: E402
-from pid_dexpi_aas.export_pid2graph import labelled_symbols  # noqa: E402
-from pid_dexpi_aas.line_routes import DRAWIO_APP  # noqa: E402  (finds the installed app)
-from pid_dexpi_aas.parser_drawio import parse_drawio_xml_resolved  # noqa: E402
+from pid_dexpi_aas.image.export_pid2graph import labelled_symbols  # noqa: E402
+from pid_dexpi_aas.drawio.line_routes import DRAWIO_APP  # noqa: E402  (finds the installed app)
+from pid_dexpi_aas.drawio.parser import parse_drawio_xml_resolved  # noqa: E402
 
 
 def render_png(drawio_path: Path, out_png: Path) -> None:
@@ -77,7 +77,7 @@ def tile_starts(total: int, tile: int, stride: int) -> list[int]:
 
 def process(drawio_path: Path, out_root: Path, subset: str, tile: int, stride: int) -> dict:
     diagram = parse_drawio_xml_resolved(decode_drawio(drawio_path)[0], source_file=drawio_path.name, drawio_path=drawio_path)
-    syms, edges = labelled_symbols(diagram)  # the same labelling as exports/pid2graph_export
+    syms, edges = labelled_symbols(diagram)  # the same labelling as docs/examples/pid2graph_export
 
     name = drawio_path.stem.strip()
     complete_dir = out_root / "Complete" / subset

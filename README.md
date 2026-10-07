@@ -4,7 +4,32 @@ INCEPTION/CHILL research minor. Converts the team's plant drawings (draw.io P&ID
 plus MEM4CHEM's PowerPoint P&ID) into DEXPI models via pyDEXPI, for later packaging into
 an AAS Type 1 submodel (IDTA 02012-1-0).
 
-See `handoff/HANDOFF.md` for full project context, decisions, and literature.
+See `docs/HANDOFF.md` for full project context, decisions, and literature.
+
+## Project layout
+
+```
+app.py                     the review app (Streamlit)
+launch_app.sh              one-click start (creates .venv, installs, opens the app)
+src/pid_dexpi_aas/         the converter
+  review.py                  review rows: draw.io / picture -> rows -> DEXPI
+  drawio/                    reading draw.io: parser, line routes, junctions, plant sections, tags, flow
+  dexpi/                     the DEXPI model: class mapping, builder, spec fields, Proteus export
+  render/                    pictures: re-drawn SVG, interactive flow map, line routing, check sheet
+  image/                     picture side: OCR tags, image normalisation, PID2Graph export
+  aas/                       DEXPI -> Asset Administration Shell (IDTA 02012-1-0)
+ml/                        the symbol model (own venv: ml/pid2graph/setup.sh)
+  pid2graph/model/           dataset, training, evaluator (copied into ml/relationformer to run)
+  pid2graph/pipeline/        picture -> symbols, pipes, tags (infer_sheet, trace_pipes, refine_symbols)
+  pid2graph/data/            training data from the team drawings, data checks
+  pid2graph/eval/            scoring scripts
+  pid2graph/*.sh, *.yaml     setup, cross-validation (run_folds.sh), final model (run_final.sh), configs
+  models/, logs/             trained models, run logs (not in git)
+scripts/                   get_drawio.sh, serve_public.sh (share the app), run_pipeline.py (command line)
+tests/                     test suite; tests/fixtures/ holds decoded team drawings
+docs/                      HANDOFF.md (project context), DEXPI class lists, an example PID2Graph export
+subprojects/               the team's drawings
+```
 
 ## Setting up on another machine
 
@@ -60,7 +85,7 @@ the XML. Reviews can be saved as JSON and resumed.
   training, see `ml/README.md`) - the app warns about this in image-only mode.
 
 Code: `src/pid_dexpi_aas/review.py` (review rows, cross-check, -> DEXPI),
-`ocr_tags.py` (OCR tokens -> tags -> symbols), `ml/pid2graph/infer_sheet.py` (model + OCR,
+`ocr_tags.py` (OCR tokens -> tags -> symbols), `ml/pid2graph/pipeline/infer_sheet.py` (model + OCR,
 runs in the ML venv).
 
 ## Sharing the app from this PC (free)
@@ -90,7 +115,7 @@ Every package is checked with the IDTA's aas-test-engines.
 Several drawings of one plant in one AAS (Model01, Model02, ...):
 
 ```bash
-.venv/bin/python -m pid_dexpi_aas.aas_export subprojects/Lumen/*.drawio -o lumen.aasx \
+.venv/bin/python -m pid_dexpi_aas.aas.export subprojects/Lumen/*.drawio -o lumen.aasx \
     --process-plant-name "Lumen gramflow setups" --project-name "INCEPTION CHILL"
 ```
 
@@ -135,11 +160,11 @@ suite (`tests/test_serialize_patch.py` once written) and re-checking whether ups
 shipped real piping/instrumentation export** - if they have, delete our patch and switch
 back to the stock `ProteusSerializer`.
 
-Location of the patch: `src/pid_dexpi_aas/proteus_patch.py`.
+Location of the patch: `src/pid_dexpi_aas/dexpi/proteus_patch.py`.
 
 ## P&ID re-render (SVG)
 
-`run_pipeline.py` also writes a `<name>.svg` re-rendering the built model back into a
+`scripts/run_pipeline.py` also writes a `<name>.svg` re-rendering the built model back into a
 picture, for visual "does this match my drawing" verification alongside the raw XML.
 
 **pyDEXPI ships no symbol geometry at all** - confirmed by direct inspection:
