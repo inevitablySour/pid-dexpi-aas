@@ -96,3 +96,21 @@ def test_compressed_drawio_file_exports_its_symbols(tmp_path):
     out = tmp_path / "x.graphml"
     export_drawio_file_to_pid2graph(src, out)
     assert nx.read_graphml(out).number_of_nodes() > 40
+
+
+def test_flow_arrows_are_labelled_and_split_their_line():
+    """arrows=True (Team v4 on): every arrowhead is an "arrow" symbol on its line, as in
+    OPEN100; the default labelling (Team v3) has none."""
+    import pytest
+    path = Path(__file__).resolve().parents[1] / "subprojects" / "LightUp" / "P&ID gramflow reactor V3.drawio"
+    diagram = parse_drawio_file(path) if path.exists() else None
+    if not diagram or not diagram.routes:
+        pytest.skip("needs the team drawing and the draw.io app (line routes)")
+    plain, plain_edges = labelled_symbols(diagram)
+    syms, edges = labelled_symbols(diagram, arrows=True)
+    arrows = {sid for sid, label, _, _ in syms if label == "arrow"}
+    assert not any(label == "arrow" for _, label, _, _ in plain)
+    assert len(arrows) >= 40 and len(syms) == len(plain) + len(arrows)
+    on_lines = {x for a, b, _ in edges for x in (a, b)} & arrows
+    assert len(on_lines) >= 0.9 * len(arrows)
+    assert all(abs((b[2] - b[0]) - 10) < 1e-6 for sid, _, b, _ in syms if sid in arrows)

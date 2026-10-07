@@ -260,9 +260,49 @@ def from_image(infer: dict, source_name: str) -> ReviewDiagram:
             line_type=c.get("line_type", "process"),
             confidence=f"{c['prob']:.2f}", notes="predicted by the model, not traced on the picture - check",
         ))
+    _bridge_arrows(review)
     _imply_flow(review)
     _exclude_dangling(review)
     return review
+
+
+def _bridge_arrows(review: ReviewDiagram) -> None:
+    """Flow arrows are labelled as nodes on the pipe (PID2Graph / OPEN100, and the team data
+    from Team v4 on), so the model and the tracer connect pump - arrow - tank. Arrows are
+    not DEXPI items: without this the pipe would be dropped with the arrow. Every two
+    items an arrow connects are joined directly (a chain of arrows is followed through)."""
+    arrows = {s.id for s in review.symbols if s.detected_as == "arrow"}
+    if not arrows:
+        return
+    links: dict = {}
+    for c in review.connections:
+        if c.from_id != c.to_id:
+            links.setdefault(c.from_id, []).append((c.to_id, c))
+            links.setdefault(c.to_id, []).append((c.from_id, c))
+    have = {frozenset((c.from_id, c.to_id)) for c in review.connections}
+    for arrow in sorted(arrows):
+        ends, lines, todo, seen = [], [], [arrow], {arrow}
+        while todo:  # the items around this arrow, through any arrows next to it
+            for other, c in links.get(todo.pop(), []):
+                lines.append(c)
+                if other in seen:
+                    continue
+                seen.add(other)
+                (todo if other in arrows else ends).append(other)
+        signal = any(c.line_type == "signal" for c in lines)
+        traced = all(c.source == "picture tracing" for c in lines)
+        for i, a in enumerate(sorted(ends)):
+            for b in sorted(ends)[i + 1:]:
+                if frozenset((a, b)) in have:
+                    continue
+                have.add(frozenset((a, b)))
+                review.connections.append(ReviewConnection(
+                    id=f"ac{len(review.connections)}", from_id=a, to_id=b,
+                    source="picture tracing" if traced else "image model",
+                    line_type="signal" if signal else "process",
+                    confidence="through a flow arrow",
+                    notes="" if traced else "predicted by the model, not traced on the picture - check",
+                ))
 
 
 def _imply_flow(review: ReviewDiagram) -> None:

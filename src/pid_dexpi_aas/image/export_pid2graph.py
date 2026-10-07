@@ -92,7 +92,7 @@ def rotated_box(shape: Shape) -> tuple[float, float, float, float]:
     return (shape.x, shape.y, shape.x + shape.width, shape.y + shape.height)
 
 
-def labelled_symbols(diagram: ParsedDiagram):
+def labelled_symbols(diagram: ParsedDiagram, arrows: bool = False, ink=None):
     """The symbols and connections of a drawing in PID2Graph terms - the ONE labelling
     used both for these exports and for the ML training data (make_team_data.py).
 
@@ -104,6 +104,12 @@ def labelled_symbols(diagram: ParsedDiagram):
 
     Caveat: connections come from the draw.io lines via the parser; about half of them had
     one loose end resolved to the nearest shape (not verified individually).
+
+    arrows=True also labels every drawn arrowhead as an "arrow" symbol and splits the
+    connection it sits on (A - arrow - B), as OPEN100 does (_arrow_labels). Off: the
+    labelling of the Team / Team v3 training data. ink(box) -> fraction of dark pixels in a
+    draw.io-coordinate box of the rendered drawing; with it the arrow boxes are fitted to
+    the drawn heads and arrows hidden under a shape are left out.
     """
     review = from_drawio(diagram)
     rows = {r.id: r for r in review.symbols}
@@ -114,14 +120,85 @@ def labelled_symbols(diagram: ParsedDiagram):
         if label is not None:
             symbols.append((_sanitize_id(shape.id), label, rotated_box(shape), shape.id))
     id_map = {orig: sid for sid, _, _, orig in symbols}
-    edges, seen = [], set()
+    edges = []  # (a, b, line, group): group = the draw.io line or pipe network it comes from
     for c in review.connections:
         if c.include and c.from_id in id_map and c.to_id in id_map and c.from_id != c.to_id:
             a, b = sorted((id_map[c.from_id], id_map[c.to_id]))
-            if (a, b) not in seen:  # parallel lines between one pair -> one connection
-                seen.add((a, b))
-                edges.append((a, b, "non-solid" if c.line_type == "signal" else "solid"))
-    return symbols, edges
+            edges.append((a, b, "non-solid" if c.line_type == "signal" else "solid", c.id.split(":")[0]))
+    if arrows:
+        _arrow_labels(diagram, symbols, edges, id_map, ink)
+    out, seen = [], set()
+    for a, b, line, _ in edges:
+        key = tuple(sorted((a, b)))
+        if a != b and key not in seen:  # parallel lines between one pair -> one connection
+            seen.add(key)
+            out.append((key[0], key[1], line))
+    return symbols, out
+
+
+ARROW_LENGTH = 10.0  # box of a draw.io "classic" arrowhead (size 6, stroke 1), drawing units
+HEAD_SPAN = (-2, 8)  # where a head lies along its line, past the route end (measured on LightUp)
+
+
+def _wide_at(ink, x: float, y: float, dx: float, dy: float) -> bool:
+    """Is the drawing wider than a plain line at (x, y), across the direction (dx, dy)?"""
+    return ink([(x - dy * o, y + dx * o) for o in (-3, -2, 2, 3)]) >= 0.75
+
+
+def _arrow_labels(diagram: ParsedDiagram, symbols: list, edges: list, id_map: dict, ink=None) -> None:
+    """Every arrowhead drawn at a line end becomes an "arrow" symbol: a box over the head.
+    The line's connections are split at it - OPEN100 labels arrows as nodes on the pipe (symbol - arrow - symbol), not as decoration. The arrow sits between the
+    symbol at its end of the line (or, at a tee, the line's other end) and the rest; on a
+    pipe network every connection of that symbol through the network is split.
+    symbols / edges are extended in place."""
+    for e in diagram.edges:
+        route = (diagram.routes or {}).get(e.id)
+        if e.is_decorative or not route or len(route) < 2:
+            continue
+        group = e.merged_into or e.id
+        for end, drawn in ((0, e.has_start_arrow), (1, e.has_end_arrow)):
+            if not drawn:
+                continue
+            pts = route if end == 1 else route[::-1]
+            (tx, ty) = pts[-1]
+            prev = next(((x, y) for x, y in reversed(pts[:-1]) if (x, y) != (tx, ty)), None)
+            if prev is None:
+                continue
+            dx, dy = tx - prev[0], ty - prev[1]
+            n = (dx * dx + dy * dy) ** 0.5
+            dx, dy = dx / n, dy / n
+            # draw.io stops the line where an end head starts: the head mostly lies just past
+            # the route end; some (start arrows) lie over the line's last stretch instead -
+            # with the rendered drawing (ink) the side with the head wins, and a head that
+            # is nowhere to be seen (under a shape) is not labelled
+            h = ARROW_LENGTH / 2
+            lo, hi = HEAD_SPAN
+            spots = [(tx + dx * (lo + hi) / 2, ty + dy * (lo + hi) / 2),
+                     (tx - dx * h, ty - dy * h)]  # head over the last stretch
+            if ink is not None:
+                ahead = sum(_wide_at(ink, tx + dx * t, ty + dy * t, dx, dy) for t in range(lo, hi + 1))
+                behind = sum(_wide_at(ink, tx - dx * t, ty - dy * t, dx, dy) for t in range(-lo, hi + 3))
+                if max(ahead, behind) < 2:
+                    continue
+                if behind > ahead:
+                    spots.reverse()
+            cx, cy = spots[0]
+            sid = f"{_sanitize_id(e.id)}_arrow{end}"
+            symbols.append((sid, "arrow", (cx - h, cy - h, cx + h, cy + h), f"{e.id}:arrow{end}"))
+            here, other = (e.target, e.source) if end == 1 else (e.source, e.target)
+            near = id_map.get(here) or id_map.get(other)
+            if near is None:
+                continue
+            if id_map.get(here) is None and e.merged_into is None:
+                # a plain line whose arrow end is on no labelled symbol (a stream label):
+                # the arrow is that end
+                edges.append((near, sid, "non-solid" if e.is_dashed else "solid", group))
+                continue
+            for k, (a, b, line, g) in enumerate(list(edges)):
+                if g == group and near in (a, b):
+                    far = b if a == near else a
+                    edges[k] = (sid, far, line, g)
+                    edges.append((near, sid, line, g))
 
 
 def _sanitize_id(shape_id: str) -> str:

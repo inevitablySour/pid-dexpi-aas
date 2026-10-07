@@ -17,6 +17,9 @@ desktop app for rendering (ml/tools/drawio.AppImage, see ml/README.md). For each
      evaluation) and 1500 px patches at a 500 px stride (Patched/<subset>/<name>/<n>.*,
      PID2Graph's own layout), keeping symbols >= 50% inside a patch (clipped) and
      connections whose two ends are both kept.
+  5. Flow arrows (unless --no-arrows): every arrowhead visible in the rendering is labelled
+     "arrow" and splits the line it sits on, as in OPEN100 (labelled_symbols(arrows=True)).
+     Team / Team v3 were made without them.
 
 Usage:
     .venv/bin/python ml/pid2graph/data/make_team_data.py --out data/PID2Graph \
@@ -49,7 +52,7 @@ def render_png(drawio_path: Path, out_png: Path) -> None:
                     "-o", str(out_png), str(drawio_path)], check=True, capture_output=True)
 
 
-def process(drawio_path: Path, out_root: Path, subset: str, tile: int, stride: int) -> dict:
+def process(drawio_path: Path, out_root: Path, subset: str, tile: int, stride: int, arrows: bool = True) -> dict:
     diagram = parse_drawio_xml_resolved(decode_drawio(drawio_path)[0], source_file=drawio_path.name, drawio_path=drawio_path)
     syms, edges = labelled_symbols(diagram)  # the same labelling as docs/examples/pid2graph_export
 
@@ -59,11 +62,20 @@ def process(drawio_path: Path, out_root: Path, subset: str, tile: int, stride: i
         render_png(drawio_path, png_tmp)
         ox, oy, cov = register_offset([b for _, _, b, _ in syms], png_tmp)
         sheet = Image.open(png_tmp).convert("RGB")
+    if arrows:  # the heads are fitted to the rendered ink, so this comes after registration
+        dark = np.asarray(sheet.convert("L")) < 128
+
+        def ink(points):
+            inside = [dark[int(round(y - oy)), int(round(x - ox))] for x, y in points
+                      if 0 <= round(y - oy) < dark.shape[0] and 0 <= round(x - ox) < dark.shape[1]]
+            return float(np.mean(inside)) if inside else 0.0
+        syms, edges = labelled_symbols(diagram, arrows=True, ink=ink)
     px = [(sid, lab, (b[0] - ox, b[1] - oy, b[2] - ox, b[3] - oy)) for sid, lab, b, _ in syms]
     # the same writer as pictures reviewed in the app (pid_dexpi_aas.image.training_export)
     n = write_sheet(dir_writer(out_root), sheet, name, subset, px, edges, tile, stride)
     W, H = sheet.size
     return {"file": drawio_path.name, "subset": subset, "size": (W, H), "symbols": len(px), "edges": len(edges),
+            "arrows": sum(lab == "arrow" for _, lab, _ in px),
             "patches": n, "offset": (round(ox), round(oy)), "ink_coverage": round(cov, 3)}
 
 
@@ -77,6 +89,7 @@ def main() -> None:
     ap.add_argument("--subset", default="Team",
                     help="subset name; the held-out drawing goes to '<subset> test'. Use a new name "
                          "(e.g. 'Team v2') to regenerate without touching data a running training reads")
+    ap.add_argument("--no-arrows", action="store_true", help="no flow-arrow labels (as Team / Team v3)")
     ap.add_argument("--tile", type=int, default=1500)
     ap.add_argument("--stride", type=int, default=500)
     args = ap.parse_args()
@@ -84,7 +97,7 @@ def main() -> None:
         if path.stem.strip() in [k.strip() for k in args.skip]:
             continue
         subset = f"{args.subset} test" if path.stem.strip() in [t.strip() for t in args.test] else args.subset
-        print(process(path, Path(args.out), subset, args.tile, args.stride), flush=True)
+        print(process(path, Path(args.out), subset, args.tile, args.stride, not args.no_arrows), flush=True)
 
 
 if __name__ == "__main__":

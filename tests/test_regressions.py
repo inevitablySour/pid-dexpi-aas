@@ -703,3 +703,16 @@ def test_drawio_label_export_keeps_transparent_picture_white(tmp_path):
     xml = review_to_drawio(review)
     pic = Image.open(io.BytesIO(base64.b64decode(re.search(r"data:image/png,([^;]+);", xml).group(1))))
     assert pic.getpixel((5, 5)) == (255, 255, 255) and pic.getpixel((200, 150)) == (0, 0, 0)
+
+
+def test_image_connections_through_a_flow_arrow_are_kept():
+    """The model connects pump - arrow - tank (arrows are nodes in the training labels);
+    arrows are not DEXPI items, so the pump - tank pipe must be bridged, not dropped."""
+    from pid_dexpi_aas.review import from_image
+    sym = lambda i, cls, x: {"id": i, "class": cls, "box": [x, 0, x + 50, 50], "score": 0.9}
+    infer = {"symbols": [sym("p", "pump", 0), sym("a", "arrow", 100), sym("t", "tank", 200)],
+             "connections": [{"from": "p", "to": "a", "prob": 0.9}, {"from": "a", "to": "t", "prob": 0.8}],
+             "image_size": [300, 50]}
+    review = from_image(infer, "x.png")
+    kept = {frozenset((c.from_id, c.to_id)) for c in review.connections if c.include}
+    assert kept == {frozenset(("p", "t"))}
