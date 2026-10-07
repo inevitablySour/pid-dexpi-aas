@@ -24,7 +24,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "aas-test-engines"]
+# scipy + scikit-image: the picture-side tests (pipe tracer, symbol fixes) - the app itself does not need them
+dev = ["pytest", "aas-test-engines", "scipy", "scikit-image"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
