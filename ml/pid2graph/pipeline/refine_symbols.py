@@ -2,8 +2,9 @@
 are merged and before the pipe tracer runs. Four fixes, measured on the team sheets
 (eval_refine.py), where tanks were the weakest class:
 
-  1. tag: a tag read inside a box says what it is (P101 a pump, V101 a tank, FI 102 an
-     instrument) - the model calls pumps on unfamiliar sheets something else;
+  1. tag: a tag read inside a box says what it is (P101 a pump, V101 a tank) - the model
+     calls pumps on unfamiliar sheets something else. Not for instrument balloons: a tag in
+     a circle names a device (ISA), it does not change the circle's class;
   2. snap: a tank's box is fitted to the closed outline drawn around it - large vessels
      seen in one tile, or cut at a tile edge, came out loose (scored at IoU 0.5-0.95);
   3. merge: tank boxes that snap to the same outline are one tank (a tall vessel came out
@@ -98,8 +99,11 @@ def _classes_from_tags(syms: list[dict], tokens: list[dict], only: set | None = 
     boxes = {k: tuple(s["box"]) for k, s in enumerate(syms) if only is None or k in only}
     attached = attach_tags(boxes, tags, classes={k: syms[k]["class"] for k in boxes})
     for k, (tag, how) in attached.items():
-        if how != "inside" or syms[k]["class"] == "inlet/outlet":
-            continue  # text in an off-page arrow names where the line goes, not the arrow
+        if how != "inside" or syms[k]["class"] in ("inlet/outlet", "instrumentation"):
+            # text in an off-page arrow names where the line goes, not the arrow; and a circle
+            # with a tag in it is an instrument balloon (ISA) - "PSV 1212" in a balloon names
+            # the safety valve drawn next to it (OPEN100), it does not make the balloon a valve
+            continue
         kind, dexpi_class, _ = classify_tag(tag.text)
         new = _TAG_KIND.get(kind) or (_TAG_EQUIPMENT.get(dexpi_class) if kind == "equipment" else None)
         if new and new != syms[k]["class"]:
