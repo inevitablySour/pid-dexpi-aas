@@ -14,3 +14,4 @@ __pycache__/
 /tools/
 # the shared app's link and password (scripts/serve_public.sh)
 /ml/serve_public.log
+/ml/serve_reload.log
