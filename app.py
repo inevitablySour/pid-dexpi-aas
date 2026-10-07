@@ -1595,23 +1595,36 @@ with panel_col:
 # ---------------------------------------------------------------------------- build ---
 st.markdown("##### 3 · Build the DEXPI file and the AAS")
 with st.expander("AAS details (Asset Administration Shell, IDTA 02012-1-0) - optional, used for the .aasx"):
-    st.caption("Describes the plant this P&ID belongs to. Everything is optional; filled-in fields go into the "
-               "AAS's PlantMetadata and ModelMetadata. The DEXPI file goes inside the AAS package, with every tagged "
-               "item listed so the digital twins can find it by tag.")
-    a1, a2 = st.columns(2)
+    st.caption("Describes the plant this P&ID belongs to. The AAS standard requires none of these fields - the parts "
+               "it does require (the DEXPI file, its model entry) are made for you. Filled-in fields go into the AAS's "
+               "PlantMetadata and ModelMetadata.")
     stem_default = Path(review.source_name).stem.strip()
+    st.markdown("**Recommended**")
+    r1, r2 = st.columns(2)
+    plant_name = r1.text_input("Plant name", stem_default, key="aas_plant",
+                               help="The AAS's ids and every item's id ('<plant>:asset:<tag>') are built from it: give "
+                                    "all drawings of one plant the same plant name, so the same valve or tank gets the "
+                                    "same id in each.")
+    drawing_number = r2.text_input("Drawing number", stem_default, key="aas_drawing",
+                                   help="Tells the drawings of one plant apart in its AAS")
+    if plant_name.strip() == stem_default:
+        st.caption("ℹ️ The plant name is still the file name. Set the real plant name, so drawings of the same plant "
+                   "share item ids.")
+    st.markdown("**Optional**")
+    o1, o2, o3 = st.columns(3)
     aas_plant = {
-        "ProcessPlantName": a1.text_input("Plant name", stem_default, key="aas_plant"),
-        "PlantSectionName": a2.text_input("Plant section", "", key="aas_section"),
-        "ProjectName": a1.text_input("Project", "", key="aas_project"),
-        "EnterpriseName": a2.text_input("Organisation", "", key="aas_enterprise"),
-        "SiteName": a1.text_input("Site", "", key="aas_site"),
+        "ProcessPlantName": plant_name,
+        "PlantSectionName": o1.text_input("Plant section", "", key="aas_section"),
+        "ProjectName": o2.text_input("Project", "", key="aas_project"),
+        "EnterpriseName": o3.text_input("Organisation", "", key="aas_enterprise"),
+        "SiteName": o1.text_input("Site", "", key="aas_site"),
     }
     aas_model_meta = {
-        "DrawingNumber": a2.text_input("Drawing number", stem_default, key="aas_drawing"),
-        "CreatorName": a1.text_input("Drawn by", "", key="aas_creator"),
-        "CheckerName": a2.text_input("Checked by", "", key="aas_checker"),
+        "DrawingNumber": drawing_number,
+        "CreatorName": o2.text_input("Drawn by", "", key="aas_creator"),
+        "CheckerName": o3.text_input("Checked by", "", key="aas_checker"),
     }
+    st.markdown("**Package**")
     aas_version = st.radio("AAS version", ["3.0", "3.1"], horizontal=True, key="aas_version",
                            help="3.0: what IDTA 02012-1-0 was published for, read by most AAS software, checked with the "
                                 "IDTA's own test engine. 3.1: the newest metamodel - check that your AAS software reads it. "
