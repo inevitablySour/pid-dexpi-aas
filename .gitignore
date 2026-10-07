@@ -14,3 +14,6 @@ __pycache__/
 /tools/
 # run and server logs (the shared app's log holds its link and password)
 /ml/logs/
+
+# pictures being labelled in draw.io (pid_dexpi_aas.image.drawio_labels)
+/labelling/

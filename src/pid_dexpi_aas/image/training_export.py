@@ -94,6 +94,20 @@ def write_sheet(write, sheet: Image.Image, name: str, subset: str, symbols: list
     return n
 
 
+def normalise_scale(sheet: Image.Image, symbols: list, edges: list):
+    """Scale a picture and its labels so the median symbol is ~TARGET_SYMBOL_PX (what the
+    model is trained to see), whatever the scan resolution. -> (sheet, symbols, edges, scale)"""
+    sizes = [max(b[2] - b[0], b[3] - b[1]) for _, _, b in symbols]
+    scale = max(0.4, min(3.0, TARGET_SYMBOL_PX / statistics.median(sizes))) if sizes else 1.0
+    if abs(scale - 1.0) <= 0.02:
+        return sheet, symbols, edges, 1.0
+    sheet = sheet.resize((round(sheet.width * scale), round(sheet.height * scale)), Image.LANCZOS)
+    symbols = [(sid, lab, tuple(v * scale for v in b)) for sid, lab, b in symbols]
+    edges = [(e[0], e[1], e[2], [(x * scale, y * scale) for x, y in e[3]] if len(e) > 3 and e[3] else None)
+             for e in edges]
+    return sheet, symbols, edges, scale
+
+
 def dir_writer(root: Path):
     def write(rel: str, data: bytes) -> None:
         p = Path(root) / rel
@@ -168,15 +182,9 @@ def review_training_zip(review, subset: str = "Reviewed", name: str | None = Non
     symbols, edges = review_labels(review)
     if not symbols:
         raise ValueError("no symbols to export")
-    sizes = [max(b[2] - b[0], b[3] - b[1]) for _, _, b in symbols]
-    scale = max(0.4, min(3.0, TARGET_SYMBOL_PX / statistics.median(sizes)))
     with Image.open(review.image_path) as im:
         sheet = im.convert("RGB")
-    if abs(scale - 1.0) > 0.02:
-        sheet = sheet.resize((round(sheet.width * scale), round(sheet.height * scale)), Image.LANCZOS)
-    sc = lambda b: tuple(v * scale for v in b)
-    symbols = [(sid, lab, sc(b)) for sid, lab, b in symbols]
-    edges = [(a, b, line, [(x * scale, y * scale) for x, y in path] if path else None) for a, b, line, path in edges]
+    sheet, symbols, edges, scale = normalise_scale(sheet, symbols, edges)
     name = (name or Path(review.source_name).stem).strip()
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:

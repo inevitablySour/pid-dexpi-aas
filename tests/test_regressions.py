@@ -636,3 +636,36 @@ def test_reviewed_picture_exports_as_training_data(tmp_path):
     (_, _, d), = g.edges(data=True)
     assert d["edge_label"] == "solid" and len(__import__("json").loads(d["path"])) == 2  # a straight pipe: 2 corners
     assert any(n.startswith("Patched/Reviewed test/sheet/") for n in z.namelist())
+
+
+def test_labelling_drawio_round_trip_keeps_edits(tmp_path):
+    """review -> .drawio -> (edits as in draw.io) -> labels: resized boxes, pasted legend
+    boxes, bend points, dashed lines and deletions all come back."""
+    from xml.etree import ElementTree as ET
+
+    from PIL import Image
+
+    from pid_dexpi_aas.image.drawio_labels import drawio_to_labels, review_to_drawio
+    from pid_dexpi_aas.review import ReviewConnection, ReviewDiagram, ReviewSymbol
+
+    img = tmp_path / "sheet.png"
+    Image.new("RGB", (800, 500), "white").save(img)
+    review = ReviewDiagram(source_name="sheet.png", image_path=str(img), image_size=(800, 500), symbols=[
+        ReviewSymbol(id="v", source="image model", box=[100, 100, 180, 180], detected_as="valve", dexpi_class="GateValve", tag="GV1"),
+        ReviewSymbol(id="t", source="image model", box=[500, 100, 580, 180], detected_as="tank", dexpi_class="Tank", tag="T1"),
+    ], connections=[ReviewConnection(id="c", from_id="v", to_id="t", path=[(180, 140), (300, 140), (300, 200), (500, 200)])])
+    root = ET.fromstring(review_to_drawio(review))
+    cells = root.find(".//root")
+    _, syms, edges, notes = drawio_to_labels(ET.tostring(root, encoding="unicode"))
+    assert len(syms) == 2 and len(edges) == 1 and notes == [] and len(edges[0][3]) == 4  # path kept
+    tank = next(o for o in cells.findall("object") if o.get("pid2graph_class") == "tank" and o.find("mxCell").get("parent") == "labels")
+    tank.find("mxCell/mxGeometry").set("width", "120")                      # resize
+    line = next(c for c in cells.findall("mxCell") if c.get("edge") == "1")
+    line.set("style", line.get("style") + "dashed=1;")                      # signal line
+    pump = ET.fromstring(ET.tostring(next(o for o in cells.findall("object") if o.get("id", "").startswith("legend_")
+                                          and o.get("pid2graph_class") == "pump")))
+    pump.set("id", "p"); pump.find("mxCell").set("parent", "labels"); cells.append(pump)  # copied from the legend
+    _, syms, edges, _ = drawio_to_labels(ET.tostring(root, encoding="unicode"))
+    assert sorted(c for _, c, _ in syms) == ["pump", "tank", "valve"]
+    assert any(c == "tank" and b[2] - b[0] == 120 for _, c, b in syms)
+    assert edges[0][2] == "non-solid"

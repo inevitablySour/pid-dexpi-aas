@@ -1632,6 +1632,19 @@ with st.expander("AAS details (Asset Administration Shell, IDTA 02012-1-0) - opt
     aas_base = st.text_input("Id prefix for the AAS, its Submodel and the items (leave empty for an automatic one)",
                              "", key="aas_base", help="e.g. https://your-lab.example/plants/lightup - the twins look "
                              "items up by '<prefix>:asset:<tag>'")
+if review.image_path:
+    with st.expander("Use this picture as training data (label it in draw.io)"):
+        st.caption("Training labels need exact boxes, pipe paths and solid / dashed lines - edit those in draw.io: "
+                   "download the picture with your checked items and lines as a draw.io file, correct it there "
+                   "(the file explains how), then turn it into training data with "
+                   "`python -m pid_dexpi_aas.image.drawio_labels <file.drawio>` (add `--test` to keep it as a "
+                   "held-out test drawing).")
+        from pid_dexpi_aas.image.drawio_labels import review_to_drawio
+        # one click: the file is made when the button is pressed, and the page does not rerun
+        st.download_button("Download for labelling (.drawio)", lambda r=review: review_to_drawio(r).encode(),
+                           file_name=f"{Path(review.source_name).stem}_labels.drawio", mime="application/xml",
+                           on_click="ignore", key="label_dl")
+
 b1, b2 = st.columns([1, 1])
 with b2:
     st.download_button("Save review (.json) to continue later", review_to_json(review),
