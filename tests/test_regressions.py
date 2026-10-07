@@ -685,3 +685,21 @@ def test_added_drawings_are_listed_and_removed_safely(tmp_path):
         remove_reviewed(tmp_path, "Team v3", "Sheet - 1")  # only added drawings can be removed
     remove_reviewed(tmp_path, "Reviewed test", "Sheet - 1")
     assert list_reviewed(tmp_path) == [] and not any(tmp_path.rglob("*.png"))
+
+
+def test_drawio_label_export_keeps_transparent_picture_white(tmp_path):
+    """A transparent picture went black in the .drawio (plain RGB convert), hiding black pipes."""
+    import base64, io, re
+    from types import SimpleNamespace
+    from PIL import Image, ImageDraw
+    from pid_dexpi_aas.image.drawio_labels import review_to_drawio
+    im = Image.new("RGBA", (400, 300), (0, 0, 0, 0))
+    ImageDraw.Draw(im).line((10, 150, 390, 150), fill=(0, 0, 0, 255), width=3)
+    im.save(tmp_path / "t.png")
+    mk = lambda i, b: SimpleNamespace(id=i, tag=i, box=b, detected_as="valve", source="image model",
+                                      include=True, dexpi_class="GateValve")
+    review = SimpleNamespace(image_path=str(tmp_path / "t.png"), symbols=[mk("a", (50, 120, 110, 180))],
+                             connections=[], source_name="t.png")
+    xml = review_to_drawio(review)
+    pic = Image.open(io.BytesIO(base64.b64decode(re.search(r"data:image/png,([^;]+);", xml).group(1))))
+    assert pic.getpixel((5, 5)) == (255, 255, 255) and pic.getpixel((200, 150)) == (0, 0, 0)

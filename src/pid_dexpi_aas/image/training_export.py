@@ -26,6 +26,8 @@ from xml.etree import ElementTree as ET
 
 from PIL import Image
 
+from pid_dexpi_aas.image.sheet_image import to_dark_on_white
+
 NS = "http://graphml.graphdrawing.org/xmlns"
 TARGET_SYMBOL_PX = 85.0  # median symbol size in the team training tiles (draw.io rendered at scale 1)
 
@@ -183,7 +185,7 @@ def review_training_zip(review, subset: str = "Reviewed", name: str | None = Non
     if not symbols:
         raise ValueError("no symbols to export")
     with Image.open(review.image_path) as im:
-        sheet = im.convert("RGB")
+        sheet = to_dark_on_white(im)  # what the model sees; a plain RGB convert blackens transparency
     sheet, symbols, edges, scale = normalise_scale(sheet, symbols, edges)
     name = (name or Path(review.source_name).stem).strip()
     buf = io.BytesIO()

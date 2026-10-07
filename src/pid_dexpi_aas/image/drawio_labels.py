@@ -24,6 +24,8 @@ from xml.etree import ElementTree as ET
 
 from PIL import Image
 
+from pid_dexpi_aas.image.sheet_image import to_dark_on_white
+
 MAX_PIXELS = 60_000_000  # a picture inside an uploaded file: larger is refused (memory)
 
 CLASSES = {  # PID2Graph class -> box colour
@@ -54,12 +56,12 @@ def review_to_drawio(review, name: str | None = None) -> str:
     with Image.open(review.image_path) as im:
         W, H = im.size
         buf = io.BytesIO()
-        im.convert("RGB").save(buf, format="PNG")
+        to_dark_on_white(im).save(buf, format="PNG")  # transparent pixels would turn black
     data = base64.b64encode(buf.getvalue()).decode()
 
     root = ET.Element("mxGraphModel", dx="0", dy="0", grid="0", gridSize="10", guides="1", tooltips="1",
                       connect="1", arrows="1", fold="1", page="0", pageScale="1", pageWidth=str(W), pageHeight=str(H),
-                      math="0", shadow="0")
+                      math="0", shadow="0", background="#ffffff")  # white canvas in dark theme too
     cells = ET.SubElement(root, "root")
     ET.SubElement(cells, "mxCell", id="0")
     ET.SubElement(cells, "mxCell", id="picture", value="Picture (locked)", parent="0", style="locked=1;")
@@ -103,9 +105,12 @@ def review_to_drawio(review, name: str | None = None) -> str:
         "<b>Correct the labels</b><br>- resize / move boxes to fit each symbol<br>- drag a line's bend points onto "
         "the drawn pipe (click a line, drag the handles; drag the middle of a segment for a new bend)<br>- signal "
         "line: Edit Style, dashed=1 (or the Line dashed option)<br>- missed item: copy the box of its class below, "
-        "paste, place<br>- missing line: hover a box, drag from its blue arrow to the other box<br>- wrong item or "
-        "line: select, Delete<br>The picture layer is locked."))
-    note_h = note_font * 16  # ~13 lines of wrapped text
+        "paste, place<br>- <b>flow arrows</b>: every arrowhead drawn on a pipe - mid-pipe or at its end, also "
+        "where it meets equipment - gets a tight pink 'arrow' box<br>- missing line: hover the box it starts at "
+        "until small blue arrows appear on its sides, drag one onto the other box (lines must be attached to two "
+        "boxes; a free-drawn line is skipped)<br>- wrong item or line: select, Delete<br>The picture layer is "
+        "locked."))
+    note_h = note_font * 23  # ~19 lines of wrapped text
     ET.SubElement(note, "mxGeometry", x=f"{lx:.1f}", y="0", width=f"{note_w:.1f}", height=f"{note_h:.1f}",
                   **{"as": "geometry"})
     for k, cls in enumerate(CLASSES):
