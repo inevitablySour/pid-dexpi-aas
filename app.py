@@ -165,8 +165,10 @@ st.html("""<style>
 /* the edit panel stays in view while scrolling the page */
 div[data-testid="stColumn"]:has(.edit-panel) {position: sticky; top: 3.75rem; align-self: flex-start; z-index: 2;}
 /* the panel's tabs fit its width */
-div[data-testid="stColumn"]:has(.edit-panel) [role="tablist"] {gap: 0.75rem;}
-div[data-testid="stColumn"]:has(.edit-panel) [role="tab"] p {font-size: 0.85rem;}
+div[data-testid="stColumn"]:has(.edit-panel) [role="tablist"] {gap: 0.75rem; flex-wrap: nowrap; overflow-x: auto;
+  overflow-y: hidden; scrollbar-width: thin;}
+div[data-testid="stColumn"]:has(.edit-panel) [role="tab"] {flex: 0 0 auto;}
+div[data-testid="stColumn"]:has(.edit-panel) [role="tab"] p {font-size: 0.85rem; white-space: nowrap;}
 div[data-testid="stMetric"] {padding: 0;}
 div[data-testid="stMetricValue"] {font-size: 1.6rem;}
 </style>""")
