@@ -194,7 +194,7 @@ with st.sidebar:
                                        "needed) but takes minutes per sheet.")
     if pick_device(device) == "cpu":
         st.warning(f"**Pictures are slow right now.** {cpu_reason(device)} "
-                   f"A picture takes **{CPU_MINUTES}**. draw.io files are not affected.", icon="⏳")
+                   f"A picture takes **{CPU_MINUTES}**. draw.io files are not affected.")
     st.divider()
     st.header("Saved review")
     review_upload = st.file_uploader("Resume a saved review (.json)", type=["json"])
@@ -271,7 +271,7 @@ def build_review() -> ReviewDiagram:
         if on == "cpu" and not _image_done(image_file.getvalue(), checkpoint):
             note.warning(f"**This will take {CPU_MINUTES}** - please keep this tab open. "
                          f"{cpu_reason(device)} If someone else's picture is being "
-                         "processed, yours starts right after it. The page fills in when it is done.", icon="⏳")
+                         "processed, yours starts right after it. The page fills in when it is done.")
         with st.spinner("Finding symbols, lines and tags in the picture "
                         + ("(about 15 seconds)..." if on == "cuda" else f"on the processor ({CPU_MINUTES})..."),
                         show_time=True):
@@ -1608,7 +1608,7 @@ with st.expander("AAS details (Asset Administration Shell, IDTA 02012-1-0) - opt
     drawing_number = r2.text_input("Drawing number", stem_default, key="aas_drawing",
                                    help="Tells the drawings of one plant apart in its AAS")
     if plant_name.strip() == stem_default:
-        st.caption("ℹ️ The plant name is still the file name. Set the real plant name, so drawings of the same plant "
+        st.caption("The plant name is still the file name. Set the real plant name, so drawings of the same plant "
                    "share item ids.")
     st.markdown("**Optional**")
     o1, o2, o3 = st.columns(3)
