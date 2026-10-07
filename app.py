@@ -71,9 +71,18 @@ HAS_GPU = shutil.which("nvidia-smi") is not None
 # visitors cannot point the app at files on this PC.
 PUBLIC = os.environ.get("APP_PUBLIC") == "1"
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
+CPU_MINUTES = "about 3 to 8 minutes"  # measured: ~5 min for an OPEN100 sheet with OCR on this PC's CPU
+def cpu_reason(choice: str) -> str:
+    if choice == "cpu":
+        return "Pictures are set to be processed on the processor (Model settings)."
+    if not HAS_GPU:
+        return "This computer has no NVIDIA graphics card, so pictures are processed on the processor."
+    return ("The graphics card is busy (a model is being trained on it), so pictures are processed on the "
+            "processor instead.")
 GPU_BUSY_MB = 1500  # another process holding this much GPU memory is a training run (desktop apps hold < 100)
 
 
+@st.cache_data(ttl=20, show_spinner=False)
 def gpu_busy() -> bool:
     """Is something else computing on the GPU? Free memory alone is no guide: a training
     run's use swings between ~2 and ~9 GB, so a moment with room says nothing."""
@@ -126,6 +135,9 @@ with st.sidebar:
             device = st.selectbox("Device", ["auto", "cuda", "cpu"] if HAS_GPU else ["cpu", "cuda"],
                                   help="auto: the GPU unless a training run is using it, else the CPU. CPU works (no NVIDIA GPU "
                                        "needed) but takes minutes per sheet.")
+    if pick_device(device) == "cpu":
+        st.warning(f"**Pictures are slow right now.** {cpu_reason(device)} "
+                   f"A picture takes **{CPU_MINUTES}**. draw.io files are not affected.", icon="⏳")
     st.divider()
     st.header("Saved review")
     review_upload = st.file_uploader("Resume a saved review (.json)", type=["json"])
@@ -148,6 +160,11 @@ def _digest(*parts: bytes) -> str:
 # Bump when the model's input handling changes, so results cached by an older version
 # are redone (v2: dark-theme exports keep their light lines - sheet_image.py; v3: traced pipes).
 INFER_VERSION = b"v4"
+
+
+def _image_done(image_bytes: bytes, checkpoint: str) -> bool:
+    """Already processed (no wait)?"""
+    return (WORK / f"{_digest(image_bytes, checkpoint.encode(), INFER_VERSION)}.json").exists()
 
 
 @st.cache_data(show_spinner=False)
@@ -193,15 +210,21 @@ def build_review() -> ReviewDiagram:
             st.error(f"Model checkpoint not found: {checkpoint}")
             st.stop()
         on = pick_device(device)
-        with st.spinner("Running the symbol model and OCR on the image "
-                        + ("(about 15 s on the GPU)..." if on == "cuda" else
-                           "on the CPU - the GPU is busy or absent, this takes a few minutes...")):
+        note = st.empty()
+        if on == "cpu" and not _image_done(image_file.getvalue(), checkpoint):
+            note.warning(f"**This will take {CPU_MINUTES}** - please keep this tab open. "
+                         f"{cpu_reason(device)} If someone else's picture is being "
+                         "processed, yours starts right after it. The page fills in when it is done.", icon="⏳")
+        with st.spinner("Finding symbols, lines and tags in the picture "
+                        + ("(about 15 seconds)..." if on == "cuda" else f"on the processor ({CPU_MINUTES})..."),
+                        show_time=True):
             try:
-                infer = run_image_model(image_file.getvalue(), image_file.name, checkpoint, device)
+                infer = run_image_model(image_file.getvalue(), image_file.name, checkpoint, on)
             except RuntimeError as exc:
                 st.error("Image model failed:")
                 st.code(str(exc))
                 st.stop()
+        note.empty()
         image_review = from_image(infer, image_file.name)
     if drawio_review and image_review:
         return cross_check(drawio_review, image_review, infer)
