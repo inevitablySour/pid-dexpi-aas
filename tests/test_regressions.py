@@ -669,3 +669,19 @@ def test_labelling_drawio_round_trip_keeps_edits(tmp_path):
     assert sorted(c for _, c, _ in syms) == ["pump", "tank", "valve"]
     assert any(c == "tank" and b[2] - b[0] == 120 for _, c, b in syms)
     assert edges[0][2] == "non-solid"
+
+
+def test_added_drawings_are_listed_and_removed_safely(tmp_path):
+    from PIL import Image
+
+    from pid_dexpi_aas.image.drawio_labels import safe_name
+    from pid_dexpi_aas.image.training_export import dir_writer, list_reviewed, remove_reviewed, write_sheet
+
+    assert safe_name("../../etc/passwd.drawio") == "passwd" and safe_name("..") == "drawing"
+    write_sheet(dir_writer(tmp_path), Image.new("RGB", (400, 300), "white"), "Sheet - 1", "Reviewed test",
+                [("n0", "valve", (10, 10, 60, 60))], [])
+    assert list_reviewed(tmp_path) == [{"name": "Sheet - 1", "subset": "Reviewed test", "tiles": 1}]
+    with pytest.raises(ValueError):
+        remove_reviewed(tmp_path, "Team v3", "Sheet - 1")  # only added drawings can be removed
+    remove_reviewed(tmp_path, "Reviewed test", "Sheet - 1")
+    assert list_reviewed(tmp_path) == [] and not any(tmp_path.rglob("*.png"))

@@ -198,6 +198,66 @@ with st.sidebar:
     st.divider()
     st.header("Saved review")
     review_upload = st.file_uploader("Resume a saved review (.json)", type=["json"])
+    st.divider()
+    st.header("Training data")
+    with st.expander("Add a drawing labelled in draw.io"):
+        st.caption("1. Upload a picture above, check it, and use 'Download for labelling (.drawio)' at the bottom. "
+                   "2. Correct boxes, lines and dashed / solid in draw.io (app.diagrams.net works). "
+                   "3. Upload the corrected file here to add it to the model's training data.")
+        label_upload = st.file_uploader("Corrected .drawio", type=["drawio", "xml"], key="label_upload")
+        show_training = st.checkbox("Show the drawings added so far", key="show_training")
+
+DATA_ROOT = ROOT / "data" / "PID2Graph"
+if label_upload is not None or show_training:
+    from pid_dexpi_aas.image.drawio_labels import drawio_to_labels, preview_png, safe_name
+    from pid_dexpi_aas.image.training_export import (dir_writer, list_reviewed, normalise_scale, remove_reviewed,
+                                                     write_sheet)
+    st.markdown("### Training data from labelled drawings")
+    if label_upload is not None:
+        try:
+            picture, t_syms, t_edges, t_notes = drawio_to_labels(label_upload.getvalue().decode("utf-8"))
+        except Exception as exc:  # not a labelling file, a damaged file, a picture too large
+            st.error(f"This file can't be read as a labelled drawing: {exc}. Use a file downloaded with "
+                     "'Download for labelling (.drawio)' and saved from draw.io.")
+            st.stop()
+        name = safe_name(label_upload.name.removesuffix(".drawio").removesuffix("_labels"))
+        classes = {c: sum(1 for _, k, _ in t_syms if k == c) for c in sorted({k for _, k, _ in t_syms})}
+        st.markdown(f"**{name}** - {len(t_syms)} items ({', '.join(f'{v} {k}' for k, v in classes.items())}), "
+                    f"{len(t_edges)} lines ({sum(1 for e in t_edges if e[2] == 'non-solid')} dashed)")
+        for note in t_notes:
+            st.warning(note)
+        st.image(preview_png(picture, t_syms, t_edges), caption="The labels as they will be learned: boxes coloured "
+                 "by class (green valve, blue instrument, orange tank, purple pump, grey general, brown inlet/outlet, "
+                 "pink arrow), red lines along their paths (dashed = signal). Fix anything wrong in draw.io first.")
+        c1, c2 = st.columns([2, 1], vertical_alignment="bottom")
+        use = c1.radio("Use it for", ["Training", "Held-out test (never trained on)"], horizontal=True, key="t_use",
+                       help="Held-out: a fixed set of unseen drawings every model is scored on. Keep a drawing in "
+                            "one of the two, never both.")
+        subset = "Reviewed" if use == "Training" else "Reviewed test"
+        existing = {(d["name"], d["subset"]) for d in list_reviewed(DATA_ROOT)}
+        other = "Reviewed test" if subset == "Reviewed" else "Reviewed"
+        if (name, other) in existing:
+            st.error(f"'{name}' is already added as {'held-out test' if other.endswith('test') else 'training'} data - "
+                     "remove it there first (a drawing must not be in both).")
+        elif c2.button("Replace it" if (name, subset) in existing else "Add to the training data", type="primary"):
+            pic, sy, ed, scale = normalise_scale(picture, t_syms, t_edges)
+            tiles = write_sheet(dir_writer(DATA_ROOT), pic, name, subset, sy, ed)
+            st.success(f"Added '{name}' as {'held-out test' if subset.endswith('test') else 'training'} data: "
+                       f"{tiles} tiles (scaled x{scale:.2f} to the model's symbol size).")
+    added = list_reviewed(DATA_ROOT)
+    st.markdown(f"**Added so far** ({len(added)})")
+    if not added:
+        st.caption("None yet.")
+    for d in added:
+        r1, r2, r3 = st.columns([4, 2, 1], vertical_alignment="center")
+        r1.write(d["name"])
+        r2.caption(f"{'held-out test' if d['subset'].endswith('test') else 'training'} · {d['tiles']} tiles")
+        if r3.button("Remove", key=f"rm_{d['subset']}_{d['name']}"):
+            remove_reviewed(DATA_ROOT, d["subset"], d["name"])
+            st.rerun()
+    st.caption("Training uses these after 'Patched/Reviewed' is added to the training config "
+               "(DATA.EXTRA_TRAIN_SUBSETS); held-out drawings are scored with eval_sheets.py --set reviewed.")
+    st.stop()
 
 if drawio_file is None and image_file is None and review_upload is None:
     st.info("Upload a draw.io file and/or a P&ID image in the sidebar to get started.")
@@ -1636,9 +1696,8 @@ if review.image_path:
     with st.expander("Use this picture as training data (label it in draw.io)"):
         st.caption("Training labels need exact boxes, pipe paths and solid / dashed lines - edit those in draw.io: "
                    "download the picture with your checked items and lines as a draw.io file, correct it there "
-                   "(the file explains how), then turn it into training data with "
-                   "`python -m pid_dexpi_aas.image.drawio_labels <file.drawio>` (add `--test` to keep it as a "
-                   "held-out test drawing).")
+                   "(the file explains how; app.diagrams.net works), then add it in the sidebar under "
+                   "Training data.")
         from pid_dexpi_aas.image.drawio_labels import review_to_drawio
         # one click: the file is made when the button is pressed, and the page does not rerun
         st.download_button("Download for labelling (.drawio)", lambda r=review: review_to_drawio(r).encode(),

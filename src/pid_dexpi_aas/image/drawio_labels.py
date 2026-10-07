@@ -24,6 +24,8 @@ from xml.etree import ElementTree as ET
 
 from PIL import Image
 
+MAX_PIXELS = 60_000_000  # a picture inside an uploaded file: larger is refused (memory)
+
 CLASSES = {  # PID2Graph class -> box colour
     "valve": "#00a651", "instrumentation": "#1f6fe5", "tank": "#f28c00", "pump": "#9b30d9",
     "general": "#6b6b6b", "inlet/outlet": "#8b5a2b", "arrow": "#e0004d",
@@ -146,7 +148,10 @@ def drawio_to_labels(xml_text: str):
         geo = cell.find("mxGeometry")
         if "image=data:image" in style and geo is not None:
             data = style.split("image=data:image/", 1)[1].split(",", 1)[1].split(";", 1)[0]
-            picture = Image.open(io.BytesIO(base64.b64decode(data))).convert("RGB")
+            img = Image.open(io.BytesIO(base64.b64decode(data)))
+            if img.width * img.height > MAX_PIXELS:
+                raise ValueError(f"the picture is too large ({img.width} x {img.height} px)")
+            picture = img.convert("RGB")
             continue
         if cell.get("vertex") == "1" and geo is not None and attrs.get("pid2graph_class"):
             if parent == "legend":
@@ -182,6 +187,44 @@ def drawio_to_labels(xml_text: str):
     return picture, out_syms, out_edges, notes
 
 
+def safe_name(name: str) -> str:
+    """A drawing name usable as a folder name: no path parts, nothing but letters, digits and
+    a few separators (an uploaded file names where its data is written)."""
+    import re
+    stem = Path(str(name)).name
+    for ext in (".drawio", ".xml"):
+        if stem.lower().endswith(ext):
+            stem = stem[: -len(ext)]
+    stem = re.sub(r"[^\w .()&+-]", "_", stem).strip(" .") or "drawing"
+    return stem[:120]
+
+
+def preview_png(picture: Image.Image, symbols: list, edges: list, max_side: int = 1800) -> bytes:
+    """The labels drawn over the picture, to check them before they become training data."""
+    from PIL import ImageDraw
+
+    k = min(1.0, max_side / max(picture.size))
+    img = picture.resize((round(picture.width * k), round(picture.height * k))) if k < 1 else picture.copy()
+    d = ImageDraw.Draw(img, "RGBA")
+    for a, b, line, path in edges:
+        pts = [(x * k, y * k) for x, y in path]
+        if line == "non-solid":
+            for (x1, y1), (x2, y2) in zip(pts, pts[1:]):  # dashed
+                n = max(1, int(((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5 // 8))
+                for i in range(0, n, 2):
+                    d.line([(x1 + (x2 - x1) * i / n, y1 + (y2 - y1) * i / n),
+                            (x1 + (x2 - x1) * (i + 1) / n, y1 + (y2 - y1) * (i + 1) / n)], fill=(212, 0, 0, 220), width=3)
+        else:
+            d.line(pts, fill=(212, 0, 0, 200), width=3)
+    for _, cls, (x1, y1, x2, y2) in symbols:
+        col = CLASSES.get(cls, "#6b6b6b")
+        rgb = tuple(int(col[i:i + 2], 16) for i in (1, 3, 5))
+        d.rectangle([x1 * k, y1 * k, x2 * k, y2 * k], outline=rgb + (255,), width=3)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def drawio_to_training(path: str | Path, out_root: str | Path, subset: str, name: str | None = None) -> dict:
     """Write a corrected labelling .drawio as PID2Graph data (sheet + tiles) under out_root."""
     from pid_dexpi_aas.image.training_export import dir_writer, normalise_scale, write_sheet
@@ -189,7 +232,7 @@ def drawio_to_training(path: str | Path, out_root: str | Path, subset: str, name
     path = Path(path)
     picture, symbols, edges, notes = drawio_to_labels(path.read_text(encoding="utf-8"))
     picture, symbols, edges, scale = normalise_scale(picture, symbols, edges)
-    name = (name or path.stem).strip()
+    name = safe_name(name or path.stem)
     tiles = write_sheet(dir_writer(Path(out_root)), picture, name, subset, symbols, edges)
     return {"name": name, "subset": subset, "scale": round(scale, 3), "symbols": len(symbols), "connections": len(edges),
             "classes": {c: sum(1 for _, k, _ in symbols if k == c) for c in sorted({k for _, k, _ in symbols})},

@@ -201,3 +201,28 @@ def review_training_zip(review, subset: str = "Reviewed", name: str | None = Non
                "classes": {lab: sum(1 for _, l, _ in symbols if l == lab)
                                                       for lab in sorted({l for _, l, _ in symbols})}}
     return buf.getvalue(), summary
+
+
+# -------------------------------------------------- drawings added from the review app ---
+REVIEWED_SUBSETS = ("Reviewed", "Reviewed test")
+
+
+def list_reviewed(root: Path) -> list[dict]:
+    """Drawings added as training / held-out data: [{name, subset, tiles}]."""
+    out = []
+    for subset in REVIEWED_SUBSETS:
+        for png in sorted((Path(root) / "Complete" / subset).glob("*.png")):
+            tiles = Path(root) / "Patched" / subset / png.stem
+            out.append({"name": png.stem, "subset": subset,
+                        "tiles": len(list(tiles.glob("*.png"))) if tiles.is_dir() else 0})
+    return out
+
+
+def remove_reviewed(root: Path, subset: str, name: str) -> None:
+    """Remove an added drawing (its sheet and its tiles)."""
+    import shutil
+    if subset not in REVIEWED_SUBSETS or "/" in name or name.startswith("."):
+        raise ValueError("not an added drawing")
+    for f in (Path(root) / "Complete" / subset).glob(f"{name}.*"):
+        f.unlink()
+    shutil.rmtree(Path(root) / "Patched" / subset / name, ignore_errors=True)
