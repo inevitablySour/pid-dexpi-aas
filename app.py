@@ -613,9 +613,13 @@ def item_name(sid: str) -> str:
 
 
 def item_option(sid: str) -> str:
-    """A unique, readable label for From/To pickers (an untagged item's name has its ref already)."""
+    """A unique, readable label for every item picker: "#12 V101", "#55 CustomEquipment" -
+    always the ref first, so items with the same name (or a new one with no tag yet) can be
+    told apart, and the map can outline the entry being browsed (MAP_JS reads the "#12")."""
     s = by_sym.get(sid)
-    return f"{refs.get(sid, '?')} {s.tag}" if s is not None and s.tag else item_name(sid)
+    if s is None:
+        return sid
+    return f"{refs.get(sid, '?')} {s.tag or friendly_class(s.dexpi_class)}"
 
 
 def status(s: ReviewSymbol) -> str:
@@ -900,7 +904,8 @@ with map_col:
             layers = hide(layers, hidden_syms, hidden_rows)
             result = map_component(data=map_markup(layers, show_conns, show_syms, zoom_to_highlight=zoom,
                                                    key=name, height=620,
-                                                   names="off" if name.startswith("Drawing") else "auto"),
+                                                   names="off" if name.startswith("Drawing") else "auto",
+                                                   refs={sid: r for sid, r in refs.items() if r.startswith("#")}),
                                    key=f"map_{name}", on_clicked_change=lambda: None, on_drawn_change=lambda: None)
             if result.drawn:
                 add_drawn_item(name, layers, json.loads(result.drawn)["box"])
@@ -1258,9 +1263,9 @@ with panel_col:
                                "out of DEXPI. Undo: switch 'In DEXPI' back on for the item and its old lines.")
             elif len(nb) > 2:
                 c1, c2 = st.columns(2)
-                a = c1.selectbox("Bypass from", [item_name(x) for x in nb], key=f"bpa_{s.id}_{k}")
-                b = c2.selectbox("to", [item_name(x) for x in nb], index=1, key=f"bpb_{s.id}_{k}")
-                ids = {item_name(x): x for x in nb}
+                a = c1.selectbox("Bypass from", [item_option(x) for x in nb], key=f"bpa_{s.id}_{k}")
+                b = c2.selectbox("to", [item_option(x) for x in nb], index=1, key=f"bpb_{s.id}_{k}")
+                ids = {item_option(x): x for x in nb}
                 if a != b and st.button("Bypass this item", key=f"bypass_{s.id}_{k}", width="stretch"):
                     _bypass(s.id, ids[a], ids[b])
                     st.rerun()
@@ -1281,7 +1286,7 @@ with panel_col:
                 for c in mine[:12]:
                     other = c.to_id if c.from_id == s.id else c.from_id
                     arrow = ("→" if c.from_id == s.id else "←") if c.flow in FLOW_KNOWN else "–"
-                    if st.button(f"{arrow} {item_name(other)} · {LINE_LABELS.get(c.line_type, c.line_type)}",
+                    if st.button(f"{arrow} {item_option(other)} · {LINE_LABELS.get(c.line_type, c.line_type)}",
                                  key=f"go_{c.id}_{k}", type="tertiary"):
                         select((), {c.id}, zoom=True)
                         st.rerun()

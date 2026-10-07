@@ -443,7 +443,7 @@ def hide(layers: Layers, symbols: set, rows: set) -> Layers:
 
 def map_markup(layers: Layers, highlight_rows: set | None = None, highlight_symbols: set | None = None,
                zoom_to_highlight: bool = True, key: str = "map", height: int = 720,
-               names: str = "auto") -> dict:
+               names: str = "auto", refs: dict | None = None) -> dict:
     """The interactive map's content for MAP_JS (st.components.v2): {"html", "view", "full", "key"}.
 
     Every line and box carries its review-table rows (data-rows / data-sym) so a click can
@@ -452,7 +452,8 @@ def map_markup(layers: Layers, highlight_rows: set | None = None, highlight_symb
     (zoom_to_highlight). Names are drawn with a white halo; `names` is the toolbar's starting
     choice: "auto" (once zoomed in far enough to read them), "on" or "off" - "off" suits a
     draw.io drawing, which prints its own names. Selected items are always named. Line
-    widths stay constant on screen at any zoom."""
+    widths stay constant on screen at any zoom. `refs` ({item id: "#12"}) tags every box
+    (data-ref) so browsing an item dropdown can outline it (MAP_JS)."""
     hr, hs = set(highlight_rows or ()), set(highlight_symbols or ())
     lit_lines = [ln for ln in layers.lines if ln.rows & hr]
     # a selected connection lights its ends too; a selected SECTION lights its items in their own
@@ -508,7 +509,8 @@ def map_markup(layers: Layers, highlight_rows: set | None = None, highlight_symb
         dash = ' stroke-dasharray="6 4"' if b.dashed else ""
         lab = label_svg(x1, y1 - 7, b.label, col, 22 if lit else 19, "lbl lit" if lit else "lbl") if b.label else ""
         tip = html.escape(f"{b.tip or b.label or b.id}" + ("  (click to select)" if b.id else ""))
-        return (f'<g class="item k-{b.kind}" data-sym="{html.escape(b.id)}"><title>{tip}</title>'
+        ref = (refs or {}).get(b.id, "")
+        return (f'<g class="item k-{b.kind}" data-sym="{html.escape(b.id)}" data-ref="{html.escape(ref)}"><title>{tip}</title>'
                 f'<rect class="vis" x="{x1:.1f}" y="{y1:.1f}" width="{x2 - x1:.1f}" height="{y2 - y1:.1f}" '
                 f'fill="rgba(255,255,255,0.01)" stroke="{col}" stroke-width="{width or 2}"{dash}{NS}/>{lab}</g>')
 
@@ -722,6 +724,40 @@ export default function (component) {
   s.addEventListener('mouseleave', () => { drag = null; s.classList.remove('dragging'); });
   s.addEventListener('dblclick', () => { vb = data.full.slice(); set(); });
   set(); applyHidden();
+  // Browsing an item dropdown (Connect to, Merge with, From / To, Bypass ...): the item under
+  // the mouse or the arrow keys is outlined in orange - entries start with the item's "#12".
+  // The view does not move (it may be off screen) and the selection stays lit.
+  if (mem.peekOff) mem.peekOff();
+  const SVGNS = 'http://www.w3.org/2000/svg';
+  let peekRef = null;
+  const showPeek = (ref) => {
+    if (ref === peekRef) return;
+    peekRef = ref;
+    s.querySelectorAll('.peekmark').forEach((n) => n.remove());
+    if (!ref) return;
+    s.querySelectorAll(`g.item[data-ref="${ref}"] rect.vis`).forEach((r) => {
+      const x = +r.getAttribute('x'), y = +r.getAttribute('y'), w = +r.getAttribute('width'), h = +r.getAttribute('height');
+      for (const [pad, sw, fill, stroke] of [[12, 14, 'rgba(255,140,0,0.14)', 'rgba(255,140,0,0.4)'], [5, 4, 'none', '#ff8c00']]) {
+        const m = document.createElementNS(SVGNS, 'rect');
+        m.setAttribute('class', 'peekmark');
+        m.setAttribute('x', x - pad); m.setAttribute('y', y - pad);
+        m.setAttribute('width', w + 2 * pad); m.setAttribute('height', h + 2 * pad);
+        m.setAttribute('fill', fill); m.setAttribute('stroke', stroke); m.setAttribute('stroke-width', sw);
+        m.setAttribute('vector-effect', 'non-scaling-stroke');
+        m.style.pointerEvents = 'none';
+        s.appendChild(m);
+      }
+    });
+  };
+  const refOf = (o) => { const m = o && o.textContent.trim().match(/^(#\d+)(\s|$)/); return m ? m[1] : null; };
+  const current = () => refOf(document.querySelector('[role=listbox] [role=option][data-hovered=true]')
+    || document.querySelector('[role=listbox] [role=option][data-focused=true]'));
+  const watch = new MutationObserver(() => showPeek(current()));
+  watch.observe(document.body, { subtree: true, childList: true, attributes: true,
+    attributeFilter: ['data-focused', 'data-hovered'] });
+  const over = (e) => { const o = e.target.closest && e.target.closest('[role=option]'); if (o) showPeek(refOf(o)); };
+  document.addEventListener('mouseover', over);
+  mem.peekOff = () => { watch.disconnect(); document.removeEventListener('mouseover', over); showPeek(null); };
 }
 """
 
