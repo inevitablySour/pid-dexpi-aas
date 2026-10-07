@@ -50,6 +50,18 @@ EXTRA_EQUIPMENT_FIELDS = [
 ]
 
 
+# Pipe properties DEXPI's segment has no typed field for (pressure rating and material are
+# normally implied by the piping class code; small lab setups often name them directly).
+EXTRA_PIPE_FIELDS = [
+    SpecField("DesignPressure", "Design pressure", "quantity", ["bar", "barg", "mbar", "kPa", "MPa", "psi"], custom=True),
+    SpecField("PressureRating", "Pressure rating (e.g. PN 16, Class 150)", "text", custom=True),
+    SpecField("Material", "Material (e.g. SS316, PTFE)", "text", custom=True),
+    SpecField("OuterDiameter", "Outer diameter (tubing)", "quantity", ["mm", "in"], custom=True),
+]
+# A segment's flow direction comes from the drawn flow; its inclination unit list is broken
+# in pyDEXPI 1.2 ("???").
+_SEGMENT_SKIP = {"flowDirection", "inclination"}
+
 # Default (first) unit when a quantity has several: lab-scale, metric.
 _PREFERRED_UNITS = ["l", "bar", "barg", "°C", "l/s", "m3/h", "mm", "m", "m2", "kW", "kW/(m2·K)", "kg", "kg/h", "rpm",
                     "%", "V", "Hz", "N"]
@@ -106,6 +118,13 @@ def spec_fields(class_name: str) -> list[SpecField]:
     out.sort(key=lambda s: order[s.kind])
     if issubclass(cls, equipment.Equipment):
         out += EXTRA_EQUIPMENT_FIELDS
+    if issubclass(cls, piping.PipingNetworkSegment):
+        out = [f for f in out if f.name not in _SEGMENT_SKIP]
+        # the size as written on the line ("DN 25", '1/4"', "6 mm OD") - the standard's
+        # picker only lists DIN / ASME sizes
+        out.insert(0, SpecField("nominalDiameterRepresentation", "Nominal diameter (as written, e.g. DN 25, 1/4\")",
+                                "text"))
+        out += EXTRA_PIPE_FIELDS
     return out
 
 

@@ -428,6 +428,39 @@ class PatchedProteusExporter(ProteusExporter):
         return plant_model_xml
 
 
+# ------------------------------------------------------------------ reader: choices ---
+# pyDEXPI 1.2's writer stores a choice (enumeration) attribute by its VALUE - "DN 15 (DIN
+# 2448)", "not jacketed", "open" - the DEXPI form other tools read; its reader looks it up
+# by the Python member NAME (Enum[value], parser_modules.GenericAttributeParser), fails, and
+# then drops the object's whole attribute set - tag included. Measured: any choice field
+# (a valve's operation, a pipe's nominal diameter standard, ...) made the item come back
+# bare. The reader is taught to accept either; the XML stays as written.
+from pydexpi.dexpi_classes import enumerations as _enumerations  # noqa: E402
+from pydexpi.loaders.proteus_serializer.proteus_parser import parser_modules as _parser_modules  # noqa: E402
+
+
+class _EnumByNameOrValue:
+    def __init__(self, cls) -> None:
+        self.cls = cls
+
+    def __getitem__(self, key):
+        try:
+            return self.cls[key]
+        except KeyError:
+            return self.cls(key)
+
+
+class _LenientEnumerations:
+    """Stands in for pydexpi's enumerations module inside the reader (its only use there is
+    hasattr / getattr + [value])."""
+
+    def __getattr__(self, name):
+        return _EnumByNameOrValue(getattr(_enumerations, name))
+
+
+_parser_modules.enumerations = _LenientEnumerations()
+
+
 class PatchedProteusSerializer(ProteusSerializer):
     """ProteusSerializer using PatchedProteusExporter for save(); load() is unchanged
     since the stock Proteus PARSER already supports piping/instrumentation."""

@@ -393,11 +393,13 @@ def _add_network_links(diagram, build_result, shapes_by_id, links, instrument_li
             # chain of k-2 tees, three legs each: tee0 = m0, m1, tee1; tee_i = tee_i-1,
             # m_i+1, tee_i+1; last tee = previous tee, m_k-2, m_k-1
             reason = f"pipe network {net_id}: {k} items joined by {len(tees)} tee(s)"
+            # every leg carries the network's edge ids, so each of its lines maps to all of
+            # its segments (a line's specifications go onto the whole network)
             for j, (m, (sense, basis)) in enumerate(members):
                 tee = tees[max(0, min(j - 1, len(tees) - 1))]
-                links.append(_Link(ids if j == 0 else [], m, tee, reason=reason, dir=sense, basis=basis))
+                links.append(_Link(ids, m, tee, reason=reason, dir=sense, basis=basis))
             for i in range(len(tees) - 1):
-                links.append(_Link([], tees[i], tees[i + 1], reason=reason))
+                links.append(_Link(ids, tees[i], tees[i + 1], reason=reason))
         # instruments tapped onto the network measure at it: at its first tee, else at the
         # segment its two pipe items make, else at its one pipe item
         if sensing and instrument_links is not None and members:
@@ -658,13 +660,13 @@ def _build_segments(build_result, links, system) -> None:
             try:
                 segment = _segment_by_hand(seg_items, src, tgt)
             except Exception:
-                for eid in edge_ids:
+                for eid in dict.fromkeys(edge_ids):
                     build_result.records.append(BuildRecord(eid, "edge", "skipped", None, f"piping_toolkit error: {exc}"))
                 continue
         segment.customAttributes = list(segment.customAttributes or []) + [CustomStringAttribute(
             attributeName="FlowDirectionBasis", attributeURI="urn:pid-dexpi-aas:flow-direction-basis", value=basis)]
         system.segments.append(segment)
-        for eid in edge_ids:
+        for eid in dict.fromkeys(edge_ids):
             build_result.edge_segments.setdefault(eid, []).append(segment)
         for i in seg_links:
             ln = links[i]

@@ -81,6 +81,9 @@ class ReviewConnection:
     confidence: str = ""  # draw.io: explicit/inferred resolution; model: probability
     notes: str = ""
     include: bool = True
+    # specifications of the pipe / signal line (dexpi_fields.py): {"dexpi": {...}, "custom": {...}},
+    # written onto the PipingNetworkSegment(s) or signal line it becomes
+    attributes: dict = field(default_factory=dict)
     # Process flow runs From -> To, and how that is known: "drawn arrow" | "implied" (from
     # arrows on neighbouring lines, flow_direction.py) | "reviewer"; "" = unknown;
     # "no flow between them" = two legs on the same side of a tee (both fed, or both feeding)
@@ -490,6 +493,17 @@ def to_dexpi(review: ReviewDiagram) -> tuple[ParsedDiagram, BuildResult]:
     # specification fields filled in by the reviewer (dexpi_fields.py), over the drawing's notes
     from pid_dexpi_aas.dexpi_fields import apply_fields
     result.spec_problems = []
+    # a line's specifications go onto what it became: its pipe segment(s) (a pipe network:
+    # all of the network's segments), or its measuring / signal line
+    from pydexpi.dexpi_classes.instrumentation import SignalConveyingFunction
+    for c in review.connections:
+        attrs = c.attributes or {}
+        if not c.include or not (attrs.get("dexpi") or attrs.get("custom")):
+            continue
+        targets = list(result.edge_segments.get(c.id, [])) + [
+            o for o in result.edge_signals.get(c.id, []) if isinstance(o, SignalConveyingFunction)]
+        for obj in {id(o): o for o in targets}.values():
+            result.spec_problems += [f"line {c.id}: {p}" for p in apply_fields(obj, attrs.get("dexpi"), attrs.get("custom"))]
     for s in review.symbols:
         obj = result.shape_objects.get(s.id)
         if obj is not None and s.section and "customAttributes" in type(obj).model_fields:

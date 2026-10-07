@@ -220,3 +220,26 @@ def test_instrument_wiring_survives_export_and_reload(tmp_path):
     built = wiring(model)
     assert sum(built[0].values()) > 10 and all(".->" not in k for k in built[0])
     assert wiring(save_and_verify(model, tmp_path, "wiring.xml")) == built
+
+
+def test_pipe_specifications_and_choice_fields_survive_reload(tmp_path):
+    """A line's specifications land on its pipe segment and come back from the reader -
+    choice fields too: pyDEXPI writes them by value but read them by member name, and a
+    failed lookup dropped the object's whole attribute set (proteus_patch's reader fix)."""
+    from pid_dexpi_aas.dexpi_fields import spec_fields
+    from pid_dexpi_aas.review import from_drawio, to_dexpi
+    from pid_dexpi_aas.serialize import save_and_verify
+
+    root = Path(__file__).parent.parent
+    review = from_drawio(parse_drawio_file(root / "handoff" / "decoded_xml" / "P&ID gramflow reactor V3__diagram0.xml"))
+    line = next(c for c in review.connections if c.include and c.line_type == "process" and not c.id.startswith("net"))
+    values = {f.name: ({"value": 10, "unit": f.units[0]} if f.kind == "quantity" else
+                       f.options[-1] if f.kind == "choice" else "X1")
+              for f in spec_fields("PipingNetworkSegment") if not f.custom}
+    values["fluidCode"] = "MARK"
+    line.attributes = {"dexpi": values}
+    _, result = to_dexpi(review)
+    assert result.spec_problems == []
+    back = save_and_verify(result.model, tmp_path, "spec.xml")
+    seg = next(s for sys in back.conceptualModel.pipingNetworkSystems for s in sys.segments if s.fluidCode == "MARK")
+    assert [n for n in values if getattr(seg, n) in (None, "")] == []

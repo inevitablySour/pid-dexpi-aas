@@ -51,7 +51,7 @@ from pid_dexpi_aas.routing import route  # noqa: E402
 from pid_dexpi_aas.mapping import classify_detection  # noqa: E402
 from pid_dexpi_aas.parser_drawio import parse_drawio_xml_resolved  # noqa: E402
 from pid_dexpi_aas.review import (  # noqa: E402
-    DEXPI_CLASS_CHOICES, FLOW_KNOWN, OFF_PAGE, SKIP, ReviewConnection, ReviewDiagram, ReviewSymbol,
+    DEXPI_CLASS_CHOICES, FLOW_KNOWN, INSTRUMENT_CLASSES, OFF_PAGE, SKIP, ReviewConnection, ReviewDiagram, ReviewSymbol,
     _instrument_attributes, _short_token, cross_check, from_drawio, from_image, to_dexpi, validate_rows,
 )
 from pid_dexpi_aas.serialize import save_and_verify  # noqa: E402
@@ -995,8 +995,13 @@ def _spec_key(sid: str, name: str, part: str, k: str) -> str:
     return f"spec_{sid}_{name}_{part}_{k}"
 
 
+def _spec_owner(oid: str):
+    """An item or a line - both carry specification fields."""
+    return by_sym.get(oid) or next((c for c in review.connections if c.id == oid), None)
+
+
 def _set_spec(sid: str, f, k: str) -> None:
-    s = by_sym[sid]
+    s = _spec_owner(sid)
     store = s.attributes.setdefault("custom" if f.custom else "dexpi", {})
     if f.kind == "quantity":
         v = st.session_state.get(_spec_key(sid, f.name, "v", k))
@@ -1008,7 +1013,7 @@ def _set_spec(sid: str, f, k: str) -> None:
         store.pop(f.name, None)
 
 
-def _spec_widget(s: ReviewSymbol, f, cur, k: str) -> None:
+def _spec_widget(s, f, cur, k: str) -> None:
     label = f.label + (" (custom)" if f.custom else "")
     if f.kind == "quantity":
         c1, c2 = st.columns([2, 1])
@@ -1307,6 +1312,22 @@ with panel_col:
                          key=f"lt_{c.id}_{k}", on_change=_set_line, args=(c.id, "line_type", f"lt_{c.id}_{k}"))
             st.toggle("In DEXPI", c.include, key=f"cinc_{c.id}_{k}", on_change=_set_line,
                       args=(c.id, "include", f"cinc_{c.id}_{k}"))
+            # what the line becomes in DEXPI decides its fields: a pipe segment, or (dashed, or
+            # touching an instrument) a measuring / signal line
+            to_instrument = any(by_sym[x].dexpi_class in INSTRUMENT_CLASSES for x in (c.from_id, c.to_id) if x in by_sym)
+            is_pipe = c.line_type == "process" and not to_instrument
+            fields = spec_fields("PipingNetworkSegment" if is_pipe else "SignalLineFunction")
+            vals, cust = (c.attributes or {}).get("dexpi", {}), (c.attributes or {}).get("custom", {})
+            filled = sum(1 for f in fields if (cust if f.custom else vals).get(f.name))
+            with st.expander(f"{'Pipe' if is_pipe else 'Signal line'} specifications ({filled} of {len(fields)} filled)",
+                             expanded=bool(filled)):
+                st.caption(("Size, piping class, fluid, insulation and more - DEXPI's pipe segment fields, plus "
+                            "design pressure, rating and material as custom attributes. " if is_pipe else
+                            "DEXPI's signal line fields. ") + "Written into the DEXPI file when you build."
+                           + (" This line is part of a pipe network: the values go on all of its pipe segments."
+                              if is_pipe and c.id.startswith("net") else ""))
+                for f in fields:
+                    _spec_widget(c, f, (cust if f.custom else vals).get(f.name), k)
             st.text_input("Notes", c.notes, key=f"cnote_{c.id}_{k}", on_change=_set_line,
                           args=(c.id, "notes", f"cnote_{c.id}_{k}"))
             loop = c.from_id == c.to_id
