@@ -164,6 +164,9 @@ st.markdown("### P&ID to DEXPI converter")
 st.html("""<style>
 /* the edit panel stays in view while scrolling the page */
 div[data-testid="stColumn"]:has(.edit-panel) {position: sticky; top: 3.75rem; align-self: flex-start; z-index: 2;}
+/* the panel's tabs fit its width */
+div[data-testid="stColumn"]:has(.edit-panel) [role="tablist"] {gap: 0.75rem;}
+div[data-testid="stColumn"]:has(.edit-panel) [role="tab"] p {font-size: 0.85rem;}
 div[data-testid="stMetric"] {padding: 0;}
 div[data-testid="stMetricValue"] {font-size: 1.6rem;}
 </style>""")
@@ -967,22 +970,15 @@ with map_col:
                 select({click["sym"]} if click.get("sym") else (), click.get("rows") or ())
                 st.rerun()
             st.caption({
-                "Compare drawing ↔ picture": "The drawing and the picture laid over each other. Green = both agree · "
-                    "blue = only in the drawing · brown dashed = only in the picture · amber = in both, but the "
-                    "picture sees another type. Click 'in both' above the map to hide it and see only the differences. "
-                    "The DEXPI file follows the drawing; use this to spot what it misses.",
-                "Drawing (draw.io)": "Only what the draw.io file says: pipes along their drawn routes, coloured by "
-                    "how the flow direction is known.",
-                "Picture (image)": "Only what the picture shows: items the model found and pipes traced on it. "
-                    "Clicking an item selects the drawing item it matches.",
+                "Compare drawing ↔ picture": "Drawing and picture laid over each other: green = both agree, blue = "
+                    "only in the drawing, brown dashed = only in the picture, amber = other type in the picture.",
+                "Drawing (draw.io)": "What the draw.io file says: pipes along their drawn routes, coloured by how "
+                    "their flow direction is known.",
+                "Picture (image)": "What the picture shows: items the model found and pipes traced on it.",
             }.get(name, ""))
     if not maps:
         st.info("No picture to show - upload an image, or a draw.io file (with the draw.io app installed) "
                 "for the flow map.")
-    if len(maps) <= 1:
-        st.caption("Colours: green = in DEXPI · amber = to check · red dashed = left out of DEXPI (items and lines) · "
-                   "brown dashed = only the picture / the model says so · grey line = flow direction unknown. "
-                   "Click a chip above the map to hide that kind of line.")
 
 # ---------------------------------------------------------------------- edit panel ---
 def _set_item(sid: str, field: str, key: str) -> None:
@@ -1153,7 +1149,7 @@ def _set_spec(sid: str, f, k: str) -> None:
 def _spec_widget(s, f, cur, k: str) -> None:
     label = f.label + (" (custom)" if f.custom else "")
     if f.kind == "quantity":
-        c1, c2 = st.columns([2, 1])
+        c1, c2 = st.columns([3, 2])  # room for the unit (mm, kW/(m2·K), ...)
         c1.number_input(label, value=(cur or {}).get("value"), format="%g", key=_spec_key(s.id, f.name, "v", k),
                         on_change=_set_spec, args=(s.id, f, k))
         unit = (cur or {}).get("unit")
@@ -1328,204 +1324,247 @@ def _set_lines(cids: list, include: bool) -> None:
     refresh_tables()
 
 
+PANEL_HEIGHT = 750  # the map's toolbar, chips and drawing: the panel never runs past them
+
+
+def _spec_list(owner, fields, vals, cust, pre, k) -> None:
+    for f in fields:
+        _spec_widget(owner, f, (cust if f.custom else vals).get(f.name) or pre.get(f.name), k)
+
+
+def _line_kind(c):
+    """What the line becomes in DEXPI (build_model._wire_instruments), for its fields: a line
+    touching an instrument is a measuring or signal line, never a pipe; a line between two
+    non-instruments is a pipe, even drawn dashed. -> (kind, DEXPI class, why)."""
+    inst_ends = [x for x in (c.from_id, c.to_id) if x in by_sym and by_sym[x].dexpi_class in INSTRUMENT_CLASSES]
+    other = next((x for x in (c.from_id, c.to_id) if x not in inst_ends), None)
+    if len(inst_ends) == 2:
+        return "Signal line", "SignalLineFunction", ""
+    if inst_ends and c.line_type == "signal" and other in by_sym and by_sym[other].dexpi_class in VALVE_CLASSES:
+        return "Signal line", "SignalLineFunction", f"{item_name(inst_ends[0])} drives {item_name(other)}'s actuator over this line."
+    if inst_ends:
+        return "Measuring line", "MeasuringLineFunction", (
+            f"This line connects to instrument {item_name(inst_ends[0])}, so DEXPI records it as a measuring line "
+            "(where the instrument measures), not as a pipe.")
+    return "Pipe", "PipingNetworkSegment", (
+        "Drawn as a signal line, but neither end is an instrument, so DEXPI builds it as a pipe."
+        if c.line_type == "signal" else "")
+
+
 with panel_col:
     st.html('<span class="edit-panel"></span>')
-    with st.container(border=True):
-        k = f"{version}"
-        sel_items = [by_sym[i] for i in show_syms if i in by_sym]
-        sel_lines = [c for c in review.connections if c.id in show_conns]
-        sel_sections = [sec for sec in (review.drawio.sections if review.drawio else [])
-                        if f"section:{sec.id}" in show_conns]
+    k = f"{version}"
+    sel_items = [by_sym[i] for i in show_syms if i in by_sym]
+    sel_lines = [c for c in review.connections if c.id in show_conns]
+    sel_sections = [sec for sec in (review.drawio.sections if review.drawio else []) if f"section:{sec.id}" in show_conns]
+    # one panel as tall as the map, scrolling inside itself: nothing below the drawing to scroll to
+    with st.container(border=True, height=PANEL_HEIGHT):
+        b1, b2 = st.columns(2)
+        to_check = [x for x in review.symbols if status(x) == "needs review"]
+        current = next(iter(show_syms), None)
+        if b1.button(f"Next to check ▸ ({len(to_check)})", disabled=not to_check, width="stretch",
+                     help="Selects the next item marked red, and zooms to it"):
+            ids = [x.id for x in to_check]
+            select({ids[(ids.index(current) + 1) % len(ids)] if current in ids else ids[0]}, (), zoom=True)
+            st.rerun()
+        if b2.button("Clear selection", disabled=not (show_syms or show_conns), width="stretch"):
+            select()
+            st.rerun()
+        hidden_syms, hidden_rows = st.session_state.get("hidden", (set(), set()))
+        if hidden_syms or hidden_rows:
+            h1, h2 = st.columns([3, 2], vertical_alignment="center")
+            h1.caption(f"{len(hidden_syms)} item(s), {len(hidden_rows)} line(s) hidden on the map")
+            h2.button("Show all", key=f"unhide_{k}", on_click=_unhide, width="stretch")
+
         if sel_sections and not sel_items and not sel_lines:
             sec = sel_sections[0]
-            members = [s for s in review.symbols if s.section == sec.name]
+            members = [x for x in review.symbols if x.section == sec.name]
             st.markdown(f"**Plant section: {sec.name}**")
             st.caption(f"Frame drawn around {len(members)} items on the drawing. Every item in it carries this name "
                        "into DEXPI (PlantSectionName) and so into the AAS.")
             st.text_input("Name", sec.name, key=f"secname_{sec.id}_{k}", on_change=_rename_section,
                           args=(sec.id, f"secname_{sec.id}_{k}"))
-            st.caption(", ".join(item_name(s.id) for s in members[:30]) + (" ..." if len(members) > 30 else ""))
+            st.caption(", ".join(item_name(x.id) for x in members[:30]) + (" ..." if len(members) > 30 else ""))
             c1, c2 = st.columns(2)
             if c1.button("Select all its items", key=f"secsel_{sec.id}_{k}", width="stretch",
                          help="Highlights them on the map and ticks them in the table - e.g. to merge or check them"):
-                select({s.id for s in members}, (), zoom=True)
+                select({x.id for x in members}, (), zoom=True)
                 st.rerun()
             c2.button("Remove section", key=f"secdel_{sec.id}_{k}", on_click=_remove_section, args=(sec.id,),
                       width="stretch", help="Not a plant section after all: its items get no section")
+
         elif not sel_items and not sel_lines:
             st.markdown("**Nothing selected**")
             st.caption("Click an item or a line on the map to see and edit it here. "
                        "Hover anything on the map for a quick description.")
+
         elif len(sel_items) == 1 and not sel_lines:
             s = sel_items[0]
-            st.markdown(f"**Item: {item_name(s.id)}** &nbsp; `{refs[s.id]}`")
-            st.caption(f"{found_as(s)} · status: {status(s)}" + (f" · section: {s.section}" if s.section else ""))
-            st.text_input("Tag", s.tag, key=f"tag_{s.id}_{k}", on_change=_set_item, args=(s.id, "tag", f"tag_{s.id}_{k}"))
-            st.selectbox("DEXPI type", DEXPI_CLASS_CHOICES,
-                         index=DEXPI_CLASS_CHOICES.index(s.dexpi_class) if s.dexpi_class in DEXPI_CLASS_CHOICES else 0,
-                         key=f"cls_{s.id}_{k}", on_change=_set_item, args=(s.id, "dexpi_class", f"cls_{s.id}_{k}"))
-            st.toggle("In DEXPI", s.include, key=f"inc_{s.id}_{k}", on_change=_set_item,
-                      args=(s.id, "include", f"inc_{s.id}_{k}"))
-            if section_names:
-                secs = [""] + section_names
-                st.selectbox("Plant section", secs, index=secs.index(s.section) if s.section in secs else 0,
-                             key=f"sec_{s.id}_{k}", on_change=_set_item, args=(s.id, "section", f"sec_{s.id}_{k}"),
-                             help="The frame it was drawn in on the drawing")
-            st.text_input("Notes", s.notes, key=f"note_{s.id}_{k}", on_change=_set_item,
-                          args=(s.id, "notes", f"note_{s.id}_{k}"))
-            facts = [("How the type was chosen", s.identified_by), ("Picture check", s.image_check),
-                     ("Specs from the drawing", (s.attributes or {}).get("specs", ""))]
-            for label, value in facts:
-                if value:
-                    st.caption(f"**{label}:** {value}")
+            st.markdown(f"**{item_name(s.id)}** &nbsp; `{refs[s.id]}`")
+            st.caption(f"{found_as(s)} · {status(s)}" + (f" · {s.section}" if s.section else ""))
             fields = spec_fields(s.dexpi_class) if s.dexpi_class not in (SKIP, OFF_PAGE) else []
-            if fields:
-                vals = (s.attributes or {}).get("dexpi", {})
-                cust = (s.attributes or {}).get("custom", {})
-                pre = prefill(s.dexpi_class, (s.attributes or {}).get("specs", ""))
-                filled = sum(1 for f in fields if (cust if f.custom else vals).get(f.name) or pre.get(f.name))
-                # closed by default: the panel stays short; the title says how much is filled in
-                with st.expander(f"Specifications · {s.dexpi_class} ({filled} of {len(fields)} filled)",
-                                 expanded=False):
-                    st.caption("Fields DEXPI defines for this type" + (", pre-filled from the drawing's notes"
-                               if pre else "") + ". Written into the DEXPI file when you build.")
-                    for f in fields:
-                        _spec_widget(s, f, (cust if f.custom else vals).get(f.name) or pre.get(f.name), k)
-            if s.dexpi_class not in INSTRUMENT_CLASSES and s.dexpi_class not in (OFF_PAGE, SKIP):
-                with st.expander("Streams in / out of the drawing"):
-                    st.caption("A feed, product or vent stream at this item: a named stream next to it, joined by "
-                               "a line with its direction set. In DEXPI: a Flow In / Flow Out off-page connector.")
+            vals, cust = (s.attributes or {}).get("dexpi", {}), (s.attributes or {}).get("custom", {})
+            pre = prefill(s.dexpi_class, (s.attributes or {}).get("specs", "")) if fields else {}
+            filled = sum(1 for f in fields if (cust if f.custom else vals).get(f.name) or pre.get(f.name))
+            mine = [c for c in review.connections if s.id in (c.from_id, c.to_id) and c.include]
+            can_stream = s.dexpi_class not in INSTRUMENT_CLASSES and s.dexpi_class not in (OFF_PAGE, SKIP)
+            names = ["Edit", f"Lines {len(mine)}", "Connect"] + (["Streams"] if can_stream else []) \
+                + ([f"Specs {filled}/{len(fields)}"] if fields else [])
+            tabs = dict(zip(names, st.tabs(names)))
+            with tabs["Edit"]:
+                st.text_input("Tag", s.tag, key=f"tag_{s.id}_{k}", on_change=_set_item, args=(s.id, "tag", f"tag_{s.id}_{k}"))
+                st.selectbox("DEXPI type", DEXPI_CLASS_CHOICES,
+                             index=DEXPI_CLASS_CHOICES.index(s.dexpi_class) if s.dexpi_class in DEXPI_CLASS_CHOICES else 0,
+                             key=f"cls_{s.id}_{k}", on_change=_set_item, args=(s.id, "dexpi_class", f"cls_{s.id}_{k}"))
+                st.toggle("In DEXPI", s.include, key=f"inc_{s.id}_{k}", on_change=_set_item,
+                          args=(s.id, "include", f"inc_{s.id}_{k}"))
+                if section_names:
+                    secs = [""] + section_names
+                    st.selectbox("Plant section", secs, index=secs.index(s.section) if s.section in secs else 0,
+                                 key=f"sec_{s.id}_{k}", on_change=_set_item, args=(s.id, "section", f"sec_{s.id}_{k}"),
+                                 help="The frame it was drawn in on the drawing")
+                st.text_input("Notes", s.notes, key=f"note_{s.id}_{k}", on_change=_set_item,
+                              args=(s.id, "notes", f"note_{s.id}_{k}"))
+                for label, value in (("How the type was chosen", s.identified_by), ("Picture check", s.image_check),
+                                     ("Specs from the drawing", (s.attributes or {}).get("specs", ""))):
+                    if value:
+                        st.caption(f"**{label}:** {value}")
+                st.button("Hide this item on the map", key=f"hide_{k}", width="stretch", on_click=_hide,
+                          args=([s.id], []), help="Takes it off the map so you can see what is behind it. It stays in "
+                          "the tables and in the DEXPI file - use 'In DEXPI' to leave it out of the file.")
+            with tabs[names[1]]:
+                if mine:
+                    st.caption("Click a line to open it.")
+                    for c in mine:
+                        other = c.to_id if c.from_id == s.id else c.from_id
+                        arrow = ("→" if c.from_id == s.id else "←") if c.flow in FLOW_KNOWN else "–"
+                        if st.button(f"{arrow} {item_option(other)} · {LINE_LABELS.get(c.line_type, c.line_type)}",
+                                     key=f"go_{c.id}_{k}", type="tertiary"):
+                            select((), {c.id}, zoom=True)
+                            st.rerun()
+                else:
+                    st.caption("No lines yet - add one under Connect, or add a stream.")
+            with tabs["Connect"]:
+                others = [o for o in review.symbols if o.id != s.id and o.include and o.dexpi_class != SKIP]
+                target = st.selectbox("Connect to", [""] + [item_option(o.id) for o in others], key=f"conn_to_{s.id}_{k}",
+                                      help="Adds a process pipe from this item to the one you pick")
+                if target and st.button("Add this line", key=f"add_line_{s.id}_{k}", width="stretch"):
+                    _add_line(s.id, option_id[target])
+                    st.rerun()
+                nb = _neighbours(s.id)
+                if len(nb) == 2:
+                    st.button(f"Bypass: {item_name(nb[0])} → {item_name(nb[1])} directly", key=f"bypass_{s.id}_{k}",
+                              on_click=_bypass, args=(s.id, nb[0], nb[1]), width="stretch",
+                              help="Replaces this item's two lines by one line between its neighbours and takes the item "
+                                   "out of DEXPI. Undo: switch 'In DEXPI' back on for the item and its old lines.")
+                elif len(nb) > 2:
+                    a_ = st.selectbox("Bypass from", [item_option(x) for x in nb], key=f"bpa_{s.id}_{k}")
+                    b_ = st.selectbox("to", [item_option(x) for x in nb], index=1, key=f"bpb_{s.id}_{k}")
+                    ids = {item_option(x): x for x in nb}
+                    if a_ != b_ and st.button("Bypass this item", key=f"bypass_{s.id}_{k}", width="stretch"):
+                        _bypass(s.id, ids[a_], ids[b_])
+                        st.rerun()
+                near = _merge_candidates(s)
+                if near:
+                    labels = [_merge_label(s, o) for o in near]
+                    pick = st.selectbox("Same item drawn twice? Merge with", [""] + labels, key=f"merge_{s.id}_{k}",
+                                        help="Folds the other box into this item: its lines move here and its row goes. "
+                                             "Type to search; the most overlapping come first.")
+                    if pick and st.button(f"Merge into {item_name(s.id)}", key=f"do_merge_{s.id}_{k}", width="stretch"):
+                        _merge(s.id, [near[labels.index(pick)].id])
+                        st.rerun()
+            if can_stream:
+                with tabs["Streams"]:
+                    st.caption("A feed, product or vent stream at this item: a named stream beside it - opposite its "
+                               "existing lines - joined by a line with its direction set. In DEXPI: a Flow In / Flow "
+                               "Out off-page connector.")
                     st.text_input("Stream name", "", placeholder="e.g. Product, N2, Vent", key=f"stream_name_{s.id}_{k}")
                     c1, c2 = st.columns(2)
-                    c1.button("Add stream out →", key=f"stream_out_{s.id}_{k}", width="stretch", on_click=_add_stream,
+                    c1.button("Stream out →", key=f"stream_out_{s.id}_{k}", width="stretch", on_click=_add_stream,
                               args=(s.id, "out", f"stream_name_{s.id}_{k}"),
                               help=f"Something leaves the drawing from {item_name(s.id)} (default name: Product)")
-                    c2.button("→ Add stream in", key=f"stream_in_{s.id}_{k}", width="stretch", on_click=_add_stream,
+                    c2.button("→ Stream in", key=f"stream_in_{s.id}_{k}", width="stretch", on_click=_add_stream,
                               args=(s.id, "in", f"stream_name_{s.id}_{k}"),
                               help=f"Something enters the drawing into {item_name(s.id)} (default name: Feed)")
-            st.markdown("**Change the line-up**")
-            others = [o for o in review.symbols if o.id != s.id and o.include and o.dexpi_class != SKIP]
-            target = st.selectbox("Connect to", [""] + [item_option(o.id) for o in others], key=f"conn_to_{s.id}_{k}",
-                                  help="Adds a process pipe from this item to the one you pick")
-            if target and st.button("Add this line", key=f"add_line_{s.id}_{k}", width="stretch"):
-                _add_line(s.id, option_id[target])
-                st.rerun()
-            nb = _neighbours(s.id)
-            if len(nb) == 2:
-                st.button(f"Bypass: connect {item_name(nb[0])} → {item_name(nb[1])} directly", key=f"bypass_{s.id}_{k}",
-                          on_click=_bypass, args=(s.id, nb[0], nb[1]), width="stretch",
-                          help="Replaces this item's two lines by one line between its neighbours and takes the item "
-                               "out of DEXPI. Undo: switch 'In DEXPI' back on for the item and its old lines.")
-            elif len(nb) > 2:
-                c1, c2 = st.columns(2)
-                a = c1.selectbox("Bypass from", [item_option(x) for x in nb], key=f"bpa_{s.id}_{k}")
-                b = c2.selectbox("to", [item_option(x) for x in nb], index=1, key=f"bpb_{s.id}_{k}")
-                ids = {item_option(x): x for x in nb}
-                if a != b and st.button("Bypass this item", key=f"bypass_{s.id}_{k}", width="stretch"):
-                    _bypass(s.id, ids[a], ids[b])
-                    st.rerun()
-            near = _merge_candidates(s)
-            if near:
-                st.markdown("**Same item drawn twice?**")
-                labels = [_merge_label(s, o) for o in near]
-                pick = st.selectbox("Merge with (type to search)", [""] + labels,
-                                    key=f"merge_{s.id}_{k}",
-                                    help="Folds the other box into this item: its lines move here and its row goes. "
-                                         "Use when one piece of equipment was found as several boxes.")
-                if pick and st.button(f"Merge into {item_name(s.id)}", key=f"do_merge_{s.id}_{k}", width="stretch"):
-                    _merge(s.id, [near[labels.index(pick)].id])
-                    st.rerun()
-            mine = [c for c in review.connections if s.id in (c.from_id, c.to_id) and c.include]
-            if mine:
-                st.markdown(f"**Connected to** ({len(mine)}) - click to open the line")
-                for c in mine[:12]:
-                    other = c.to_id if c.from_id == s.id else c.from_id
-                    arrow = ("→" if c.from_id == s.id else "←") if c.flow in FLOW_KNOWN else "–"
-                    if st.button(f"{arrow} {item_option(other)} · {LINE_LABELS.get(c.line_type, c.line_type)}",
-                                 key=f"go_{c.id}_{k}", type="tertiary"):
-                        select((), {c.id}, zoom=True)
-                        st.rerun()
+            if fields:
+                with tabs[names[-1]]:
+                    st.caption(f"Fields DEXPI defines for a {s.dexpi_class}" + (", pre-filled from the drawing's notes"
+                               if pre else "") + ". Written into the DEXPI file when you build.")
+                    _spec_list(s, fields, vals, cust, pre, k)
+
         elif len(sel_lines) == 1 and not sel_items:
             c = sel_lines[0]
-            st.markdown(f"**Line: {item_name(c.from_id)} → {item_name(c.to_id)}** &nbsp; `{refs.get(c.id, '')}`")
+            st.markdown(f"**{item_name(c.from_id)} → {item_name(c.to_id)}** &nbsp; `{refs.get(c.id, '')}`")
             st.caption(f"{LINE_LABELS.get(c.line_type, c.line_type)} · {found_by(c)}")
-            st.selectbox("From", options, index=options.index(item_option(c.from_id)) if item_option(c.from_id) in options else 0,
-                         key=f"from_{c.id}_{k}", on_change=_set_line, args=(c.id, "from_id", f"from_{c.id}_{k}"))
-            st.selectbox("To", options, index=options.index(item_option(c.to_id)) if item_option(c.to_id) in options else 0,
-                         key=f"to_{c.id}_{k}", on_change=_set_line, args=(c.id, "to_id", f"to_{c.id}_{k}"))
-            flows = list(FLOW_VALUES)
-            st.selectbox("Flow From → To", flows, index=flows.index(FLOW_LABELS.get(c.flow, "unknown")),
-                         key=f"flow_{c.id}_{k}", on_change=_set_line, args=(c.id, "flow", f"flow_{c.id}_{k}"))
-            st.button("⇄ Reverse direction", key=f"rev_{c.id}_{k}", on_click=_reverse, args=(c.id,), width="stretch")
-            types = list(LINE_LABELS.values())
-            st.selectbox("Line", types, index=types.index(LINE_LABELS.get(c.line_type, "process pipe")),
-                         key=f"lt_{c.id}_{k}", on_change=_set_line, args=(c.id, "line_type", f"lt_{c.id}_{k}"))
-            st.toggle("In DEXPI", c.include, key=f"cinc_{c.id}_{k}", on_change=_set_line,
-                      args=(c.id, "include", f"cinc_{c.id}_{k}"))
-            # the fields follow what the line becomes in DEXPI (build_model._wire_instruments):
-            # a line touching an instrument is a measuring or signal line, never a pipe; a line
-            # between two non-instruments is a pipe, even when drawn dashed
-            inst_ends = [x for x in (c.from_id, c.to_id) if x in by_sym and by_sym[x].dexpi_class in INSTRUMENT_CLASSES]
-            other = next((x for x in (c.from_id, c.to_id) if x not in inst_ends), None)
-            if len(inst_ends) == 2:
-                kind, cls, why = "Signal line", "SignalLineFunction", ""
-            elif inst_ends and c.line_type == "signal" and other in by_sym and by_sym[other].dexpi_class in VALVE_CLASSES:
-                kind, cls, why = "Signal line", "SignalLineFunction", (
-                    f"{item_name(inst_ends[0])} drives {item_name(other)}'s actuator over this line.")
-            elif inst_ends:
-                kind, cls, why = "Measuring line", "MeasuringLineFunction", (
-                    f"This line connects to instrument {item_name(inst_ends[0])}, so DEXPI records it as a "
-                    "measuring line (where the instrument measures), not as a pipe.")
-            else:
-                kind, cls, why = "Pipe", "PipingNetworkSegment", (
-                    "Drawn as a signal line, but neither end is an instrument, so DEXPI builds it as a pipe."
-                    if c.line_type == "signal" else "")
-            is_pipe = cls == "PipingNetworkSegment"
+            loop = c.from_id == c.to_id
+            if loop:
+                st.warning(f"Both ends are on {item_name(c.from_id)}. A line like this usually leaves the drawing - "
+                           "a product, vent or feed stream. Mark it under Stream.")
+            kind, cls, why = _line_kind(c)
             fields = spec_fields(cls)
             vals, cust = (c.attributes or {}).get("dexpi", {}), (c.attributes or {}).get("custom", {})
             filled = sum(1 for f in fields if (cust if f.custom else vals).get(f.name))
-            with st.expander(f"{kind} specifications ({filled} of {len(fields)} filled)", expanded=False):
-                st.caption(" ".join(x for x in (
-                    why,
-                    "Size, piping class, fluid, insulation and more - DEXPI's pipe segment fields, plus design "
-                    "pressure, rating and material as custom attributes." if is_pipe else f"DEXPI's {kind.lower()} fields.",
-                    "Written into the DEXPI file when you build.",
-                    "This line is part of a pipe network: the values go on all of its pipe segments."
-                    if is_pipe and c.id.startswith("net") else "") if x))
-                for f in fields:
-                    _spec_widget(c, f, (cust if f.custom else vals).get(f.name), k)
-            st.text_input("Notes", c.notes, key=f"cnote_{c.id}_{k}", on_change=_set_line,
-                          args=(c.id, "notes", f"cnote_{c.id}_{k}"))
-            loop = c.from_id == c.to_id
-            if loop:
-                st.warning(f"Both ends are on {item_name(c.from_id)}. A line like this usually leaves the "
-                           "drawing - a product, vent or feed stream. Mark it below.")
-            with st.expander("Stream in / out of the drawing", expanded=loop):
-                st.caption("For a line that ends at a product, vent or feed stream instead of an item: "
-                           "it becomes an off-page connector (DEXPI FlowIn / FlowOut) with this name.")
+            spec_tab = f"Specs {filled}/{len(fields)}"
+            names = (["Stream", "Edit"] if loop else ["Edit", "Stream"]) + ["Ends", spec_tab]
+            tabs = dict(zip(names, st.tabs(names)))
+            with tabs["Edit"]:
+                st.selectbox("From", options, index=options.index(item_option(c.from_id)) if item_option(c.from_id) in options else 0,
+                             key=f"from_{c.id}_{k}", on_change=_set_line, args=(c.id, "from_id", f"from_{c.id}_{k}"))
+                st.selectbox("To", options, index=options.index(item_option(c.to_id)) if item_option(c.to_id) in options else 0,
+                             key=f"to_{c.id}_{k}", on_change=_set_line, args=(c.id, "to_id", f"to_{c.id}_{k}"))
+                flows = list(FLOW_VALUES)
+                g1, g2 = st.columns([4, 1], vertical_alignment="bottom")
+                g1.selectbox("Flow From → To", flows, index=flows.index(FLOW_LABELS.get(c.flow, "unknown")),
+                             key=f"flow_{c.id}_{k}", on_change=_set_line, args=(c.id, "flow", f"flow_{c.id}_{k}"))
+                g2.button("⇄", key=f"rev_{c.id}_{k}", on_click=_reverse, args=(c.id,), width="stretch",
+                          help="Reverse the direction: swap From and To")
+                types = list(LINE_LABELS.values())
+                t1, t2 = st.columns([3, 2], vertical_alignment="bottom")
+                t1.selectbox("Line", types, index=types.index(LINE_LABELS.get(c.line_type, "process pipe")),
+                             key=f"lt_{c.id}_{k}", on_change=_set_line, args=(c.id, "line_type", f"lt_{c.id}_{k}"))
+                t2.toggle("In DEXPI", c.include, key=f"cinc_{c.id}_{k}", on_change=_set_line,
+                          args=(c.id, "include", f"cinc_{c.id}_{k}"))
+                st.text_input("Notes", c.notes, key=f"cnote_{c.id}_{k}", on_change=_set_line,
+                              args=(c.id, "notes", f"cnote_{c.id}_{k}"))
+                st.button("Hide this line on the map", key=f"hide_{k}", width="stretch", on_click=_hide,
+                          args=([], [c.id]), help="Takes it off the map so you can see what is behind it. It stays in "
+                          "the tables and in the DEXPI file - use 'In DEXPI' to leave it out of the file.")
+            with tabs["Stream"]:
+                st.caption("For a line that ends at a product, vent or feed stream instead of an item: that end "
+                           "becomes a named stream - in DEXPI a Flow In / Flow Out off-page connector.")
                 st.text_input("Stream name", "Product", key=f"sname_{c.id}_{k}")
-                b1, b2 = st.columns(2)
-                b1.button("Out: To end", key=f"sout_{c.id}_{k}", on_click=_to_stream,
-                          args=(c.id, "to", f"sname_{c.id}_{k}"), width="stretch",
-                          help=f"Replace the To end ({item_name(c.to_id)}) by a stream leaving the drawing")
-                b2.button("In: From end", key=f"sin_{c.id}_{k}", on_click=_to_stream,
+                s1, s2 = st.columns(2)
+                s1.button("Out: To end", key=f"sout_{c.id}_{k}", on_click=_to_stream, args=(c.id, "to", f"sname_{c.id}_{k}"),
+                          width="stretch", help=f"Replace the To end ({item_name(c.to_id)}) by a stream leaving the drawing")
+                s2.button("In: From end", key=f"sin_{c.id}_{k}", on_click=_to_stream,
                           args=(c.id, "from", f"sname_{c.id}_{k}"), width="stretch",
                           help=f"Replace the From end ({item_name(c.from_id)}) by a stream entering the drawing")
-            for end in dict.fromkeys((c.from_id, c.to_id)):  # a line back onto its own item has one end
-                if st.button(f"Go to {item_name(end)} ›", key=f"end_{c.id}_{end}_{k}", type="tertiary"):
-                    select({end}, (), zoom=True)
-                    st.rerun()
+            with tabs["Ends"]:
+                st.caption("Click an end to select it.")
+                for label, end in (("From", c.from_id), ("To", c.to_id)):
+                    if st.button(f"{label}: {item_option(end)} ›", key=f"end_{c.id}_{label}_{k}", type="tertiary"):
+                        select({end}, (), zoom=True)
+                        st.rerun()
+            with tabs[spec_tab]:
+                st.caption(" ".join(x for x in (
+                    f"**{kind}.**", why,
+                    "DEXPI's pipe segment fields, plus design pressure, rating and material as custom attributes."
+                    if cls == "PipingNetworkSegment" else f"DEXPI's {kind.lower()} fields.",
+                    "Written into the DEXPI file when you build.",
+                    "Part of a pipe network: the values go on all of its pipe segments."
+                    if cls == "PipingNetworkSegment" and c.id.startswith("net") else "") if x))
+                _spec_list(c, fields, vals, cust, {}, k)
+
         else:
-            ends = sorted({e for c in sel_lines for e in (c.from_id, c.to_id)} | {s.id for s in sel_items})
+            ends = sorted({e for c in sel_lines for e in (c.from_id, c.to_id)} | {x.id for x in sel_items})
             if sel_lines and not sel_items and all(c.id.startswith("net") for c in sel_lines):
                 st.markdown(f"**Pipe network joining {len(ends)} items**")
                 st.caption("Lines that meet at tees. Every pair of its ends is a line in the table.")
             else:
                 st.markdown(f"**{len(sel_items)} items and {len(sel_lines)} lines selected**")
                 if len(sel_items) >= 2 and not sel_lines:
-                    # keep the tagged / biggest one by default
                     best = max(sel_items, key=lambda x: (bool(x.tag), (x.box[2] - x.box[0]) * (x.box[3] - x.box[1])
-                                                          if x.box else 0))
+                                                          if x.box else 0))  # keep the tagged / biggest one
                     names = [item_option(x.id) for x in sel_items]
                     keep_name = st.selectbox("Merge these into one - keep", names, index=names.index(item_option(best.id)),
                                              key=f"mkeep_{k}")
@@ -1538,36 +1577,12 @@ with panel_col:
                 inc = all(c.include for c in sel_lines)
                 st.toggle("In DEXPI", inc, key=f"ninc_{k}", on_change=lambda ids=[c.id for c in sel_lines]:
                           _set_lines(ids, st.session_state[f"ninc_{k}"]))
+            st.button("Hide the selection on the map", key=f"hide_{k}", width="stretch", on_click=_hide,
+                      args=([x.id for x in sel_items], [c.id for c in sel_lines]))
             for e in ends[:12]:
                 if st.button(f"Go to {item_name(e)} ›", key=f"nend_{e}_{k}", type="tertiary"):
                     select({e}, (), zoom=True)
                     st.rerun()
-        if sel_items or sel_lines:
-            what = ("this item" if len(sel_items) == 1 and not sel_lines else
-                    "this line" if len(sel_lines) == 1 and not sel_items else "the selection")
-            st.button(f"Hide {what} on the map", key=f"hide_{k}", width="stretch", on_click=_hide,
-                      args=([s.id for s in sel_items], [c.id for c in sel_lines]),
-                      help="Takes it off the map so you can see what is behind it. It stays in the tables "
-                           "and in the DEXPI file - use 'In DEXPI' to leave it out of the file.")
-        st.divider()
-        hidden_syms, hidden_rows = st.session_state.get("hidden", (set(), set()))
-        if hidden_syms or hidden_rows:
-            h1, h2 = st.columns([3, 2])
-            h1.caption(f"{len(hidden_syms)} item(s) and {len(hidden_rows)} line(s) hidden on the map")
-            h2.button("Show all", key=f"unhide_{k}", on_click=_unhide, width="stretch")
-        b1, b2 = st.columns(2)
-        to_check = [s for s in review.symbols if status(s) == "needs review"]
-        current = next(iter(show_syms), None)
-        after = [s for s in to_check if s.id != current]
-        if b1.button(f"Next to check ▸ ({len(to_check)})", disabled=not to_check, width="stretch",
-                     help="Selects the next item marked red, and zooms to it"):
-            ids = [s.id for s in to_check]
-            nxt = ids[(ids.index(current) + 1) % len(ids)] if current in ids else ids[0]
-            select({nxt}, (), zoom=True)
-            st.rerun()
-        if b2.button("Clear selection", disabled=not (show_syms or show_conns), width="stretch"):
-            select()
-            st.rerun()
 
     if review.unattached_tags:
         with st.expander(f"OCR tags not on any item ({len(review.unattached_tags)})"):
