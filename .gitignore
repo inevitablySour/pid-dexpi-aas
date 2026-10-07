@@ -12,3 +12,5 @@ __pycache__/
 
 # downloaded helper programs (scripts/serve_public.sh)
 /tools/
+# the shared app's link and password (scripts/serve_public.sh)
+/ml/serve_public.log
