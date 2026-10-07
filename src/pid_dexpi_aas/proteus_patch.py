@@ -16,9 +16,9 @@ ProteusSerializer).
 SCOPE: this patch handles the shapes build_model.py actually produces - PipingNetworkSegments
 built via piping_toolkit.construct_new_segment with an empty or single-valve item list and
 PipingConnectionConvention.USE_ITEMS (source/target are always equipment Nozzles or valve
-PipingComponents, never multi-item segments with internal DirectPipingConnections). It does
-NOT attempt to handle instrumentation loop functions, actuating systems, or process signal
-generating systems, since build_model.py doesn't produce those yet either.
+PipingComponents, never multi-item segments with internal DirectPipingConnections), and the
+instrument wiring build_model._wire_instruments makes. It does NOT attempt instrumentation
+loop functions, actuating systems or process signal generating systems (not produced).
 
 XML SHAPE (reverse-engineered from pydexpi's Proteus PARSER, which does understand these
 classes, since no exporter or example fixture exists to copy from - see parser_modules.py's
@@ -37,8 +37,9 @@ ProcessInstrumentationFunctionParser/InformationFlowParser):
   _extract_connections) - we still write real indices for Proteus-format compliance (other
   tools may read them correctly) but our own round-trip test only asserts on
   sourceItem/targetItem identity via ID, not sourceNode/targetNode.
-- <ProcessInstrumentationFunction ID="..."> as a direct child of <PlantModel>, no nested
-  signal wiring (build_model.py doesn't produce signalConveyingFunctions yet).
+- <ProcessInstrumentationFunction ID="..."> as a direct child of <PlantModel>, with its
+  sensors, actuating functions and measuring / signal lines nested inside it (see
+  ProcessInstrumentationFunctionExporter).
 """
 from __future__ import annotations
 
@@ -289,26 +290,80 @@ class PipingNetworkSystemExporter(ExporterModule):
 
 
 class ProcessInstrumentationFunctionExporter(ExporterModule):
-    """Exports a ProcessInstrumentationFunction with no nested signal wiring.
+    """Exports a ProcessInstrumentationFunction with its wiring (build_model._wire_instruments):
 
-    SCOPE LIMIT: build_model.py does not populate signalConveyingFunctions/
-    processSignalGeneratingFunctions/actuatingFunctions, so this exporter does not
-    attempt the <InformationFlow>/<Association> wiring documented in the parser for
-    those fields - only the bare tagged function itself is exported.
-    """
+        <ProcessInstrumentationFunction ID=.. ComponentClass=..>   (+ its GenericAttributes)
+          <ProcessSignalGeneratingFunction ID=..>  <Association Type="is located in" ItemID=sensing location/>
+          <ActuatingFunction ID=..>                <Association Type="is located in" ItemID=segment/>
+          <InformationFlow ID=.. ComponentClass="MeasuringLineFunction" | "SignalLineFunction">
+             <Association Type="has logical start" ItemID=../> <Association Type="has logical end" ItemID=../>
+          <Association Type="is logical start of" | "is logical end of" ItemID=information flow/>
+
+    - the shape pyDEXPI's reader takes apart (ProcessInstrumentationFunctionParser,
+    ProcessSignalGeneratingFunctionParser, ActuatingFunctionParser, InformationFlowParser):
+    children by tag, links by Association type, referenced items by Proteus ID. A signal
+    line to another instrument is written inside its source instrument; the far end gets
+    the matching "is logical end of". Round-trip tested (tests/test_proteus_patch.py)."""
 
     def __init__(self, context: ModuleContext, pif: inst.ProcessInstrumentationFunction) -> None:
         super().__init__(context)
         self.pif = pif
         self.generic_attribute_exporter = GenericAttributeExporter(context, pif)
+        # (signal off-page connectors share this list in pyDEXPI's model and have no wiring)
+        self.parts = (list(getattr(pif, "processSignalGeneratingFunctions", None) or [])
+                      + list(getattr(pif, "actuatingFunctions", None) or []))
+        self.flows = list(getattr(pif, "signalConveyingFunctions", None) or [])
+        self.part_attrs = [GenericAttributeExporter(context, o) for o in self.parts + self.flows]
+        self.elements: dict[str, ET.Element] = {}
+        # every flow in the model, so an instrument can name the flows that end on it
+        context.__dict__.setdefault("_pid_dexpi_flows", []).extend(self.flows)
 
     def compositional_pass(self) -> ET.Element:
         elem = ET.Element("ProcessInstrumentationFunction")
         elem.set("ID", self.make_id_attribute(self.pif))
         elem.set(*make_default_component_class_uri("ProcessInstrumentationFunction"))
         self.generic_attribute_exporter.compose_and_add_attributes(elem)
+        for obj, attrs in zip(self.parts + self.flows, self.part_attrs):
+            tag = ("InformationFlow" if isinstance(obj, inst.SignalConveyingFunction) else type(obj).__name__
+                   if isinstance(obj, (inst.ProcessSignalGeneratingFunction, inst.ActuatingFunction)) else None)
+            if tag is None:
+                continue
+            child = ET.SubElement(elem, tag)
+            child.set("ID", self.make_id_attribute(obj))
+            # the reader picks the class from ComponentClass (an InformationFlow without it is
+            # dropped); ComponentClassURI is the DEXPI reference-data link
+            child.set("ComponentClass", type(obj).__name__)
+            child.set(*make_default_component_class_uri(type(obj).__name__))
+            attrs.compose_and_add_attributes(child)
+            self.register_object(obj.id, child)
+            self.elements[obj.id] = child
         self.register_object(self.pif.id, elem)
+        self.elements[self.pif.id] = elem
         return elem
+
+    def reference_pass(self) -> None:
+        super().reference_pass()
+        ref = lambda obj: _resolve_connector_proteus_id(self.module_context, obj)
+
+        def associate(owner, kind: str, obj) -> None:
+            target_id = ref(obj)
+            if owner is not None and target_id is not None:
+                a = ET.SubElement(owner, "Association")
+                a.set("Type", kind)
+                a.set("ItemID", target_id)
+
+        for part in self.parts:
+            where = getattr(part, "sensingLocation", None) or getattr(part, "actuatingLocation", None)
+            associate(self.elements.get(part.id), "is located in", where)
+        for flow in self.flows:
+            associate(self.elements.get(flow.id), "has logical start", flow.source)
+            associate(self.elements.get(flow.id), "has logical end", flow.target)
+        # the reverse links on this instrument and its parts, for every flow in the model
+        mine = {self.pif.id} | {p.id for p in self.parts}
+        for flow in self.module_context.__dict__.get("_pid_dexpi_flows", []):
+            for end, kind in ((flow.source, "is logical start of"), (flow.target, "is logical end of")):
+                if end is not None and end.id in mine:
+                    associate(self.elements.get(end.id), kind, flow)
 
 
 class PatchedPlantModelExporter(PlantModelExporter):

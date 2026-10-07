@@ -62,6 +62,10 @@ class BuildResult:
     records: list[BuildRecord] = field(default_factory=list)
     # shape id -> constructed DEXPI object, for wiring edges in a second pass
     shape_objects: dict[str, object] = field(default_factory=dict)
+    # edge id -> the PipingNetworkSegment(s) it became (a line's specifications go there)
+    edge_segments: dict[str, list] = field(default_factory=dict)
+    # edge id -> the instrumentation objects it became (measuring / signal line, ...)
+    edge_signals: dict[str, list] = field(default_factory=dict)
 
 
 def _tag_name(shape: Shape, tag_lookup: dict[str, list[str]]) -> str | None:
@@ -352,7 +356,7 @@ def _as_pipe_end(obj, as_source: bool, ctx: str = ""):
 
 
 
-def _add_network_links(diagram, build_result, shapes_by_id, links) -> None:
+def _add_network_links(diagram, build_result, shapes_by_id, links, instrument_links=None) -> None:
     """Pipe networks (lines joined at junctions, parser_drawio.join_pipe_networks) arrive as
     pairwise "net" edges. Build each network ONCE: 2 items -> one link; k >= 3 items ->
     k - 2 PipeTee fittings in a chain, one link per leg - instead of k(k-1)/2 parallel
@@ -394,25 +398,125 @@ def _add_network_links(diagram, build_result, shapes_by_id, links) -> None:
                 links.append(_Link(ids if j == 0 else [], m, tee, reason=reason, dir=sense, basis=basis))
             for i in range(len(tees) - 1):
                 links.append(_Link([], tees[i], tees[i + 1], reason=reason))
+        # instruments tapped onto the network measure at it: at its first tee, else at the
+        # segment its two pipe items make, else at its one pipe item
+        if sensing and instrument_links is not None and members:
+            where = tees[0] if tees else _NetworkSpot(net_id, [m for m, _ in members])
+            inst_ids = {e.id for e in edges if any(_is_instrument(o) for o in (
+                build_result.shape_objects.get(e.source), build_result.shape_objects.get(e.target)))}
+            for sid in dict.fromkeys(sensing):
+                instrument_links.append(_InstrumentLink(
+                    sorted(i for i in inst_ids if sid in i), build_result.shape_objects[sid], where, False, 0))
         if k < 2:
             for e in edges:
-                build_result.records.append(BuildRecord(
-                    e.id, "edge", "skipped", None,
-                    "pipe network with fewer than two pipe items (the rest are instruments - "
-                    "sensing connections, not yet mapped to DEXPI)" if sensing else
-                    "pipe network endpoints not built"))
+                if not sensing or not members:
+                    build_result.records.append(BuildRecord(
+                        e.id, "edge", "skipped", None, "pipe network endpoints not built"))
         else:
             # every pairwise net edge is represented by the network's segments
             for e in edges:
                 both_pipe = all(not _is_instrument(o) for o in (
                     _get_or_build_off_page_connector(e.source, build_result, shapes_by_id, True),
                     _get_or_build_off_page_connector(e.target, build_result, shapes_by_id, False)) if o is not None)
-                build_result.records.append(BuildRecord(
-                    e.id, "edge", "built" if both_pipe else "skipped", "PipingNetworkSegment" if both_pipe else None,
-                    f"via pipe network {net_id} ({k} items, {len(tees)} tee(s))" if both_pipe else
-                    "equipment/instrument sensing edge - not a piping connection, not yet handled "
-                    "(needs a SensingLocation/measuring-line mapping)",
-                    confidence=e.source_resolution if both_pipe else ""))
+                if both_pipe:  # instrument edges are recorded by _wire_instruments
+                    build_result.records.append(BuildRecord(
+                        e.id, "edge", "built", "PipingNetworkSegment",
+                        f"via pipe network {net_id} ({k} items, {len(tees)} tee(s))", confidence=e.source_resolution))
+
+
+@dataclass
+class _InstrumentLink:
+    """A drawn connection with an instrument at one or both ends."""
+    edge_ids: list
+    a: object
+    b: object  # an instrument, a built item, or a _NetworkSpot / PipeTee of a pipe network
+    signal: bool  # drawn dashed
+    dir: int = 0  # +1 a -> b, -1 b -> a, 0 unknown
+
+
+@dataclass
+class _NetworkSpot:
+    """Where an instrument taps a pipe network of two pipe items: their segment."""
+    net_id: str
+    members: list
+
+
+def _sensing_location(obj, system):
+    """Where an instrument measures, as DEXPI allows it (a SensingLocation): a valve, fitting,
+    tee or segment as it is; equipment through a nozzle of its own; a pipe network through
+    the segment joining its items. None for what cannot be one (an off-page connector)."""
+    from pydexpi.dexpi_classes.pydantic_classes import SensingLocation
+
+    if isinstance(obj, _NetworkSpot):
+        for seg in system.segments:
+            ends = list(seg.items) + [seg.sourceItem, seg.targetItem]
+            if all(any(m is x or (getattr(x, "id", None) and x in getattr(m, "nozzles", [])) for x in ends)
+                   for m in obj.members):
+                return seg
+        m = obj.members[0]
+        return _sensing_location(m, system)
+    if isinstance(obj, eq.Equipment):
+        return _allocate_nozzle(obj)
+    return obj if isinstance(obj, SensingLocation) else None
+
+
+def _segment_holding(obj, system):
+    for seg in system.segments:
+        if any(obj is x for x in seg.items) or seg.sourceItem is obj or seg.targetItem is obj:
+            return seg
+    return None
+
+
+def _instrument_number(pif) -> str | None:
+    return getattr(pif, "processInstrumentationFunctionNumber", None)
+
+
+def _wire_instruments(build_result, instrument_links, system) -> None:
+    """Instrument connections, the DEXPI way (an instrument owns its wiring):
+      - instrument - instrument: a SignalLineFunction from one to the other;
+      - instrument - valve over a dashed (signal) line: the instrument actuates it - an
+        ActuatingFunction located on the valve's segment, reached by a SignalLineFunction;
+      - instrument - anything else (vessel, valve, tee, pipe): it measures there - a
+        ProcessSignalGeneratingFunction at that SensingLocation (a nozzle for equipment),
+        and a MeasuringLineFunction from it to the instrument.
+    Flow known on the line (+1 / -1) orders the signal line; otherwise as drawn."""
+    for ln in instrument_links:
+        a, b = (ln.b, ln.a) if ln.dir == -1 else (ln.a, ln.b)
+        made, what = [], ""
+        if _is_instrument(a) and _is_instrument(b):
+            line = inst.SignalLineFunction(source=a, target=b)
+            a.signalConveyingFunctions.append(line)
+            made, what = [line], "SignalLineFunction"
+        else:
+            pif, other = (a, b) if _is_instrument(a) else (b, a)
+            if ln.signal and isinstance(other, piping.PipingComponent) and not isinstance(other, piping.PipeTee):
+                seg = _segment_holding(other, system)
+                act = inst.ActuatingFunction(actuatingFunctionNumber=_instrument_number(pif), actuatingLocation=seg)
+                tag = getattr(other, "pipingComponentName", None)
+                if tag:
+                    act.customAttributes = [CustomStringAttribute(
+                        attributeName="ActuatedItem", attributeURI="urn:pid-dexpi-aas:ActuatedItem", value=tag)]
+                line = inst.SignalLineFunction(source=pif, target=act)
+                pif.actuatingFunctions.append(act)
+                pif.signalConveyingFunctions.append(line)
+                made, what = [act, line], "ActuatingFunction + SignalLineFunction"
+            else:
+                where = _sensing_location(other, system)
+                if where is None:
+                    for eid in ln.edge_ids:
+                        build_result.records.append(BuildRecord(
+                            eid, "edge", "skipped", None,
+                            f"instrument line to a {type(other).__name__} - not a place DEXPI can measure at"))
+                    continue
+                sensor = inst.ProcessSignalGeneratingFunction(
+                    processSignalGeneratingFunctionNumber=_instrument_number(pif), sensingLocation=where)
+                line = inst.MeasuringLineFunction(source=sensor, target=pif)
+                pif.processSignalGeneratingFunctions.append(sensor)
+                pif.signalConveyingFunctions.append(line)
+                made, what = [sensor, line], f"ProcessSignalGeneratingFunction at {type(where).__name__} + MeasuringLineFunction"
+        for eid in ln.edge_ids:
+            build_result.edge_signals.setdefault(eid, []).extend(made)
+            build_result.records.append(BuildRecord(eid, "edge", "built", what))
 
 
 def _propagate_link_flow(links) -> None:
@@ -560,6 +664,8 @@ def _build_segments(build_result, links, system) -> None:
         segment.customAttributes = list(segment.customAttributes or []) + [CustomStringAttribute(
             attributeName="FlowDirectionBasis", attributeURI="urn:pid-dexpi-aas:flow-direction-basis", value=basis)]
         system.segments.append(segment)
+        for eid in edge_ids:
+            build_result.edge_segments.setdefault(eid, []).append(segment)
         for i in seg_links:
             ln = links[i]
             if ln.edge is not None:
@@ -607,6 +713,7 @@ def wire_edges(diagram: ParsedDiagram, build_result: BuildResult) -> None:
     shapes_by_id = {shape.id: shape for shape in diagram.shapes}
     _PIPE_TWIN.clear()
     links: list[_Link] = []  # validated process connections, chained into segments below
+    instrument_links: list[_InstrumentLink] = []  # wired after the segments (_wire_instruments)
 
     for edge in diagram.edges:
         if edge.id.startswith("net") and edge.style == "pipe network":
@@ -741,16 +848,9 @@ def wire_edges(diagram: ParsedDiagram, build_result: BuildResult) -> None:
             continue
 
         if _is_instrument(source_obj) or _is_instrument(target_obj):
-            build_result.records.append(
-                BuildRecord(
-                    edge.id,
-                    "edge",
-                    "skipped",
-                    None,
-                    "equipment/instrument sensing edge - not a piping connection, "
-                    "not yet handled (needs a SensingLocation/measuring-line mapping)",
-                )
-            )
+            # an instrument's connection: wired as measuring / signal / actuating once the
+            # pipe segments exist (an actuator sits on its valve's segment)
+            instrument_links.append(_InstrumentLink([edge.id], source_obj, target_obj, edge.is_dashed, edge.flow))
             continue
 
         # An off-page connector must be an internal segment item, per the DEXPI/Proteus
@@ -764,9 +864,10 @@ def wire_edges(diagram: ParsedDiagram, build_result: BuildResult) -> None:
         links.append(_Link([edge.id], _as_pipe_end(source_obj, True, edge.id), _as_pipe_end(target_obj, False, edge.id), edge,
                            dir=edge.flow, basis=edge.flow_basis))
 
-    _add_network_links(diagram, build_result, shapes_by_id, links)
+    _add_network_links(diagram, build_result, shapes_by_id, links, instrument_links)
     _propagate_link_flow(links)
     _build_segments(build_result, links, system)
+    _wire_instruments(build_result, instrument_links, system)
 
     if system.segments:
         build_result.model.conceptualModel.pipingNetworkSystems.append(system)

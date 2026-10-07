@@ -53,12 +53,23 @@ def test_valid_piping_segments_are_built():
     assert len(result.model.conceptualModel.pipingNetworkSystems[0].segments) > 0
 
 
-def test_equipment_to_instrument_edge_is_reported_not_silently_dropped():
+def test_instrument_edges_become_dexpi_instrumentation_wiring():
     # LightUp, not FIXTURE: the PFD's only instrument edge ran to "BPR", which is now
     # (correctly) a back-pressure regulator VALVE in the line, so it has none left.
+    # Instrument lines used to be skipped ("sensing edge"); they are now measuring lines
+    # (instrument on a vessel / valve / pipe), signal lines (instrument to instrument) or
+    # actuating functions (instrument driving a valve over a dashed line).
+    from pydexpi.dexpi_classes import instrumentation as inst
+
     diagram = parse_drawio_file(FIXTURE.parent / "P&ID gramflow reactor V3__diagram0.xml")
     result = build_model(diagram)
-    sensing_edges = [
-        r for r in result.records if r.element_kind == "edge" and "sensing" in r.reason
-    ]
-    assert len(sensing_edges) >= 1
+    assert not [r for r in result.records if r.element_kind == "edge" and "sensing" in r.reason]
+    pifs = [p for p in result.model.conceptualModel.processInstrumentationFunctions
+            if isinstance(p, inst.ProcessInstrumentationFunction)]
+    lines = [f for p in pifs for f in p.signalConveyingFunctions]
+    assert any(isinstance(f, inst.MeasuringLineFunction) for f in lines)
+    for f in lines:
+        assert f.source is not None and f.target is not None
+    for p in pifs:
+        for g in p.processSignalGeneratingFunctions:
+            assert g.sensingLocation is not None

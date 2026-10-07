@@ -190,3 +190,33 @@ def test_multi_item_segment_with_tee_branch_round_trips(tmp_path):
     assert [type(i).__name__ for i in seg_run.items] == ["GateValve", "PipeTee", "CheckValve"]
     assert type(seg_run.sourceItem).__name__ == "Nozzle" and type(seg_run.targetItem).__name__ == "Nozzle"
     assert type(seg_branch.sourceItem).__name__ == "PipeTee" and type(seg_branch.targetItem).__name__ == "Nozzle"
+
+
+def test_instrument_wiring_survives_export_and_reload(tmp_path):
+    """Measuring lines (sensor at a vessel nozzle / valve / tee / pipe -> instrument), signal
+    lines (instrument -> instrument / actuator) and actuating functions are written as
+    nested ProcessSignalGeneratingFunction / ActuatingFunction / InformationFlow elements
+    and come back from pyDEXPI's reader with every end and location."""
+    from collections import Counter
+
+    from pydexpi.dexpi_classes import instrumentation as inst
+
+    from pid_dexpi_aas.build_model import build_model
+    from pid_dexpi_aas.parser_drawio import parse_drawio_file
+    from pid_dexpi_aas.serialize import save_and_verify
+
+    root = Path(__file__).parent.parent
+    diagram = parse_drawio_file(root / "handoff" / "decoded_xml" / "P&ID gramflow reactor V3__diagram0.xml")
+    model = build_model(diagram).model
+
+    def wiring(m):
+        pifs = [p for p in m.conceptualModel.processInstrumentationFunctions
+                if isinstance(p, inst.ProcessInstrumentationFunction)]
+        flows = [f for p in pifs for f in p.signalConveyingFunctions]
+        return (Counter(f"{type(f).__name__}:{type(f.source).__name__}->{type(f.target).__name__}" for f in flows),
+                Counter(type(g.sensingLocation).__name__ for p in pifs for g in p.processSignalGeneratingFunctions),
+                sum(1 for p in pifs for a in p.actuatingFunctions if a.actuatingLocation is not None))
+
+    built = wiring(model)
+    assert sum(built[0].values()) > 10 and all(".->" not in k for k in built[0])
+    assert wiring(save_and_verify(model, tmp_path, "wiring.xml")) == built
