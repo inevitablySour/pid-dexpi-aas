@@ -61,12 +61,50 @@ _ML_VENV = ROOT / "ml" / "relationformer" / ".venv"
 ML_PYTHON = next((p for p in (_ML_VENV / "bin" / "python", _ML_VENV / "Scripts" / "python.exe") if p.exists()),
                  _ML_VENV / "bin" / "python")
 INFER_SCRIPT = ROOT / "ml" / "pid2graph" / "infer_sheet.py"
-# The released model (ml/get_model.sh downloads it); PID_MODEL_CHECKPOINT points elsewhere.
-DEFAULT_CHECKPOINT = os.environ.get("PID_MODEL_CHECKPOINT", str(ROOT / "ml" / "models" / "pid2graph_fold1.pt"))
+# The released model (ml/get_model.sh downloads it): the final all-data model when present,
+# else the fold-1 one; PID_MODEL_CHECKPOINT points elsewhere.
+DEFAULT_CHECKPOINT = os.environ.get("PID_MODEL_CHECKPOINT", str(next(
+    (p for p in (ROOT / "ml" / "models" / "pid2graph_final.pt", ROOT / "ml" / "models" / "pid2graph_fold1.pt")
+     if p.exists()), ROOT / "ml" / "models" / "pid2graph_final.pt")))
 HAS_GPU = shutil.which("nvidia-smi") is not None
+# Served to others (scripts/serve_public.sh): a password screen, and no model settings -
+# visitors cannot point the app at files on this PC.
+PUBLIC = os.environ.get("APP_PUBLIC") == "1"
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
+GPU_BUSY_MB = 1500  # another process holding this much GPU memory is a training run (desktop apps hold < 100)
+
+
+def gpu_busy() -> bool:
+    """Is something else computing on the GPU? Free memory alone is no guide: a training
+    run's use swings between ~2 and ~9 GB, so a moment with room says nothing."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-compute-apps=used_memory", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=10).stdout
+        return any(int(v) >= GPU_BUSY_MB for v in out.split() if v.strip().isdigit())
+    except Exception:
+        return True
+
+
+def pick_device(choice: str) -> str:
+    """"auto": the GPU unless something else (a training run) is computing on it - the app
+    must not push that out of memory - else the CPU (minutes per sheet instead of seconds)."""
+    if choice != "auto":
+        return choice
+    return "cuda" if HAS_GPU and not gpu_busy() else "cpu"
 Image.MAX_IMAGE_PIXELS = None
 
 st.set_page_config(page_title="P&ID to DEXPI converter", layout="wide")
+if APP_PASSWORD and not st.session_state.get("authed"):
+    import hmac
+    st.markdown("### P&ID to DEXPI converter")
+    with st.form("login"):
+        pw = st.text_input("Password", type="password")
+        if st.form_submit_button("Open"):
+            if hmac.compare_digest(pw.encode(), APP_PASSWORD.encode()):
+                st.session_state["authed"] = True
+                st.rerun()
+            st.error("Wrong password.")
+    st.stop()
 st.markdown("### P&ID to DEXPI converter")
 st.html("""<style>
 /* the edit panel stays in view while scrolling the page */
@@ -80,10 +118,14 @@ with st.sidebar:
     st.header("Input")
     drawio_file = st.file_uploader("draw.io file (optional)", type=["drawio", "xml"])
     image_file = st.file_uploader("P&ID image (optional)", type=["png", "jpg", "jpeg"])
-    with st.expander("Model settings"):
-        checkpoint = st.text_input("Model checkpoint", DEFAULT_CHECKPOINT)
-        device = st.selectbox("Device", ["cuda", "cpu"] if HAS_GPU else ["cpu", "cuda"],
-                              help="CPU works (no NVIDIA GPU needed) but takes minutes per sheet.")
+    if PUBLIC:
+        checkpoint, device = DEFAULT_CHECKPOINT, "auto"
+    else:
+        with st.expander("Model settings"):
+            checkpoint = st.text_input("Model checkpoint", DEFAULT_CHECKPOINT)
+            device = st.selectbox("Device", ["auto", "cuda", "cpu"] if HAS_GPU else ["cpu", "cuda"],
+                                  help="auto: the GPU unless a training run is using it, else the CPU. CPU works (no NVIDIA GPU "
+                                       "needed) but takes minutes per sheet.")
     st.divider()
     st.header("Saved review")
     review_upload = st.file_uploader("Resume a saved review (.json)", type=["json"])
@@ -110,18 +152,28 @@ INFER_VERSION = b"v4"
 
 @st.cache_data(show_spinner=False)
 def run_image_model(image_bytes: bytes, image_name: str, checkpoint: str, device: str) -> dict:
-    key = _digest(image_bytes, checkpoint.encode(), device.encode(), INFER_VERSION)
+    # the result does not depend on the device, so it is not part of the key
+    key = _digest(image_bytes, checkpoint.encode(), INFER_VERSION)
     img_path = WORK / f"{key}_{Path(image_name).name}"
     out_path = WORK / f"{key}.json"
     img_path.write_bytes(image_bytes)
     if not out_path.exists():
-        proc = subprocess.run(
-            [str(ML_PYTHON), str(INFER_SCRIPT), "--image", str(img_path), "--checkpoint", checkpoint,
-             "--out", str(out_path), "--device", device],
-            capture_output=True, text=True,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(proc.stderr[-3000:])
+        try:
+            import fcntl
+        except ImportError:  # Windows: no lock (a single local user there)
+            fcntl = None
+        # one image at a time: two users at once would hold the model twice
+        with open(WORK / "infer.lock", "w") as lock:
+            if fcntl is not None:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+            if not out_path.exists():
+                proc = subprocess.run(
+                    [str(ML_PYTHON), str(INFER_SCRIPT), "--image", str(img_path), "--checkpoint", checkpoint,
+                     "--out", str(out_path), "--device", pick_device(device)],
+                    capture_output=True, text=True,
+                )
+                if proc.returncode != 0:
+                    raise RuntimeError(proc.stderr[-3000:])
     return json.loads(out_path.read_text())
 
 
@@ -140,7 +192,10 @@ def build_review() -> ReviewDiagram:
         if not Path(checkpoint).exists():
             st.error(f"Model checkpoint not found: {checkpoint}")
             st.stop()
-        with st.spinner("Running the symbol model and OCR on the image (about 15 s on GPU)..."):
+        on = pick_device(device)
+        with st.spinner("Running the symbol model and OCR on the image "
+                        + ("(about 15 s on the GPU)..." if on == "cuda" else
+                           "on the CPU - the GPU is busy or absent, this takes a few minutes...")):
             try:
                 infer = run_image_model(image_file.getvalue(), image_file.name, checkpoint, device)
             except RuntimeError as exc:

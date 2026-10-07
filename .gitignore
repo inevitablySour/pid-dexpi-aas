@@ -9,3 +9,6 @@ __pycache__/
 
 # review images from ml/pid2graph/render_labels.py
 /label_check/
+
+# downloaded helper programs (scripts/serve_public.sh)
+/tools/

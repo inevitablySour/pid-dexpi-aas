@@ -63,6 +63,20 @@ Code: `src/pid_dexpi_aas/review.py` (review rows, cross-check, -> DEXPI),
 `ocr_tags.py` (OCR tokens -> tags -> symbols), `ml/pid2graph/infer_sheet.py` (model + OCR,
 runs in the ML venv).
 
+## Sharing the app from this PC (free)
+
+```bash
+./scripts/serve_public.sh            # prints a public https link and a password
+APP_PASSWORD='...' ./scripts/serve_public.sh
+```
+
+A free Cloudflare quick tunnel (no account; `cloudflared` is downloaded to `tools/` on
+first use) gives the app a public link while the script runs; the app itself listens on
+127.0.0.1 only. Testers need the link and the password. Model settings are hidden, one
+image is processed at a time, and image mode uses the GPU unless another process (a
+training run) is computing on it - then the CPU, a few minutes per sheet. The link
+changes on every start and stops when the PC sleeps or the script ends.
+
 ## DEXPI -> AAS (IDTA 02012-1-0)
 
 The review app's build step also gives an `.aasx`: an Asset Administration Shell (Type 1)
