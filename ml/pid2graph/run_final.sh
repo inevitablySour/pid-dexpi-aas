@@ -14,8 +14,8 @@ PY="$RF/.venv/bin/python"
 EXP="final"
 EXTRA=(); [ -n "${DEBUG:-}" ] && EXTRA=(--debug --epochs 1) && EXP="final_debug"
 
-cp "$HERE/dataset_pid2graph.py" "$RF/pid2graph_data/"
-cp "$HERE/train_pid2graph.py" "$HERE/evaluator_pid2graph.py" "$RF/"
+cp "$HERE/model/dataset_pid2graph.py" "$RF/pid2graph_data/"
+cp "$HERE/model/train_pid2graph.py" "$HERE/model/evaluator_pid2graph.py" "$RF/"
 cp "$HERE/pid2graph_final.yaml" "$RF/configs/"
 
 cd "$RF"
@@ -28,7 +28,10 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "$PY" train_pid2graph.py \
 ckpt="$(ls -t trained_weights/runs/${EXP}_10/models/checkpoint_epoch=*.pt | head -1)"
 if [ -z "${DEBUG:-}" ]; then
   mkdir -p "$HERE/../models"
-  cp "$ckpt" "$HERE/../models/pid2graph_final.pt"
+  # the app needs only the weights: drop the optimizer state (475 MB -> ~160 MB); the full
+  # checkpoint stays in trained_weights/runs/ for further training
+  "$PY" -c "import sys, torch; torch.save({'net': torch.load(sys.argv[1], map_location='cpu')['net']}, sys.argv[2])" \
+    "$ckpt" "$HERE/../models/pid2graph_final.pt"
   echo "=== final model: $ckpt -> ml/models/pid2graph_final.pt ($(date)) ==="
 else
   echo "=== debug run done: $ckpt ==="

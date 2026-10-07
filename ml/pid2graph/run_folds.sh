@@ -17,8 +17,8 @@ EXTRA=(); [ -n "${DEBUG:-}" ] && EXTRA=(--debug --epochs 1) && TAG="${TAG}_debug
 RESULTS="$RF/trained_weights/results_${TAG}"
 mkdir -p "$RESULTS"
 
-cp "$HERE/dataset_pid2graph.py" "$RF/pid2graph_data/"
-cp "$HERE/train_pid2graph.py" "$HERE/evaluator_pid2graph.py" "$RF/"
+cp "$HERE/model/dataset_pid2graph.py" "$RF/pid2graph_data/"
+cp "$HERE/model/train_pid2graph.py" "$HERE/model/evaluator_pid2graph.py" "$RF/"
 cp "$HERE/pid2graph_finetune.yaml" "$RF/configs/"
 
 cd "$RF"
@@ -33,8 +33,8 @@ for f in "${FOLDS[@]}"; do
   # to trust, and the LR schedule is fixed, so the final state is the honest choice.
   ckpt="$(ls -t trained_weights/runs/${exp}_10/models/checkpoint_epoch=*.pt | head -1)"
   echo "=== fold $f: scoring $ckpt ==="
-  "$PY" "$HERE/eval_sheets.py" --checkpoint "$ckpt" --set open100 --fold "$f" --out "$RESULTS/open100_fold${f}.json" > /dev/null
-  "$PY" "$HERE/eval_sheets.py" --checkpoint "$ckpt" --set team --out "$RESULTS/team_fold${f}.json" > /dev/null
+  "$PY" "$HERE/eval/eval_sheets.py" --checkpoint "$ckpt" --set open100 --fold "$f" --out "$RESULTS/open100_fold${f}.json" > /dev/null
+  "$PY" "$HERE/eval/eval_sheets.py" --checkpoint "$ckpt" --set team --out "$RESULTS/team_fold${f}.json" > /dev/null
 done
 
 "$PY" - "$RESULTS" <<'EOF'
