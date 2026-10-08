@@ -981,3 +981,30 @@ def test_picture_tee_follows_the_drawn_routes():
     assert (up.from_id, up.to_id, up.flow) == ("CV202", "GV203", "reviewer")
     assert up.path == [(2034, 962), (2092, 962), (2092, 890)]
     assert other.flow == "no flow between them" and (2092, 962) in other.path
+
+
+def test_picture_tee_becomes_a_dexpi_tee():
+    """A tee drawn in the picture editor exports like a draw.io tee: one PipeTee with a
+    segment per leg - not three pipes (the two fed items on the same side of the tee were
+    joined by a pipe of their own)."""
+    import pydexpi.dexpi_classes.piping as pp
+    from pid_dexpi_aas.drawio.picture_editor import apply_editor_drawing
+    from pid_dexpi_aas.review import ReviewDiagram, ReviewSymbol, to_dexpi
+    sym = lambda i, b: ReviewSymbol(id=i, source="image model", box=b, detected_as="valve", tag=i, dexpi_class="GateValve")
+    r = ReviewDiagram(source_name="p", image_path="p", image_size=(4224, 2226), symbols=[
+        sym("CV202", [1948, 936, 2034, 987]), sym("GV203", [2038, 811, 2111, 890]), sym("GV204", [2032, 1043, 2112, 1123])])
+    x = '''<mxGraphModel><root><mxCell id="0"/><mxCell id="picture" parent="0"/><mxCell id="items" parent="0"/>
+    <mxCell id="CV202" vertex="1" parent="items"><mxGeometry x="1948" y="936" width="86" height="51" as="geometry"/></mxCell>
+    <mxCell id="GV203" vertex="1" parent="items"><mxGeometry x="2038" y="811" width="73" height="79" as="geometry"/></mxCell>
+    <mxCell id="GV204" vertex="1" parent="items"><mxGeometry x="2032" y="1043" width="80" height="80" as="geometry"/></mxCell>
+    <mxCell id="L" edge="1" source="CV202" target="GV204" parent="items" style="endArrow=classic;"><mxGeometry relative="1" as="geometry"/></mxCell>
+    <mxCell id="B" edge="1" source="L" target="GV203" parent="items" style="endArrow=classic;"><mxGeometry relative="1" as="geometry"/></mxCell>
+    </root></mxGraphModel>'''
+    apply_editor_drawing(r, x, {"CV202", "GV203", "GV204"}, {"L": [[2034, 962], [2092, 962], [2092, 1043]],
+                                                            "B": [[2092, 962], [2092, 890]]})
+    _, result = to_dexpi(r)
+    segs = [s for sy in result.model.conceptualModel.pipingNetworkSystems for s in sy.segments]
+    tees = [i for s in segs for i in s.items if isinstance(i, pp.PipeTee)]
+    assert len(tees) == 1
+    touching = [s for s in segs if any(i is tees[0] for i in s.items) or s.sourceItem is tees[0] or s.targetItem is tees[0]]
+    assert len(touching) == 2 and len(segs) == 2  # the run through the tee, and the branch from it

@@ -498,6 +498,49 @@ def validate_rows(review: ReviewDiagram) -> list[str]:
     return problems
 
 
+@dataclass
+class _TeeFlow:
+    """build_model reads a pipe network's flow from diagram.flow.member_sense."""
+    member_sense: dict
+
+
+def _picture_tees(review: ReviewDiagram) -> tuple[list, dict, dict]:
+    """Tees drawn in the picture editor (rows with a "tee" attribute: the branch's item
+    joined to both ends of the line it meets) as draw.io pipe networks, so build_model makes
+    a DEXPI PipeTee with one segment per leg - not the rows as separate pipes (the pair on
+    the same side of the tee would become a pipe of its own). -> (network edges,
+    {row id: its network edge ids}, member_sense {(network, item): (+1 feeds | -1 fed | 0, basis)})."""
+    rows = {c.id: c for c in review.connections if c.include}
+    edges, tee_rows, sense = [], {}, {}
+    groups: dict = {}
+    for c in rows.values():
+        tee = (c.attributes or {}).get("tee")
+        if tee and tee.get("line") in rows:
+            groups.setdefault(tee["line"], []).append(c)
+    for n, (line_id, legs) in enumerate(groups.items()):
+        line = rows[line_id]
+        net = f"net-tee{n}"
+        item = legs[0].attributes["tee"].get("item") or legs[0].from_id
+        members = list(dict.fromkeys([line.from_id, line.to_id, item]))
+        flows = {}
+        for c in [line, *legs]:
+            if c.flow in FLOW_KNOWN:  # From feeds, To is fed
+                flows.setdefault(c.from_id, 1)
+                flows.setdefault(c.to_id, -1)
+        for m in members:
+            sense[(net, m)] = (flows.get(m, 0), "reviewer" if m in flows else "")
+        ids = []
+        for i, a in enumerate(members):
+            for b in members[i + 1:]:
+                e = Edge(id=f"{net}:{a}:{b}", source=a, target=b, style="pipe network",
+                         is_dashed=line.line_type == "signal")
+                edges.append(e)
+                ids.append(e.id)
+        for c in [line, *legs]:
+            tee_rows[c.id] = ids
+    return edges, tee_rows, sense
+
+
 def _mapping_for_row(s: ReviewSymbol) -> MappingResult:
     if not s.include or s.dexpi_class == SKIP:
         return MappingResult(Category.UNMAPPED, None, "excluded by reviewer" if not s.include else s.notes or "skipped")
@@ -535,8 +578,10 @@ def to_dexpi(review: ReviewDiagram) -> tuple[ParsedDiagram, BuildResult]:
     # rejecting zero-length edges - apply exactly as in the plain draw.io pipeline.
     original_edges = {e.id: e for e in base.edges} if base is not None else {}
     edges = []
+    tee_edges, tee_rows, member_sense = _picture_tees(review)
+    edges += tee_edges
     for c in review.connections:
-        if not c.include:
+        if not c.include or c.id in tee_rows:
             continue
         if c.id in original_edges:
             edge = copy.copy(original_edges[c.id])
@@ -572,11 +617,14 @@ def to_dexpi(review: ReviewDiagram) -> tuple[ParsedDiagram, BuildResult]:
         traced[c.id] = route(item_box[c.from_id], item_box[c.to_id], obstacles)
     diagram = ParsedDiagram(source_file=review.source_name, shapes=shapes, edges=edges,
                             specs=dict(base.specs) if base is not None else {},
-                            flow=base.flow if base is not None else None,
+                            flow=base.flow if base is not None else (
+                                _TeeFlow(member_sense) if member_sense else None),
                             routes=({**(base.routes or {}), **traced} if base is not None else (traced or None)),
                             drawn_edges=list(base.edges) if base is not None else None,
                             sections=list(base.sections) if base is not None else [])
     result = build_model(diagram, overrides, tag_overrides)
+    for row, net_edges in tee_rows.items():  # a tee's rows map to its network's segments
+        result.edge_segments[row] = list({id(x): x for e in net_edges for x in result.edge_segments.get(e, [])}.values())
     # specification fields filled in by the reviewer (dexpi/fields.py), over the drawing's notes
     from pid_dexpi_aas.dexpi.fields import apply_fields
     result.spec_problems = []
