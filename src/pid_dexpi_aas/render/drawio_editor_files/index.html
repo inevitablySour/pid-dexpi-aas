@@ -60,9 +60,11 @@ window.addEventListener("message", (e) => {
     } else if (m.event === "save") {
       saved = m.xml;
       toEditor({ action: "status", message: "Sent to the app", modified: false });
-      // ids: the rows this drawing was showing - only those can have been deleted here
-      toApp("streamlit:setComponentValue", { value: { xml: m.xml, t: Date.now(), ids: Object.keys(lastPatch || {}) },
-                                             dataType: "json" });
+      // ids: the rows this drawing was showing - only those can have been deleted here;
+      // routes: every line as draw.io draws it (its right angles are worked out while drawing,
+      // not stored in the file) - the app's map follows the same path
+      toApp("streamlit:setComponentValue", { value: { xml: m.xml, t: Date.now(), ids: Object.keys(lastPatch || {}),
+                                                      routes: drawnRoutes() }, dataType: "json" });
     }
     return;
   }
@@ -181,6 +183,22 @@ function closeLayers(tries) {
   const lw = ui && ((ui.actions && ui.actions.layersWindow) || ui.layersWindow);
   if (lw && lw.window && lw.window.isVisible()) lw.window.setVisible(false);
   if ((tries || 0) < 10) setTimeout(() => closeLayers((tries || 0) + 1), 300);  // it may open a moment later
+}
+
+// Every line's path as drawn, in drawing coordinates (the picture's pixels): the view's
+// points, from end to end, undone of the zoom and scroll.
+function drawnRoutes() {
+  const out = {};
+  if (!graph) return out;
+  const m = graph.getModel(), v = graph.view, sc = v.scale, tr = v.translate;
+  for (const c of Object.values(m.cells)) {
+    if (!m.isEdge(c)) continue;
+    const st = v.getState(c);
+    if (st && st.absolutePoints && st.absolutePoints.length >= 2) {
+      out[c.id] = st.absolutePoints.filter(Boolean).map((q) => [q.x / sc - tr.x, q.y / sc - tr.y]);
+    }
+  }
+  return out;
 }
 
 // ------------------------------------------------------------------- cell data ---

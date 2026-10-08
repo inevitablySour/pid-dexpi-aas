@@ -954,3 +954,30 @@ def test_picture_tee_keeps_its_branch_as_drawn():
     assert set(patch) & set(legs) == {"br"} and "ends" not in patch["br"] and "create" not in patch["br"]
     redrawn = {c.get("id"): c for c in ET.fromstring(review_to_editor_xml(r, "p.png")).iter("mxCell")}
     assert redrawn["br"].get("target") == "ab" and "br-tee1" not in redrawn
+
+
+def test_picture_tee_follows_the_drawn_routes():
+    """The user's CV202 tee: an orthogonal CV202 -> GV204 line (no bend points stored - draw.io
+    works out its right angles while drawing) and a branch from it up to GV203. With the routes
+    the editor sends, every path follows the drawing (it was a straight diagonal), and the
+    arrowheads give the flow: CV202 feeds GV203, GV203 - GV204 have no flow between them."""
+    from pid_dexpi_aas.drawio.picture_editor import apply_editor_drawing
+    from pid_dexpi_aas.review import ReviewDiagram, ReviewSymbol
+    sym = lambda i, b: ReviewSymbol(id=i, source="image model", box=b, detected_as="valve", tag=i, dexpi_class="GateValve")
+    r = ReviewDiagram(source_name="p", image_path="p", image_size=(4224, 2226), symbols=[
+        sym("CV202", [1948, 936, 2034, 987]), sym("GV203", [2038, 811, 2111, 890]), sym("GV204", [2032, 1043, 2112, 1123])])
+    x = '''<mxGraphModel><root><mxCell id="0"/><mxCell id="picture" parent="0"/><mxCell id="items" parent="0"/>
+    <mxCell id="CV202" vertex="1" parent="items"><mxGeometry x="1948" y="936" width="86" height="51" as="geometry"/></mxCell>
+    <mxCell id="GV203" vertex="1" parent="items"><mxGeometry x="2038" y="811" width="73" height="79" as="geometry"/></mxCell>
+    <mxCell id="GV204" vertex="1" parent="items"><mxGeometry x="2032" y="1043" width="80" height="80" as="geometry"/></mxCell>
+    <mxCell id="L" edge="1" source="CV202" target="GV204" parent="items" style="edgeStyle=orthogonalEdgeStyle;endArrow=classic;"><mxGeometry relative="1" as="geometry"/></mxCell>
+    <mxCell id="B" edge="1" source="L" target="GV203" parent="items" style="edgeStyle=orthogonalEdgeStyle;endArrow=classic;"><mxGeometry relative="1" as="geometry"/></mxCell>
+    </root></mxGraphModel>'''
+    routes = {"L": [[2034, 962], [2092, 962], [2092, 1043]], "B": [[2092, 962], [2092, 890]]}
+    apply_editor_drawing(r, x, {"CV202", "GV203", "GV204"}, routes)
+    rows = {frozenset((c.from_id, c.to_id)): c for c in r.connections}
+    line, up, other = rows[frozenset(("CV202", "GV204"))], rows[frozenset(("CV202", "GV203"))], rows[frozenset(("GV203", "GV204"))]
+    assert line.path == [(2034, 962), (2092, 962), (2092, 1043)]
+    assert (up.from_id, up.to_id, up.flow) == ("CV202", "GV203", "reviewer")
+    assert up.path == [(2034, 962), (2092, 962), (2092, 890)]
+    assert other.flow == "no flow between them" and (2092, 962) in other.path

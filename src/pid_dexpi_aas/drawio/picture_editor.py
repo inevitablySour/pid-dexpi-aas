@@ -147,10 +147,13 @@ def _on_border(box, toward):
     return cx + dx * t, cy + dy * t
 
 
-def apply_editor_drawing(review, xml: str, known_ids: set) -> dict:
+def apply_editor_drawing(review, xml: str, known_ids: set, routes: dict | None = None) -> dict:
     """Read a Save of review_to_editor_xml's drawing back into `review`. `known_ids`: the
     rows the editor was showing - only those can have been deleted there (rows added
-    elsewhere meanwhile stay). -> counts of what changed."""
+    elsewhere meanwhile stay). `routes`: {line id: [(x, y), ...]} each line as the editor
+    drew it, end to end (its right angles are not in the file) - the lines' paths, and where
+    a branch meets a line. -> counts of what changed."""
+    routes = {k: [tuple(p) for p in v] for k, v in (routes or {}).items() if v and len(v) >= 2}
     from pid_dexpi_aas.dexpi.mapping import classify_tag, map_shape
     from pid_dexpi_aas.review import (DEXPI_CLASS_CHOICES, FLOW_KNOWN, OFF_PAGE, SKIP, ReviewConnection, ReviewSymbol,
                                       _instrument_attributes, _mapping_to_class)
@@ -175,7 +178,8 @@ def apply_editor_drawing(review, xml: str, known_ids: set) -> dict:
             ends = {} if geo is None else {p.get("as"): (float(p.get("x", 0)), float(p.get("y", 0)))
                                            for p in geo.findall("mxPoint") if p.get("as") in ("sourcePoint", "targetPoint")}
             edges[cid] = {"source": cell.get("source"), "target": cell.get("target"), "style": cell.get("style", ""),
-                          "points": pts, "data": data, "ends": ends}
+                          "points": pts, "data": data, "ends": ends, "route": routes.get(cid)}
+    style_val = lambda st, k: next((p.split("=", 1)[1] for p in (st or "").split(";") if p.startswith(k + "=")), None)
     # a loose end lying on another line (dropped there, not attached): a branch of that line
     centre = lambda b: ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
     unit = sizes(review)[0]
@@ -188,14 +192,13 @@ def apply_editor_drawing(review, xml: str, known_ids: set) -> dict:
                 fa, fb = vertices.get(f["source"]), vertices.get(f["target"])
                 if fid == eid or fa is None or fb is None:
                     continue
-                line = [centre(fa["box"]), *f["points"], centre(fb["box"])]
+                line = f["route"] or [centre(fa["box"]), *f["points"], centre(fb["box"])]
                 d = min(_seg_dist(pt, p, q) for p, q in zip(line, line[1:]))
                 if d <= max(8.0, 0.15 * unit) and (best is None or d < best[0]):
                     best = (d, fid)
             if best:
                 e[key] = best[1]
 
-    style_val = lambda st, k: next((p.split("=", 1)[1] for p in st.split(";") if p.startswith(k + "=")), None)
     counts = {"moved": 0, "added": 0, "removed": 0, "lines added": 0, "lines removed": 0, "lines changed": 0}
     rows = {s.id: s for s in review.symbols}
     for sid, v in vertices.items():
@@ -256,20 +259,40 @@ def apply_editor_drawing(review, xml: str, known_ids: set) -> dict:
         if item not in rows or L is None or L["source"] not in vertices or L["target"] not in vertices:
             continue
         tee_of[eid] = line
-        route = [centre(vertices[L["source"]]["box"]), *L["points"], centre(vertices[L["target"]]["box"])]
-        bend = e["points"] if end == "target" else e["points"][::-1]  # item -> junction
-        towards = bend[-1] if bend else centre(vertices[item]["box"])
-        k, junction = _nearest_on(route, towards)
-        legs = [(L["source"], route[:k + 1][::-1]), (L["target"], route[k + 1:])]
+        line_route = L["route"] or [centre(vertices[L["source"]]["box"]), *L["points"], centre(vertices[L["target"]]["box"])]
+        if e["route"]:  # as drawn: from the item to where it meets the line
+            drawn = e["route"] if end == "target" else e["route"][::-1]
+            bend, towards = drawn[:-1], drawn[-1]
+        else:
+            bend = e["points"] if end == "target" else e["points"][::-1]
+            towards = bend[-1] if bend else centre(vertices[item]["box"])
+        k, junction = _nearest_on(line_route, towards)
+        legs = [(L["source"], line_route[:k + 1][::-1]), (L["target"], line_route[k + 1:])]
+        # flow from the arrowheads: the line's direction says which side feeds the junction;
+        # the branch's says whether its item is fed from it or feeds it
+        l_end, l_start = style_val(L["style"], "endArrow"), style_val(L["style"], "startArrow")
+        l_dir = (1 if l_end != "none" and l_start in (None, "none") else
+                 -1 if l_start not in (None, "none") and l_end == "none" else 0)
+        upstream = L["source"] if l_dir > 0 else L["target"] if l_dir < 0 else None
+        b_end, b_start = style_val(e["style"], "endArrow"), style_val(e["style"], "startArrow")
+        at_item = (b_start not in (None, "none")) if end == "target" else (b_end != "none")
+        at_line = (b_end != "none") if end == "target" else (b_start not in (None, "none"))
+        into_item, out_of_item = at_item and not at_line, at_line and not at_item
         n = 0
         for other, along in legs:
             if other not in rows or other == item:
                 continue
-            path = [*bend, junction, *along[:-1]]
+            path = [*bend, junction, *along] if e["route"] or L["route"] else [*bend, junction, *along[:-1]]
+            flow = (item, other, "")
+            if upstream is not None and into_item:
+                flow = (other, item, "reviewer") if other == upstream else (item, other, "no flow between them")
+            elif upstream is not None and out_of_item:
+                flow = (item, other, "reviewer") if other != upstream else (item, other, "no flow between them")
             edges[eid if n == 0 else f"{eid}-tee{n}"] = {
-                "source": item, "target": other, "points": path, "data": e["data"], "ends": {},
-                "style": (e["style"] or "").replace("endArrow=classic", "endArrow=none").replace("startArrow=classic", "startArrow=none"),
-                "tee": {"line": line, "branch": eid, "item": item, "points": e["points"], "at": end}}
+                "source": item, "target": other, "data": e["data"], "ends": {}, "style": e["style"] or "",
+                "points": [] if (e["route"] or L["route"]) else path, "route": path if (e["route"] or L["route"]) else None,
+                "flow_set": flow, "tee": {"line": line, "branch": eid, "item": item, "at": end,
+                        "points": e["points"] or ([list(q) for q in e["route"][1:-1]] if e["route"] else [])}}
             n += 1
     conns = {c.id: c for c in review.connections}
     keep = []
@@ -290,9 +313,14 @@ def apply_editor_drawing(review, xml: str, known_ids: set) -> dict:
         start, end = style_val(e["style"], "startArrow"), style_val(e["style"], "endArrow")
         to_b, to_a = end not in ("none",), start not in (None, "none")
         frm, to = (b, a) if to_a and not to_b else (a, b)
+        if e.get("flow_set"):  # a tee leg: direction from the line and branch arrowheads
+            frm, to = e["flow_set"][:2]
         ba, bb = rows[frm].box, rows[to].box
         pts = e["points"] if frm == a else e["points"][::-1]
-        path = [_on_border(ba, pts[0]), *pts, _on_border(bb, pts[-1])] if pts and ba and bb else None
+        if e.get("route"):  # the line as the editor drew it, end to end
+            path = list(e["route"]) if frm == a else list(e["route"])[::-1]
+        else:
+            path = [_on_border(ba, pts[0]), *pts, _on_border(bb, pts[-1])] if pts and ba and bb else None
         c = conns.get(eid)
         if c is None:
             c = ReviewConnection(id=eid, from_id=frm, to_id=to, source="manual",
@@ -302,13 +330,15 @@ def apply_editor_drawing(review, xml: str, known_ids: set) -> dict:
             before = None
         else:
             before = (c.from_id, c.to_id)
-            if {c.from_id, c.to_id} != {frm, to} or pts:
-                c.path = path  # re-pointed or re-routed (no bends drawn: the map routes it)
+            if {c.from_id, c.to_id} != {frm, to} or pts or e.get("route"):
+                c.path = path  # as drawn now (without a drawn route or bends: the map routes it)
             if {c.from_id, c.to_id} != {frm, to}:
                 counts["lines changed"] += 1
             c.from_id, c.to_id = frm, to
         c.line_type = "signal" if style_val(e["style"], "dashed") == "1" else "process"
-        if not (to_a or to_b):
+        if e.get("flow_set"):
+            c.flow = e["flow_set"][2]
+        elif not (to_a or to_b):
             c.flow = ""  # no arrowhead: direction unknown
         elif to_a and to_b:
             c.flow = "both ways"  # arrowheads at both ends: a two-way pipe

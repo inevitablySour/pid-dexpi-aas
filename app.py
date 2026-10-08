@@ -271,7 +271,7 @@ if st.session_state.get("editor_open") and EDITOR_INSTALLED:
         saved = drawio_editor(doc["xml"], editor_patch(prev), title=prev.source_name, mode="picture")
         if saved and saved.get("t") != st.session_state.get("editor_t"):  # a new Save
             # the rows the editor was showing (it adds the side panel's new ones as they come)
-            changes = apply_editor_drawing(prev, saved["xml"], set(saved.get("ids") or doc["ids"]))
+            changes = apply_editor_drawing(prev, saved["xml"], set(saved.get("ids") or doc["ids"]), saved.get("routes"))
             doc.update(xml=saved["xml"], ids=drawing_ids(saved["xml"]))
             st.session_state["editor_t"] = saved["t"]
             st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
