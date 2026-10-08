@@ -8,7 +8,8 @@ are merged and before the pipe tracer runs. Four fixes, measured on the team she
   2. snap: a tank's box is fitted to the closed outline drawn around it - large vessels
      seen in one tile, or cut at a tile edge, came out loose (scored at IoU 0.5-0.95);
   3. merge: tank boxes that snap to the same outline are one tank (a tall vessel came out
-     as 5 boxes);
+     as 5 boxes); a valve / pump / instrument box mostly inside a bigger one of its class
+     is part of it;
   4. containers: a closed outline holding several symbols with a pipe ending on it is a
      piece of equipment the model never boxes (the Lumen reactor around its Mixing /
      Heating / Cooling compartments). Pipes only crossing it, or nothing touching it,
@@ -77,6 +78,8 @@ def refine(gray: np.ndarray, symbols: list[dict], tokens: list[dict] | None = No
                     s["box"] = box
     if "merge" in fixes:
         syms, renamed = _merge_tanks(syms)
+        syms, more = _merge_inside(syms)
+        renamed.update(more)
     if "container" in fixes:
         n = len(syms)
         for k, (box, cls) in enumerate(_containers(ink, syms, size)):
@@ -198,6 +201,36 @@ def _merge_tanks(syms: list[dict]) -> tuple[list[dict], dict]:
         keep["n_tiles"] = keep.get("n_tiles", 0) + syms[b].get("n_tiles", 0)
         keep["score"] = max(keep["score"], syms[b]["score"])
         keep["refined"] = keep.get("refined", []) + [f"merged {syms[b]['id']}"]
+    renamed = {syms[b]["id"]: syms[a]["id"] for b, a in into.items()}
+    return [s for k, s in enumerate(syms) if k not in into], renamed
+
+
+def _merge_inside(syms: list[dict]) -> tuple[list[dict], dict]:
+    """A thin valve, pump or instrument box lying mostly inside a normal-sized box of the
+    same class is a piece of that symbol seen in one tile (a sliver of XV202 boxed as a
+    second valve). Sizes are against the sheet's median for the class: a sliver's narrow
+    side is under 0.7 of it; a box much bigger than usual is itself wrong - spanning two
+    neighbouring symbols - and the small ones inside are the real ones (OPEN100)."""
+    import statistics
+    typical = {}
+    for cls in ("valve", "pump", "instrumentation"):
+        boxes = [s["box"] for s in syms if s["class"] == cls]
+        if boxes:
+            typical[cls] = (statistics.median(max(b[2] - b[0], b[3] - b[1]) for b in boxes),
+                            statistics.median(min(b[2] - b[0], b[3] - b[1]) for b in boxes))
+    into: dict[int, int] = {}
+    order = sorted(range(len(syms)), key=lambda k: -_area(syms[k]["box"]))
+    for i, a in enumerate(order):
+        A, cls = syms[a]["box"], syms[a]["class"]
+        if a in into or cls not in typical or max(A[2] - A[0], A[3] - A[1]) > 1.3 * typical[cls][0]:
+            continue
+        for b in order[i + 1:]:
+            B = syms[b]["box"]
+            if (b not in into and syms[b]["class"] == cls and _inside(B, A, 0.8) and _area(B) < 0.6 * _area(A)
+                    and min(B[2] - B[0], B[3] - B[1]) < 0.7 * typical[cls][1]):
+                into[b] = a
+    for b, a in into.items():
+        syms[a]["refined"] = syms[a].get("refined", []) + [f"merged {syms[b]['id']}"]
     renamed = {syms[b]["id"]: syms[a]["id"] for b, a in into.items()}
     return [s for k, s in enumerate(syms) if k not in into], renamed
 
@@ -328,7 +361,8 @@ def _side_lines(ink: np.ndarray, rect, lw: int, symbol_boxes=(), size: float = 0
     """Lines meeting a rectangular outline: (ending on it, crossing it). Looked for a few
     px outside the outline, where an arrowhead has narrowed back to the line; a line there
     that also shows a few px inside crosses it - as does one reaching a symbol that sits
-    right inside the outline (NV201 against the Autoclave frame)."""
+    right inside the outline (NV201 against the Autoclave frame), or a symbol outside set
+    against the outline in line with one inside."""
     H, W = ink.shape
     x1, y1, x2, y2 = (int(round(v)) for v in rect)
     h = lw // 2
@@ -366,6 +400,15 @@ def _side_lines(ink: np.ndarray, rect, lw: int, symbol_boxes=(), size: float = 0
                 crossed += 1
             else:
                 ended += 1
+    # a symbol set against the outline from outside hides the line there (XV202 against the
+    # Autoclave frame, piped straight to NV201 just inside): with a symbol just inside in
+    # line with it, the pipe crosses
+    for b in symbol_boxes:
+        for side, gap, lo, hi in ((0, y1 - b[3], b[0], b[2]), (1, b[1] - y2, b[0], b[2]),
+                                  (2, x1 - b[2], b[1], b[3]), (3, b[0] - x2, b[1], b[3])):
+            if -lw - 2 <= gap <= 0.3 * size and _symbol_just_inside(symbol_boxes, (x1, y1, x2, y2), side,
+                                                                   int((lo + hi) / 2), size):
+                crossed += 1
     return ended, crossed
 
 

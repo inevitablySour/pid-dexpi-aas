@@ -716,3 +716,11 @@ def test_image_connections_through_a_flow_arrow_are_kept():
     review = from_image(infer, "x.png")
     kept = {frozenset((c.from_id, c.to_id)) for c in review.connections if c.include}
     assert kept == {frozenset(("p", "t"))}
+
+
+def test_lowercase_words_are_not_tags():
+    """'Bursting disc' gave the tag DISC, which took a vessel's place (A101 left over)."""
+    from pid_dexpi_aas.image.ocr_tags import assemble_tags
+    tok = lambda text, x: {"text": text, "box": [x, 0, x + 40, 20], "conf": 0.99}
+    tags = {t.text for t in assemble_tags([tok("disc", 0), tok("Fl", 100), tok("PI", 200)])}
+    assert "DISC" not in tags and {"FI", "PI"} <= tags

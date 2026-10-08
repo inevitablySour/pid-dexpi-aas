@@ -59,7 +59,11 @@ def _box(token: dict) -> tuple[float, float, float, float]:
 
 def assemble_tags(tokens: list[dict], min_conf: float = 0.3) -> list[OcrTag]:
     """Build tags from tokens: one-line tags as-is, stacked letters+number pairs joined."""
-    items = [(normalize_token(t["text"]), _box(t), float(t["conf"])) for t in tokens if float(t["conf"]) >= min_conf]
+    kept = [t for t in tokens if float(t["conf"]) >= min_conf]
+    items = [(normalize_token(t["text"]), _box(t), float(t["conf"])) for t in kept]
+    # tag letters are capitals; a word written in lower case ("Bursting disc") is a note -
+    # bar a misread "l" for "I" ("Fl")
+    worded = {i for i, t in enumerate(kept) if any(c.islower() for c in t["text"].replace("l", "I"))}
     used: set[int] = set()
     tags: list[OcrTag] = []
 
@@ -70,7 +74,7 @@ def assemble_tags(tokens: list[dict], min_conf: float = 0.3) -> list[OcrTag]:
 
     # Stacked pairs: a letters-only token directly above a number token, horizontally
     # overlapping, with a vertical gap under one line height.
-    letters = [i for i, (t, _, _) in enumerate(items) if i not in used and _LETTERS.match(t)]
+    letters = [i for i, (t, _, _) in enumerate(items) if i not in used and i not in worded and _LETTERS.match(t)]
     numbers = [i for i, (t, _, _) in enumerate(items) if i not in used and _NUMBER.match(t)]
     pairs = []
     for li in letters:
