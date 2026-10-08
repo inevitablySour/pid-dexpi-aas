@@ -924,3 +924,33 @@ def test_picture_editor_branch_dropped_on_a_line():
     </root></mxGraphModel>'''
     apply_editor_drawing(r, x, {"A", "B", "C", "ab"})
     assert sorted((c.from_id, c.to_id) for c in r.connections) == [("A", "B"), ("C", "A"), ("C", "B")]
+
+
+def test_picture_tee_keeps_its_branch_as_drawn():
+    """A branch attached to a line in the picture editor: the review gets both tee lines
+    along the drawn pipes, and the editor keeps showing the branch as drawn - not two
+    straight lines between the items (it did: the tee looked undone after Save)."""
+    from xml.etree import ElementTree as ET
+    from pid_dexpi_aas.drawio.editor_data import editor_patch
+    from pid_dexpi_aas.drawio.picture_editor import apply_editor_drawing, review_to_editor_xml
+    from pid_dexpi_aas.review import ReviewConnection, ReviewDiagram, ReviewSymbol
+    sym = lambda i, x, y: ReviewSymbol(id=i, source="image model", box=[x, y, x + 40, y + 40], detected_as="valve",
+                                       tag=i, dexpi_class="GateValve")
+    r = ReviewDiagram(source_name="p", image_path="p", image_size=(500, 400),
+                      symbols=[sym("A", 0, 0), sym("B", 300, 0), sym("C", 150, 200)],
+                      connections=[ReviewConnection(id="ab", from_id="A", to_id="B")])
+    x = '''<mxGraphModel><root><mxCell id="0"/><mxCell id="picture" parent="0"/><mxCell id="items" parent="0"/>
+    <mxCell id="A" vertex="1" parent="items"><mxGeometry x="0" y="0" width="40" height="40" as="geometry"/></mxCell>
+    <mxCell id="B" vertex="1" parent="items"><mxGeometry x="300" y="0" width="40" height="40" as="geometry"/></mxCell>
+    <mxCell id="C" vertex="1" parent="items"><mxGeometry x="150" y="200" width="40" height="40" as="geometry"/></mxCell>
+    <mxCell id="ab" edge="1" source="A" target="B" parent="items" style="endArrow=none;"><mxGeometry relative="1" as="geometry"/></mxCell>
+    <mxCell id="br" edge="1" source="C" target="ab" parent="items" style="endArrow=classic;"><mxGeometry relative="1" as="geometry"/></mxCell>
+    </root></mxGraphModel>'''
+    apply_editor_drawing(r, x, {"A", "B", "C", "ab"})
+    legs = {c.id: c for c in r.connections if c.id != "ab"}
+    assert {(c.from_id, c.to_id) for c in legs.values()} == {("C", "A"), ("C", "B")}
+    assert all(len(c.path) >= 3 for c in legs.values())  # via the junction on the A - B line, not straight
+    patch = editor_patch(r)
+    assert set(patch) & set(legs) == {"br"} and "ends" not in patch["br"] and "create" not in patch["br"]
+    redrawn = {c.get("id"): c for c in ET.fromstring(review_to_editor_xml(r, "p.png")).iter("mxCell")}
+    assert redrawn["br"].get("target") == "ab" and "br-tee1" not in redrawn

@@ -74,8 +74,25 @@ def review_to_editor_xml(review, picture_url: str) -> str:
         ET.SubElement(cell, "mxGeometry", x=f"{x1:.1f}", y=f"{y1:.1f}", width=f"{x2 - x1:.1f}",
                       height=f"{y2 - y1:.1f}", **{"as": "geometry"})
     from pid_dexpi_aas.review import FLOW_KNOWN
+    drawn_ids = {c.id for c in review.connections if c.from_id in boxes and c.to_id in boxes and c.from_id != c.to_id}
     for c in review.connections:
         if c.from_id not in boxes or c.to_id not in boxes or c.from_id == c.to_id:
+            continue
+        tee = (c.attributes or {}).get("tee")
+        if tee:  # a branch drawn onto a line: drawn again as drawn, once (its first row)
+            if c.id != tee.get("branch") or tee.get("line") not in drawn_ids:
+                continue
+            item = tee.get("item") or c.from_id
+            src, tgt = (item, tee["line"]) if tee.get("at") == "target" else (tee["line"], item)
+            colour = "#c92a2a" if not c.include else "#2456c4" if c.line_type == "signal" else "#d9480f"
+            cell = ET.SubElement(cells, "mxCell", id=c.id, value="", parent=ITEM_LAYER, edge="1", source=src, target=tgt,
+                                 style=f"edgeStyle=none;rounded=0;html=1;strokeColor={colour};strokeWidth={stroke};"
+                                       "endArrow=none;startArrow=none;" + ("dashed=1;" if c.line_type == "signal" else ""))
+            geo = ET.SubElement(cell, "mxGeometry", relative="1", **{"as": "geometry"})
+            if tee.get("points"):
+                pts = ET.SubElement(geo, "Array", **{"as": "points"})
+                for x, y in tee["points"]:
+                    ET.SubElement(pts, "mxPoint", x=f"{x:.1f}", y=f"{y:.1f}")
             continue
         flow = c.flow in FLOW_KNOWN
         colour = "#c92a2a" if not c.include else "#2456c4" if c.line_type == "signal" else "#d9480f"
@@ -96,6 +113,20 @@ def review_to_editor_xml(review, picture_url: str) -> str:
                 for x, y in inner:
                     ET.SubElement(pts, "mxPoint", x=f"{x:.1f}", y=f"{y:.1f}")
     return ET.tostring(root, encoding="unicode")
+
+
+def _nearest_on(route, p):
+    """(index of the segment, point) of `route` nearest to `p`."""
+    best = None
+    for i, (a, b) in enumerate(zip(route, route[1:])):
+        vx, vy = b[0] - a[0], b[1] - a[1]
+        L = vx * vx + vy * vy
+        t = 0.0 if L == 0 else max(0.0, min(1.0, ((p[0] - a[0]) * vx + (p[1] - a[1]) * vy) / L))
+        q = (a[0] + t * vx, a[1] + t * vy)
+        d = (q[0] - p[0]) ** 2 + (q[1] - p[1]) ** 2
+        if best is None or d < best[0]:
+            best = (d, i, q)
+    return best[1], best[2]
 
 
 def _seg_dist(p, a, b) -> float:
@@ -208,16 +239,11 @@ def apply_editor_drawing(review, xml: str, known_ids: set) -> dict:
         review.symbols = [s for s in review.symbols if s.id not in gone]
         counts["removed"] = len(gone)
 
-    conns = {c.id: c for c in review.connections}
-    keep = []
-    for c in review.connections:
-        if c.from_id in gone or c.to_id in gone or (c.id in known_ids and c.id not in edges):
-            counts["lines removed"] += 1
-            continue
-        keep.append(c)
-    review.connections = keep
     # a branch attached to another line (a tee drawn in the editor): the branch's item joins
-    # the items at both ends of that line - pairwise, as the pipe tracer reports tees
+    # the items at both ends of that line - pairwise, as the pipe tracer reports tees - along
+    # the drawn pipes (branch to the junction, then the line each way). The rows remember the
+    # branch ("tee": its line, its bends), so the editor keeps drawing it as drawn.
+    tee_of = {}  # branch id -> line id, for the branches seen in this drawing
     for eid, e in list(edges.items()):
         a, b = e["source"], e["target"]
         on = next(((end, x) for end, x in (("source", a), ("target", b)) if x in edges), None)
@@ -225,14 +251,38 @@ def apply_editor_drawing(review, xml: str, known_ids: set) -> dict:
             continue
         end, line = on
         item = b if end == "source" else a
-        la, lb = edges[line]["source"], edges[line]["target"]
         del edges[eid]
-        if item not in rows:
+        L = edges.get(line)
+        if item not in rows or L is None or L["source"] not in vertices or L["target"] not in vertices:
             continue
-        for n, other in enumerate(x for x in (la, lb) if x in rows and x != item):
+        tee_of[eid] = line
+        route = [centre(vertices[L["source"]]["box"]), *L["points"], centre(vertices[L["target"]]["box"])]
+        bend = e["points"] if end == "target" else e["points"][::-1]  # item -> junction
+        towards = bend[-1] if bend else centre(vertices[item]["box"])
+        k, junction = _nearest_on(route, towards)
+        legs = [(L["source"], route[:k + 1][::-1]), (L["target"], route[k + 1:])]
+        n = 0
+        for other, along in legs:
+            if other not in rows or other == item:
+                continue
+            path = [*bend, junction, *along[:-1]]
             edges[eid if n == 0 else f"{eid}-tee{n}"] = {
-                "source": item, "target": other, "points": [], "data": e["data"],
-                "style": (e["style"] or "").replace("endArrow=classic", "endArrow=none").replace("startArrow=classic", "startArrow=none")}
+                "source": item, "target": other, "points": path, "data": e["data"], "ends": {},
+                "style": (e["style"] or "").replace("endArrow=classic", "endArrow=none").replace("startArrow=classic", "startArrow=none"),
+                "tee": {"line": line, "branch": eid, "item": item, "points": e["points"], "at": end}}
+            n += 1
+    conns = {c.id: c for c in review.connections}
+    keep = []
+    for c in review.connections:
+        tee = (c.attributes or {}).get("tee")
+        if tee and tee.get("branch") in known_ids and tee.get("branch") not in tee_of:
+            counts["lines removed"] += 1  # its branch was deleted, or no longer ends on a line
+            continue
+        if c.from_id in gone or c.to_id in gone or (c.id in known_ids and c.id not in edges):
+            counts["lines removed"] += 1
+            continue
+        keep.append(c)
+    review.connections = keep
     for eid, e in edges.items():
         a, b = e["source"], e["target"]
         if a not in rows or b not in rows or a == b:
@@ -264,6 +314,11 @@ def apply_editor_drawing(review, xml: str, known_ids: set) -> dict:
             c.flow = "both ways"  # arrowheads at both ends: a two-way pipe
         elif c.flow not in FLOW_KNOWN or before != (frm, to):
             c.flow = "reviewer"  # an arrowhead drawn, or turned round, in the editor
+        if e.get("tee"):
+            c.attributes = {**(c.attributes or {}), "tee": e["tee"]}
+            c.confidence = c.confidence or "branch drawn in the editor"
+        elif "tee" in (c.attributes or {}):
+            c.attributes = {k: v for k, v in c.attributes.items() if k != "tee"}
         d = e["data"]
         if d.get("in_dexpi") in ("0", "1"):
             c.include = d["in_dexpi"] == "1"

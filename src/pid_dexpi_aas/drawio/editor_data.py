@@ -137,6 +137,18 @@ def _picture_patch(review) -> dict:
         if c.from_id not in boxes or c.to_id not in boxes or c.from_id == c.to_id:
             continue
         auto = review.auto.get(c.id, {})
+        tee = (c.attributes or {}).get("tee")
+        if tee:
+            # a branch drawn onto a line: the editor shows the branch as drawn (attached to the
+            # line); its second row (the other side of the tee) has no line of its own there
+            if c.id == tee.get("branch"):
+                out[c.id] = {"attrs": {"in_dexpi": "1" if c.include else "0",
+                                       "notes": c.notes if c.notes != auto.get("notes") else "",
+                                       "specs": _specs(c.attributes)},
+                             "style": {"dashed": "1" if c.line_type == "signal" else "0", "strokeWidth": width,
+                                       "strokeColor": "#c92a2a" if not c.include else "#2456c4"
+                                       if c.line_type == "signal" else "#d9480f"}}
+            continue
         out[c.id] = {"attrs": {"in_dexpi": "1" if c.include else "0",
                                "notes": c.notes if c.notes != auto.get("notes") else "", "specs": _specs(c.attributes)},
                      "style": {"dashed": "1" if c.line_type == "signal" else "0",
