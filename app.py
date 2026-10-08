@@ -189,6 +189,14 @@ with st.sidebar:
     with in_picture:
         image_file = st.file_uploader("P&ID image", type=["png", "jpg", "jpeg"])
         st.caption("With a draw.io file as well, the drawing is checked against the picture.")
+        if image_file is not None:
+            with st.popover("Re-run the model on this picture", width="stretch"):
+                st.caption("A picture is processed once and the result kept. Re-run it to use the current model "
+                           "and clean-up rules. **This starts the review of this picture again: changes made to it "
+                           "are replaced** - save the review first to keep them.")
+                if st.button("Re-run now", type="primary", width="stretch", key="rerun_model_btn"):
+                    st.session_state["rerun_model"] = True
+                    st.session_state["model_run"] = st.session_state.get("model_run", 0) + 1
     with in_editor:
         if not EDITOR_INSTALLED:
             st.caption("The editor is not installed on this server (scripts/get_drawio_editor.py).")
@@ -453,9 +461,14 @@ def review_to_json(review: ReviewDiagram) -> str:
 
 
 # Session state: rebuild the review only when the inputs change, so edits survive reruns.
+if st.session_state.pop("rerun_model", False) and image_file is not None:
+    # "Re-run the model": drop the kept result for this picture, so it is processed again
+    (WORK / f"{_digest(image_file.getvalue(), checkpoint.encode(), INFER_VERSION)}.json").unlink(missing_ok=True)
+    run_image_model.clear()
 input_key = _digest(
     drawio_file.getvalue() if drawio_file else b"", image_file.getvalue() if image_file else b"",
     review_upload.getvalue() if review_upload else b"", checkpoint.encode(),
+    str(st.session_state.get("model_run", 0)).encode(),  # a re-run starts the review again
 )
 if st.session_state.get("input_key") != input_key:
     if review_upload is not None:
