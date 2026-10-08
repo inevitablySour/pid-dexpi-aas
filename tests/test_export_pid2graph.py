@@ -113,4 +113,7 @@ def test_flow_arrows_are_labelled_and_split_their_line():
     assert len(arrows) >= 40 and len(syms) == len(plain) + len(arrows)
     on_lines = {x for a, b, _ in edges for x in (a, b)} & arrows
     assert len(on_lines) >= 0.9 * len(arrows)
-    assert all(abs((b[2] - b[0]) - 10) < 1e-6 for sid, _, b, _ in syms if sid in arrows)
+    # boxed as OPEN100 boxes arrows: long side 0.35 of the median symbol (not the ~10-unit drawn head)
+    import statistics
+    med = statistics.median(max(b[2] - b[0], b[3] - b[1]) for sid, label, b, _ in syms if label != "arrow")
+    assert all(abs(max(b[2] - b[0], b[3] - b[1]) - 0.35 * med) < 1e-6 for sid, _, b, _ in syms if sid in arrows)

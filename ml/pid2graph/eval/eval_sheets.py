@@ -46,6 +46,8 @@ SETS = {
     "team-v1": {"dir": DATA / "Complete" / "Team test", "scale": 1.0},
     # the same drawing with flow arrows labelled (make_team_data.py, Team v4 on)
     "team-v4": {"dir": DATA / "Complete" / "Team v4 test", "scale": 1.0},
+    # flow arrows boxed at OPEN100's size (0.35 of a symbol), not the drawn head (Team v4)
+    "team-v5": {"dir": DATA / "Complete" / "Team v5 test", "scale": 1.0},
     # pictures checked in the review app and held out (the app's "held-out test" export, e.g. the
     # MEM4CHEM sheets): already scaled to the team drawings' symbol size
     "reviewed": {"dir": DATA / "Complete" / "Reviewed test", "scale": 1.0},

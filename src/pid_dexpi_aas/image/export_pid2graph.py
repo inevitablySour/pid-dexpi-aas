@@ -136,7 +136,12 @@ def labelled_symbols(diagram: ParsedDiagram, arrows: bool = False, ink=None):
     return symbols, out
 
 
-ARROW_LENGTH = 10.0  # box of a draw.io "classic" arrowhead (size 6, stroke 1), drawing units
+ARROW_LENGTH = 10.0  # a draw.io "classic" arrowhead (size 6, stroke 1), drawing units - for finding it
+# The box an arrow is LABELLED with, as OPEN100 labels them: its long side 0.35 of the sheet's
+# median symbol, its short side 0.73 of that (measured on the 12 OPEN100 sheets). A box the
+# size of the drawn head (~0.12 of a symbol) is ~5 px for the model: Team v4 used that and the
+# model found 7 of LightUp's 40 arrows (and its connections suffered on OPEN100 too).
+ARROW_BOX = (0.35, 0.73)
 HEAD_SPAN = (-2, 8)  # where a head lies along its line, past the route end (measured on LightUp)
 
 
@@ -151,6 +156,9 @@ def _arrow_labels(diagram: ParsedDiagram, symbols: list, edges: list, id_map: di
     symbol at its end of the line (or, at a tee, the line's other end) and the rest; on a
     pipe network every connection of that symbol through the network is split.
     symbols / edges are extended in place."""
+    import statistics
+    sizes = [max(b[2] - b[0], b[3] - b[1]) for _, label, b, _ in symbols if label != "arrow"]
+    box_long = ARROW_BOX[0] * (statistics.median(sizes) if sizes else 85.0)
     for e in diagram.edges:
         route = (diagram.routes or {}).get(e.id)
         if e.is_decorative or not route or len(route) < 2:
@@ -184,7 +192,9 @@ def _arrow_labels(diagram: ParsedDiagram, symbols: list, edges: list, id_map: di
                     spots.reverse()
             cx, cy = spots[0]
             sid = f"{_sanitize_id(e.id)}_arrow{end}"
-            symbols.append((sid, "arrow", (cx - h, cy - h, cx + h, cy + h), f"{e.id}:arrow{end}"))
+            along, across = box_long / 2, box_long * ARROW_BOX[1] / 2  # half sizes; long side along the pipe
+            hw, hh = (along, across) if abs(dx) >= abs(dy) else (across, along)
+            symbols.append((sid, "arrow", (cx - hw, cy - hh, cx + hw, cy + hh), f"{e.id}:arrow{end}"))
             here, other = (e.target, e.source) if end == 1 else (e.source, e.target)
             near = id_map.get(here) or id_map.get(other)
             if near is None:
