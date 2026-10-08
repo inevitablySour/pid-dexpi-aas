@@ -52,21 +52,15 @@ def test_piping_segment_source_and_target_items_resolve_to_nozzles_or_off_page_c
     off-page destination (e.g. "Fume hood [atm]", "safe location" - see build_model.py's
     _get_or_build_off_page_connector) has a PipeOffPageConnector on that end instead.
 
-    NOTE: pyDEXPI 1.2.0's Proteus PARSER has a confirmed bug of its own here (not ours):
-    PipingNetworkSegmentParser.reference_pass unconditionally assigns any adjacent
-    PipingNetworkSegmentItem - including a plain PipeOffPageConnector reconstructed from
-    the XML - as a PipingConnection's sourceItem/targetItem, which pydantic then rejects
-    (PipingConnection.targetItem is typed PipingSourceItem | PipingTargetItem, and plain
-    PipeOffPageConnector implements neither - only its FlowIn/FlowOut subclasses do, and
-    the parser never reconstructs those). This means a segment WITH an off-page connector
-    item does not fully survive Proteus reload in this pyDEXPI version - confirmed by a
-    parse-time ERROR (not a warning) in the reloaded segment's item count when this
-    occurs. See test_off_page_connector_causes_a_known_pydexpi_parser_bug below, which
-    pins this exact, confirmed-upstream failure rather than silently tolerating it.
+    Off-page connectors are written with their own class (FlowIn/FlowOutPipeOffPageConnector,
+    proteus_patch.PipingComponentExporter): the parser rebuilds that class, a valid end of a
+    piping connection, so no end comes back as None. (Written as the base
+    PipeOffPageConnector, the parser rebuilt the base class, which pydantic rejects as a
+    connection end - those ends came back None and the stream direction was lost.)
     """
     _, reloaded, _ = _build_and_round_trip(tmp_path)
     segments = reloaded.conceptualModel.pipingNetworkSystems[0].segments
-    valid_endpoint_types = {"Nozzle", "NoneType"}  # NoneType: the known parser bug case
+    valid_endpoint_types = {"Nozzle", "FlowInPipeOffPageConnector", "FlowOutPipeOffPageConnector"}
     for segment in segments:
         assert type(segment.sourceItem).__name__ in valid_endpoint_types
         assert type(segment.targetItem).__name__ in valid_endpoint_types
@@ -79,36 +73,14 @@ def test_process_instrumentation_functions_survive_round_trip(tmp_path):
     )
 
 
-_KNOWN_OFF_PAGE_CONNECTOR_ERROR = "validation error for DirectPipingConnection"
-
-
-def test_known_parser_bugs_produce_only_expected_errors(tmp_path):
-    """pyDEXPI 1.2.0's Proteus parser has two confirmed bugs of its own (not ours):
-
-    1. A dead-code reset in _extract_connections means FromNode/ToNode are always parsed
-       back as None, so sourceNode/targetNode-by-ID resolution can warn ("Source node
-       with ID ... not found in registry") even though sourceItem/targetItem (the part
-       we actually rely on) resolve correctly. Only a WARNING, does not break anything.
-
-    2. PipingNetworkSegmentParser.reference_pass unconditionally assigns any adjacent
-       PipingNetworkSegmentItem as a PipingConnection's sourceItem/targetItem - including
-       a plain PipeOffPageConnector reconstructed from a <PipeOffPageConnector> tag - and
-       pydantic rejects this (PipeOffPageConnector implements neither PipingSourceItem
-       nor PipingTargetItem; only its unused-by-the-parser FlowIn/FlowOut subclasses do).
-       This means ANY Proteus file with an off-page connector adjacent to an internal
-       connection fails to fully reload in this pyDEXPI version, regardless of who wrote
-       the file - confirmed via a minimal reproduction outside this codebase, not
-       specific to our exporter. This is a genuine, fatal ERROR (not a warning), and this
-       test explicitly tolerates only this one specific, understood failure rather than
-       silently accepting any parse error.
-    """
+def test_reload_has_no_errors(tmp_path):
+    """pyDEXPI 1.2.0's parser parses FromNode/ToNode back as None (a dead-code reset in
+    _extract_connections), which only warns - sourceItem/targetItem resolve correctly.
+    No error-level message is expected: off-page connectors, which used to fail as
+    connection ends, are written as their FlowIn/FlowOut class and reload cleanly."""
     _, _, serializer = _build_and_round_trip(tmp_path)
-    errors = serializer.get_loading_errors().get_errors()
-    for error in errors:
-        if error.level.value == "error":
-            assert _KNOWN_OFF_PAGE_CONNECTOR_ERROR in error.message, (
-                f"unexpected fatal parse error: {error.message}"
-            )
+    errors = [e.message for e in serializer.get_loading_errors().get_errors() if e.level.value == "error"]
+    assert not errors, errors
 
 
 def _bare_model() -> DexpiModel:

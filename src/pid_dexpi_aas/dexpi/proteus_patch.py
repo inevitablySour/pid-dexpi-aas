@@ -89,10 +89,8 @@ class PipingNodeExporter(ExporterModule):
 # value under PipingComponent). FlowIn/FlowOutPipeOffPageConnector (the only classes
 # that satisfy PipingSourceItem/PipingTargetItem, needed for build_model.py's off-page
 # connector fallback - see _get_or_build_off_page_connector) are subclasses of
-# PipeOffPageConnector and round-trip through this same tag; the FlowIn/FlowOut
-# distinction itself is not preserved by the parser (it always reconstructs plain
-# PipeOffPageConnector), which is an acceptable minor fidelity loss for a text-only
-# off-page destination label - the connection topology itself is preserved exactly.
+# PipeOffPageConnector and use this same tag, with their own class as ComponentClass, so
+# the stream direction (in / out of the drawing) is kept in the file and on reload.
 _OFF_PAGE_CONNECTOR_CLASSES = (piping.PipeOffPageConnector,)
 
 
@@ -122,19 +120,12 @@ class PipingComponentExporter(ExporterModule):
         tag = "PipeOffPageConnector" if is_off_page_connector else "PipingComponent"
         elem = ET.Element(tag)
         elem.set("ID", self.make_id_attribute(self.item))
-        # PipeOffPageConnectorParser reuses PipingComponentParser.compositional_pass
-        # unconditionally (PipeOffPageConnectorParser.compositional_pass calls
-        # super().compositional_pass() first thing), which always reads "ComponentClass"
-        # regardless of tag - confirmed by a crash without this
-        # ("attribute name must be string, not 'NoneType'" from getattr(piping, None)).
-        # For a real off-page connector this class name is always "PipeOffPageConnector"
-        # itself here (FlowIn/FlowOut subtypes aren't preserved through this tag, see
-        # this module's _OFF_PAGE_CONNECTOR_CLASSES comment) since getattr(piping,
-        # "PipeOffPageConnector") is what the parser needs to resolve back to the base
-        # class successfully.
-        elem.set("ComponentClass", "PipeOffPageConnector" if is_off_page_connector else class_name)
-        if not is_off_page_connector:
-            elem.set(*make_default_component_class_uri(class_name))
+        # The real class, FlowIn/FlowOutPipeOffPageConnector included: the parser resolves
+        # ComponentClass with getattr(piping, ...), which knows both subclasses, and they
+        # (unlike the base PipeOffPageConnector) are valid ends of a piping connection - so
+        # the stream direction AND the connection survive a reload.
+        elem.set("ComponentClass", class_name)
+        elem.set(*make_default_component_class_uri(class_name))
 
         self.generic_attribute_exporter.compose_and_add_attributes(elem)
 

@@ -83,24 +83,16 @@ monkeypatches `SvgRenderer.convert_stroke`/`convert_polygon` directly (at class 
 applied once on import) so every renderer instance gets the fix regardless of which
 drawer class constructs it.
 
-**Also confirmed: pyDEXPI 1.2.0's Proteus round-trip is broken for off-page connectors,
-in the library itself, not just our exporter.** `PipeOffPageConnector` (the class the
-parser reconstructs from a `<PipeOffPageConnector>` XML tag) implements neither
-`PipingSourceItem` nor `PipingTargetItem` - only its `FlowIn`/`FlowOutPipeOffPageConnector`
-subclasses do, and the parser never produces those. `PipingNetworkSegmentParser.
-reference_pass` unconditionally assigns any adjacent segment item (including a plain
-`PipeOffPageConnector`) as a `PipingConnection`'s `sourceItem`/`targetItem`, which
-pydantic then rejects. This means ANY Proteus file with an off-page connector adjacent to
-an internal connection fails to fully reload in this pyDEXPI version - confirmed via
-direct testing, independent of our exporter's correctness. Our exporter still emits a
-schema-correct `<PipeOffPageConnector>` (used by `build_model.py`'s
-`_get_or_build_off_page_connector`, for edges terminating at a text-only destination like
-"Fume hood [atm]" or "safe location" - real, distinct connections that would otherwise be
-silently dropped since nothing else builds a DEXPI object for a floating text label); the
-rest of the model (all equipment, all other segments, instrumentation) survives reload
-fully - only that one segment's off-page-connector-side `sourceItem`/`targetItem` comes
-back `None` after a save-then-reload round-trip. See `tests/test_proteus_patch.py`'s
-`test_known_parser_bugs_produce_only_expected_errors` for the exact confirmed error.
+**Off-page connectors: write the FlowIn/FlowOut class, not the base class.** pyDEXPI 1.2.0's
+parser rebuilds whatever class `ComponentClass` names (`getattr(piping, ...)`). The base
+`PipeOffPageConnector` implements neither `PipingSourceItem` nor `PipingTargetItem`, so as
+the end of a piping connection pydantic rejects it and that end reloads as `None`; only
+`FlowInPipeOffPageConnector` / `FlowOutPipeOffPageConnector` are valid ends. Our exporter
+(`proteus_patch.PipingComponentExporter`) therefore writes the real class (and its class
+URI) in a `<PipeOffPageConnector>` tag: the stream's direction into or out of the drawing
+is kept in the file, and the whole model reloads without errors
+(`tests/test_proteus_patch.py`). `build_model.py` picks FlowIn for a pipe that starts at
+the connector (a feed) and FlowOut for one that ends there (a product).
 
 Coverage/known limits: a shape with multiple associated tags (see
 `tag_association.py`'s documented limitation) shows all of them comma-joined on one
