@@ -11,8 +11,9 @@ Read from the arrowheads the drawing puts on its lines, then carried to lines wi
 
 Rules 2 and 3 repeat until nothing changes. A leg that would be forced both ways keeps
 what it had (arrows win). Instruments, signal lines and compartment walls carry no
-process flow and are left out. Lines with arrows at both ends, or none and no implied
-direction, stay unknown (0) - they are shown as such for the reviewer, never guessed.
+process flow and are left out. A line with arrows at both ends is a two-way pipe (DEXPI
+"dual flow", basis "both"): it has no single direction and passes none on. Lines with none
+and no implied direction stay unknown (0) - shown as such for the reviewer, never guessed.
 
 Used at two levels: on the parsed drawing (Edge.flow / flow_basis, shown in the review
 table and check sheet) and on build_model's DEXPI links, which include the tee fittings
@@ -30,7 +31,7 @@ class Leg:
     u: object
     v: object
     dir: int = 0  # +1 u -> v, -1 v -> u, 0 unknown
-    basis: str = ""  # "arrow" | "implied" | ""
+    basis: str = ""  # "arrow" | "implied" | "both" (two-way: no direction, never implied) | ""
 
 
 def arrow_dir(e: Edge) -> int:
@@ -61,8 +62,8 @@ def propagate(legs: list[Leg], passes, junction) -> None:
     matched by identity (`is`), so pass the same object for the same node."""
     at: dict[int, tuple[object, list[Leg]]] = {}
     for leg in legs:
-        if leg.u is leg.v:
-            continue
+        if leg.u is leg.v or leg.basis == "both":
+            continue  # a two-way pipe takes no direction and gives none
         for n in (leg.u, leg.v):
             at.setdefault(id(n), (n, []))[1].append(leg)
     changed = True
@@ -84,6 +85,7 @@ class FlowSummary:
     by_arrow: int = 0
     implied: int = 0
     unknown: int = 0
+    both: int = 0  # two-way pipes (arrows at both ends)
     unknown_ids: list = field(default_factory=list)
     # (network id, shape id) -> (+1 the shape feeds the network | -1 is fed by it | 0, basis)
     member_sense: dict = field(default_factory=dict)
@@ -110,6 +112,7 @@ def infer_flow(diagram: ParsedDiagram) -> FlowSummary:
         if not process_line(e):
             continue
         a = arrow_dir(e)
+        both = e.has_end_arrow and e.has_start_arrow
         if e.merged_into:
             hub = hubs.setdefault(e.merged_into, f"hub:{e.merged_into}")
             for end, sid in ((0, e.source), (1, e.target)):
@@ -117,13 +120,13 @@ def infer_flow(diagram: ParsedDiagram) -> FlowSummary:
                     continue
                 # attached at the source end: flow shape -> hub when the line runs source -> target
                 # attached at the target end: the leg runs hub -> shape, same sense as the line
-                leg = Leg(shapes[sid], hub, a, "arrow" if a else "") if end == 0 else \
-                    Leg(hub, shapes[sid], a, "arrow" if a else "")
+                basis = "both" if both else "arrow" if a else ""
+                leg = Leg(shapes[sid], hub, a, basis) if end == 0 else Leg(hub, shapes[sid], a, basis)
                 legs.append(leg)
                 member_legs.setdefault((e.merged_into, sid), []).append(leg)
                 line_legs.setdefault(e.id, []).append(leg)
         elif e.source in shapes and e.target in shapes:
-            leg = Leg(shapes[e.source], shapes[e.target], a, "arrow" if a else "")
+            leg = Leg(shapes[e.source], shapes[e.target], a, "both" if both else "arrow" if a else "")
             legs.append(leg)
             direct[e.id] = leg
 
@@ -138,7 +141,9 @@ def infer_flow(diagram: ParsedDiagram) -> FlowSummary:
     for leg in legs:
         if leg.u is leg.v or any(not isinstance(n, str) and n.id in instruments for n in (leg.u, leg.v)):
             continue  # an instrument tap carries no process flow
-        if not leg.dir:
+        if leg.basis == "both":
+            summary.both += 1
+        elif not leg.dir:
             summary.unknown += 1
             summary.unknown_ids.append(next((eid for eid, l in direct.items() if l is leg), None))
         elif leg.basis == "arrow":
@@ -149,6 +154,8 @@ def infer_flow(diagram: ParsedDiagram) -> FlowSummary:
     for e in diagram.edges:
         if e.id in direct:
             e.flow, e.flow_basis = direct[e.id].dir, direct[e.id].basis
+        elif e.id in line_legs and e.has_end_arrow and e.has_start_arrow:
+            e.flow, e.flow_basis = 0, "both"
         elif e.id in line_legs:  # a drawn line inside a pipe network (for drawing it)
             known = {(l.dir, l.basis) for l in line_legs[e.id] if l.dir}
             dirs = {d for d, _ in known}

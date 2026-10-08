@@ -197,7 +197,10 @@ def test_flow_orients_dexpi_segments(lightup):
     _, result = to_dexpi(lightup)
     segs = [s for sy in result.model.conceptualModel.pipingNetworkSystems for s in sy.segments]
     basis = collections.Counter(a.value for s in segs for a in s.customAttributes if a.attributeName == "FlowDirectionBasis")
-    assert basis["arrow"] + basis["implied from neighbouring arrows"] >= 0.8 * len(segs)
+    # LightUp draws the piston lines (XV101 - X101, XV102 - X102) and XV201 - XV203 with arrowheads
+    # at both ends: two-way pipes, DEXPI "dual flow" - a direction stated by the drawing too
+    assert basis["both ways (two-way pipe)"] == 3
+    assert basis["arrow"] + basis["implied from neighbouring arrows"] + basis["both ways (two-way pipe)"] >= 0.8 * len(segs)
 
 
 # ------------------------------------------------------------------- flow map ---
@@ -827,3 +830,26 @@ def test_editor_patch_draws_side_panel_additions_and_merges():
     assert patch["m1"]["create"] == {"edge": True, "source": "v", "target": "stream1",
                                      "style": "edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic;"}
     assert "create" not in patch["p"] and patch["p"]["absorbs"] == ["old"]
+
+
+def test_two_way_pipe_is_dual_flow():
+    """A line with arrowheads at both ends is a two-way pipe: flow "both ways", not unknown;
+    it implies nothing for its neighbours, and DEXPI gets a dual-flow segment."""
+    from pid_dexpi_aas.drawio.flow_direction import infer_flow
+    from pid_dexpi_aas.drawio.parser import parse_drawio_xml
+    from pid_dexpi_aas.review import from_drawio, to_dexpi
+    x = '''<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>
+    <mxCell id="t" value="T1" style="shape=mxgraph.pid.vessels.tank;" vertex="1" parent="1"><mxGeometry width="40" height="80" as="geometry"/></mxCell>
+    <mxCell id="v" value="GV1" style="shape=mxgraph.pid.valves.gate_valve;" vertex="1" parent="1"><mxGeometry x="200" width="40" height="20" as="geometry"/></mxCell>
+    <mxCell id="p" value="P1" style="shape=mxgraph.pid.pumps.centrifugal_pump_1;" vertex="1" parent="1"><mxGeometry x="400" width="40" height="40" as="geometry"/></mxCell>
+    <mxCell id="e1" edge="1" source="t" target="v" parent="1" style="endArrow=classic;startArrow=classic;"><mxGeometry relative="1" as="geometry"/></mxCell>
+    <mxCell id="e2" edge="1" source="v" target="p" parent="1" style="endArrow=none;"><mxGeometry relative="1" as="geometry"/></mxCell>
+    </root></mxGraphModel>'''
+    d = parse_drawio_xml(x, "t.drawio")
+    d.flow = infer_flow(d)
+    review = from_drawio(d)
+    flows = {c.id: c.flow for c in review.connections}
+    assert flows == {"e1": "both ways", "e2": ""} and d.flow.both == 1
+    _, result = to_dexpi(review)
+    segs = result.model.conceptualModel.pipingNetworkSystems[0].segments
+    assert any(str(s.flowDirection) == "dual flow" for s in segs)

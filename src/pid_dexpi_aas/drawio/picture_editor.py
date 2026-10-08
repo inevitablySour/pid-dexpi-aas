@@ -77,7 +77,8 @@ def review_to_editor_xml(review, picture_url: str) -> str:
         cell = ET.SubElement(cells, "mxCell", id=c.id, value="", parent=ITEM_LAYER, edge="1",
                              source=c.from_id, target=c.to_id,
                              style=f"edgeStyle=none;rounded=0;html=1;strokeColor={colour};strokeWidth={stroke};"
-                                   f"endArrow={'classic' if flow else 'none'};startArrow=none;"
+                                   f"endArrow={'classic' if flow or c.flow == 'both ways' else 'none'};"
+                                   f"startArrow={'classic' if c.flow == 'both ways' else 'none'};"
                                    + ("dashed=1;" if c.line_type == "signal" else "")
                                    + ("opacity=50;" if not c.include else ""))
         geo = ET.SubElement(cell, "mxGeometry", relative="1", **{"as": "geometry"})
@@ -210,6 +211,8 @@ def apply_editor_drawing(review, xml: str, known_ids: set) -> dict:
         c.line_type = "signal" if style_val(e["style"], "dashed") == "1" else "process"
         if not (to_a or to_b):
             c.flow = ""  # no arrowhead: direction unknown
+        elif to_a and to_b:
+            c.flow = "both ways"  # arrowheads at both ends: a two-way pipe
         elif c.flow not in FLOW_KNOWN or before != (frm, to):
             c.flow = "reviewer"  # an arrowhead drawn, or turned round, in the editor
         d = e["data"]

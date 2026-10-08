@@ -68,7 +68,9 @@ def editor_patch(review) -> dict:
             out[c.id] = {"attrs": attrs, "create": {
                 "edge": True, "source": c.from_id, "target": c.to_id,
                 "style": "edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;"
-                         f"endArrow={'classic' if flow else 'none'};" + ("dashed=1;" if c.line_type == "signal" else "")}}
+                         f"endArrow={'classic' if flow or c.flow == 'both ways' else 'none'};"
+                         + ("startArrow=classic;" if c.flow == "both ways" else "")
+                         + ("dashed=1;" if c.line_type == "signal" else "")}}
             continue
         entry = {"attrs": attrs}
         if (c.line_type == "signal") != e.is_dashed:
@@ -76,6 +78,8 @@ def editor_patch(review) -> dict:
         if {c.from_id, c.to_id} != {e.source, e.target} and c.from_id in drawn and c.to_id in drawn:
             entry["ends"] = ({"source": c.from_id, "target": c.to_id} if e.source in (c.from_id, None)
                              else {"source": c.to_id, "target": c.from_id})
+        if c.flow == "both ways" and not (e.has_end_arrow and e.has_start_arrow):  # set two-way in the side panel
+            entry.setdefault("style", {}).update({"endArrow": "classic", "startArrow": "classic"})
         if c.flow == "reviewer":  # a person set the direction: draw the arrowhead at the To end
             to_target = (entry.get("ends", {}).get("target") or e.target) == c.to_id
             entry.setdefault("style", {}).update({"endArrow": "classic" if to_target else "none",
@@ -135,7 +139,8 @@ def _picture_patch(review) -> dict:
         out[c.id] = {"attrs": {"in_dexpi": "1" if c.include else "0",
                                "notes": c.notes if c.notes != auto.get("notes") else "", "specs": _specs(c.attributes)},
                      "style": {"dashed": "1" if c.line_type == "signal" else "0",
-                               "endArrow": "classic" if c.flow in FLOW_KNOWN else "none", "startArrow": "none",
+                               "endArrow": "classic" if c.flow in FLOW_KNOWN or c.flow == "both ways" else "none",
+                               "startArrow": "classic" if c.flow == "both ways" else "none",
                                "strokeColor": "#c92a2a" if not c.include else "#2456c4" if c.line_type == "signal"
                                else "#d9480f", "opacity": "100" if c.include else "50"},
                      "ends": {"source": c.from_id, "target": c.to_id},

@@ -531,8 +531,9 @@ function renderLine(cell) {
   panel.append(...field("Flow", seg([
     [`→ ${itemName(b)}`, toB && !toA, () => setStyle(cell, { endArrow: "classic", startArrow: "none" })],
     [`→ ${itemName(a)}`, toA && !toB, () => setStyle(cell, { endArrow: "none", startArrow: "classic" })],
+    ["Both", toA && toB, () => setStyle(cell, { endArrow: "classic", startArrow: "classic" })],
     ["None", !toA && !toB, () => setStyle(cell, { endArrow: "none", startArrow: "none" })],
-  ]), "The arrowhead on the drawing."));
+  ]), "The arrowhead on the drawing. Both: a two-way pipe (DEXPI dual flow)."));
 
   inDexpi(cell);
   notes(cell);

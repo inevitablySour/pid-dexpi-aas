@@ -604,7 +604,7 @@ ADDED_BY_YOU = (200, 0, 160)
 DRAWING_ONLY = (40, 100, 220)
 PICTURE_ONLY = BOX_PICTURE
 TYPE_DIFFERS = BOX_CHECK
-FLOW_BASIS = {"drawn arrow": "arrow", "implied": "implied", "reviewer": "reviewer"}
+FLOW_BASIS = {"drawn arrow": "arrow", "implied": "implied", "reviewer": "reviewer", "both ways": "both"}
 
 
 def _to_px(review: ReviewDiagram):
@@ -846,7 +846,8 @@ def found_as(s: ReviewSymbol) -> str:
 
 
 FLOW_LABELS = {"drawn arrow": "arrow on the drawing", "implied": "implied by other arrows",
-               "reviewer": "set by you", "no flow between them": "no flow (same side of a tee)", "": "unknown"}
+               "reviewer": "set by you", "both ways": "both ways (two-way pipe)",
+               "no flow between them": "no flow (same side of a tee)", "": "unknown"}
 FLOW_VALUES = {v: k for k, v in FLOW_LABELS.items()}
 LINE_LABELS = {"process": "process pipe", "signal": "signal line"}
 
@@ -1591,7 +1592,8 @@ with panel_col:
                     st.caption("Click a line to open it.")
                     for c in mine:
                         other = c.to_id if c.from_id == s.id else c.from_id
-                        arrow = ("→" if c.from_id == s.id else "←") if c.flow in FLOW_KNOWN else "–"
+                        arrow = (("→" if c.from_id == s.id else "←") if c.flow in FLOW_KNOWN
+                                 else "↔" if c.flow == "both ways" else "–")
                         if st.button(f"{arrow} {item_option(other)} · {LINE_LABELS.get(c.line_type, c.line_type)}",
                                      key=f"peekline__{c.id}__{k}", type="tertiary"):  # key: the map outlines it on hover
                             select((), {c.id}, zoom=True)

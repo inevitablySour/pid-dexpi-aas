@@ -663,6 +663,13 @@ def _build_segments(build_result, links, system) -> None:
                 for eid in dict.fromkeys(edge_ids):
                     build_result.records.append(BuildRecord(eid, "edge", "skipped", None, f"piping_toolkit error: {exc}"))
                 continue
+        # DEXPI's flow classification: a two-way pipe on the drawing (arrowheads at both ends) is
+        # "dual flow"; a pipe with a known direction "single flow"; unknown stays unset
+        from pydexpi.dexpi_classes.pydantic_classes import PipingNetworkSegmentFlowClassification as FlowClass
+        if any(links[i].basis == "both" for i in seg_links):
+            segment.flowDirection, basis = FlowClass.DualFlowPipingNetworkSegment, "both ways (two-way pipe)"
+        elif any(links[i].dir for i in seg_links):
+            segment.flowDirection = FlowClass.SingleFlowPipingNetworkSegment
         segment.customAttributes = list(segment.customAttributes or []) + [CustomStringAttribute(
             attributeName="FlowDirectionBasis", attributeURI="urn:pid-dexpi-aas:flow-direction-basis", value=basis)]
         system.segments.append(segment)

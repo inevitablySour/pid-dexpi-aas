@@ -33,10 +33,12 @@ from pid_dexpi_aas.drawio.parser import ParsedDiagram
 from pid_dexpi_aas.render.routing import route
 
 # One colour per meaning, nothing shared: grey is only "flow unknown", red only "left out".
-FLOW_COLORS = {"arrow": (215, 80, 0), "implied": (150, 50, 200), "reviewer": (0, 150, 120), "": (95, 95, 95)}
-FLOW_WORD = {"arrow": "arrow", "implied": "implied", "reviewer": "reviewer", "": "?"}
+FLOW_COLORS = {"arrow": (215, 80, 0), "implied": (150, 50, 200), "reviewer": (0, 150, 120), "": (95, 95, 95),
+               "both": (30, 70, 150)}
+FLOW_WORD = {"arrow": "arrow", "implied": "implied", "reviewer": "reviewer", "": "?", "both": "both ways"}
 FLOW_TEXT = {"arrow": "flow from an arrow drawn on the line", "implied": "flow implied by neighbouring arrows",
-             "reviewer": "flow direction set by the reviewer", "": "flow direction unknown"}
+             "reviewer": "flow direction set by the reviewer", "": "flow direction unknown",
+             "both": "two-way pipe - flow both ways (DEXPI dual flow)"}
 SIGNAL = (0, 140, 255)
 TAP = (110, 160, 190)
 GUESSED = (230, 160, 0)  # amber: "check this", like items to check
@@ -142,8 +144,14 @@ def _nearest_on_box(p, b):
 
 
 def _arrows_on(run, flow):
+    """Arrowheads along a line: flow +1 along `run`, 0 none, "both" each way (a two-way pipe:
+    pairs pointing apart, so they don't read as one direction)."""
     length = sum(math.dist(a, b) for a, b in zip(run, run[1:]))
     n = max(1, int(length // 350)) if flow else 0
+    if flow == "both":
+        back = run[::-1]
+        return ([_along(run, (k + 0.5) / n + 14 / max(length, 1)) for k in range(n)]
+                + [_along(back, 1 - (k + 0.5) / n + 14 / max(length, 1)) for k in range(n)]), length
     return [_along(run, (k + 0.5) / n + 8 / max(length, 1)) for k in range(n)], length
 
 
@@ -188,7 +196,7 @@ def build_layers(diagram: ParsedDiagram, drawio_path: str | Path, boxes: list | 
     for e in diagram.edges:
         if e.merged_into:
             net_ends.setdefault(e.merged_into, set()).update(x for x in (e.source, e.target) if x)
-    stats = {"arrow": 0, "implied": 0, "reviewer": 0, "": 0, "signal": 0, "tap": 0, "excluded": 0}
+    stats = {"arrow": 0, "implied": 0, "reviewer": 0, "": 0, "both": 0, "signal": 0, "tap": 0, "excluded": 0}
     lines: list[Line] = []
 
     for e in diagram.edges:
@@ -210,7 +218,7 @@ def build_layers(diagram: ParsedDiagram, drawio_path: str | Path, boxes: list | 
         else:
             what = f"{name(e.source)} - {name(e.target)}"
             line_ends = tuple(x for x in (e.source, e.target) if x)
-        include, flow, basis = overrides.get(e.id, (True, e.flow, e.flow_basis if e.flow else ""))
+        include, flow, basis = overrides.get(e.id, (True, e.flow, e.flow_basis if e.flow or e.flow_basis == "both" else ""))
         if not include:
             lines.append(Line(pts, EXCLUDED, 3, rows, f"{what}: left out of DEXPI", dashed=True, ends=line_ends,
                               kind="excluded"))
@@ -220,15 +228,15 @@ def build_layers(diagram: ParsedDiagram, drawio_path: str | Path, boxes: list | 
             lines.append(Line(pts, SIGNAL, 3, rows, f"{what}: signal line", dashed=True, ends=line_ends, kind="signal"))
             stats["signal"] += 1
             continue
-        if not flow and (e.source in instruments or e.target in instruments):
+        if not flow and basis != "both" and (e.source in instruments or e.target in instruments):
             lines.append(Line(pts, TAP, 3, rows, f"{what}: instrument on the pipe (no process flow)", ends=line_ends,
                               kind="tap"))
             stats["tap"] += 1
             continue
-        basis = basis if flow else ""
+        basis = basis if flow or basis == "both" else ""
         stats[basis] += 1
         run = pts if flow >= 0 else pts[::-1]
-        arrows, length = _arrows_on(run, flow)
+        arrows, length = _arrows_on(run, "both" if basis == "both" else flow)
         if flow and not e.merged_into:
             up, down = (e.source, e.target) if flow > 0 else (e.target, e.source)
             what = f"{name(up)} -> {name(down)}"
@@ -278,6 +286,8 @@ def build_layers(diagram: ParsedDiagram, drawio_path: str | Path, boxes: list | 
         legend.append((f"plant sections ({len(diagram.sections)})", SECTION, "section"))
     if stats["reviewer"]:
         legend.insert(2, (f"direction set by you ({stats['reviewer']})", FLOW_COLORS["reviewer"], "flow-reviewer"))
+    if stats["both"]:
+        legend.insert(2, (f"two-way pipe ({stats['both']})", FLOW_COLORS["both"], "flow-both"))
     if stats["excluded"]:
         legend.append((f"line left out of DEXPI ({stats['excluded']})", EXCLUDED, "excluded"))
     return Layers(Path(png), size, lines, out_boxes, stats, legend, origin=(dx, dy))
@@ -311,13 +321,14 @@ def image_layers(image_path: str | Path, connections: list, boxes: list[Box]) ->
         traced = bool(path)
         n["traced" if traced else "model"] += 1
         n[f"flow-{basis or 'unknown'}" if traced else "x"] = n.get(f"flow-{basis or 'unknown'}" if traced else "x", 0) + 1
-        color = FLOW_COLORS[basis] if traced else MODEL_LINE
-        arrows, _ = _arrows_on(pts, 1 if basis else 0)
+        color = FLOW_COLORS[basis] if traced or basis == "both" else MODEL_LINE
+        arrows, _ = _arrows_on(pts, "both" if basis == "both" else 1 if basis else 0)
         lines.append(Line(pts, color, 5 if traced else 3, {rid}, tip, dashed=not traced, arrows=arrows, ends=(a, b),
                           kind=f"flow-{basis or 'unknown'}" if traced else "model-line"))
     legend = [(f"traced pipe, flow from an arrowhead ({n.get('flow-arrow', 0)})", FLOW_COLORS["arrow"], "flow-arrow"),
               (f"traced pipe, flow implied ({n.get('flow-implied', 0)})", FLOW_COLORS["implied"], "flow-implied"),
               (f"traced pipe, flow unknown ({n.get('flow-unknown', 0)})", FLOW_COLORS[""], "flow-unknown"),
+              *([(f"two-way pipe ({n['flow-both']})", FLOW_COLORS["both"], "flow-both")] if n.get("flow-both") else []),
               (f"predicted by the model, not traced ({n['model']})", MODEL_LINE, "model-line"),
               (f"signal line ({n['signal']})", SIGNAL, "signal")]
     if n["excluded"]:
@@ -807,6 +818,6 @@ def review_overrides(review) -> dict:
         if e is None:
             continue
         sign = (1 if c.from_id == e.source else -1) if c.flow in FLOW_KNOWN else 0
-        basis = {"drawn arrow": "arrow", "implied": "implied", "reviewer": "reviewer"}.get(c.flow, "")
+        basis = {"drawn arrow": "arrow", "implied": "implied", "reviewer": "reviewer", "both ways": "both"}.get(c.flow, "")
         out[c.id] = (c.include, sign, basis)
     return out

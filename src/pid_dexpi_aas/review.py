@@ -94,6 +94,7 @@ class ReviewConnection:
 
 
 FLOW_KNOWN = ("drawn arrow", "implied", "reviewer")
+FLOW_BOTH = "both ways"  # a two-way pipe (arrowheads at both ends; DEXPI "dual flow")
 
 
 @dataclass
@@ -190,8 +191,8 @@ def from_drawio(diagram: ParsedDiagram) -> ReviewDiagram:
         a, b = (edge.target, edge.source) if edge.flow == -1 else (edge.source, edge.target)  # From = upstream
         review.connections.append(ReviewConnection(
             id=edge.id, from_id=a, to_id=b,
-            flow={"arrow": "drawn arrow", "implied": "implied", "parallel": "no flow between them"}.get(
-                edge.flow_basis, "") if edge.flow or edge.flow_basis == "parallel" else "",
+            flow={"arrow": "drawn arrow", "implied": "implied", "parallel": "no flow between them",
+                  "both": FLOW_BOTH}.get(edge.flow_basis, "") if edge.flow or edge.flow_basis in ("parallel", "both") else "",
             line_type="signal" if edge.is_dashed else "process", source="draw.io",
             confidence=resolution,
             notes="" if resolution in ("explicit", "adjacent", "junction") else
@@ -358,7 +359,7 @@ def _imply_flow(review: ReviewDiagram) -> None:
     by_id = {s.id: s for s in review.symbols}
     lines = [c for c in review.connections if c.line_type == "process" and c.from_id in by_id and c.to_id in by_id]
     legs = [Leg(by_id[c.from_id], by_id[c.to_id], 1 if c.flow == "drawn arrow" else 0,
-                "arrow" if c.flow == "drawn arrow" else "") for c in lines]
+                "both" if c.flow == FLOW_BOTH else "arrow" if c.flow == "drawn arrow" else "") for c in lines]
     instrument = lambda s: category_for_class(s.dexpi_class) == Category.INSTRUMENTATION
     propagate(legs, passes=lambda s: not instrument(s), junction=lambda s: False)
     for c, leg in zip(lines, legs):
@@ -544,7 +545,8 @@ def to_dexpi(review: ReviewDiagram) -> tuple[ParsedDiagram, BuildResult]:
             edge = Edge(id=c.id, source=c.from_id, target=c.to_id, style="", is_dashed=c.line_type == "signal")
         # the row's From -> To is the flow direction when known (the reviewer may have swapped it)
         edge.flow = 1 if c.flow in FLOW_KNOWN else 0
-        edge.flow_basis = "arrow" if c.flow == "drawn arrow" else "implied" if edge.flow else ""
+        edge.flow_basis = ("both" if c.flow == FLOW_BOTH else "arrow" if c.flow == "drawn arrow"
+                           else "implied" if edge.flow else "")
         edges.append(edge)
     if base is None:  # image mode: the redraw follows the pipes traced on the picture
         traced = {c.id: [tuple(p) for p in c.path] for c in review.connections if c.include and c.path}
