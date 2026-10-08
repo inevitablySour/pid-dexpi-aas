@@ -755,9 +755,43 @@ export default function (component) {
   const watch = new MutationObserver(() => showPeek(current()));
   watch.observe(document.body, { subtree: true, childList: true, attributes: true,
     attributeFilter: ['data-focused', 'data-hovered'] });
-  const over = (e) => { const o = e.target.closest && e.target.closest('[role=option]'); if (o) showPeek(refOf(o)); };
+  // Hovering a line button in the side panel (key "peekline__<row id>__..."): that pipe is
+  // outlined the same way. Streamlit's key class turns other characters into "-".
+  let peekLine = null;
+  const showLinePeek = (id) => {
+    if (id === peekLine) return;
+    peekLine = id;
+    s.querySelectorAll('.linepeek').forEach((n) => n.remove());
+    if (!id) return;
+    const san = (r) => r.replace(/[^a-zA-Z0-9_-]/g, '-');
+    s.querySelectorAll('g.item[data-rows]').forEach((g) => {
+      if (!g.dataset.rows.split('|').some((r) => san(r) === id)) return;
+      const pl = g.querySelector('polyline.vis');
+      if (!pl) return;
+      for (const [sw, stroke] of [[16, 'rgba(255,140,0,0.4)'], [5, '#ff8c00']]) {
+        const m = document.createElementNS(SVGNS, 'polyline');
+        m.setAttribute('class', 'linepeek');
+        m.setAttribute('points', pl.getAttribute('points'));
+        m.setAttribute('fill', 'none'); m.setAttribute('stroke', stroke); m.setAttribute('stroke-width', sw);
+        m.setAttribute('stroke-linejoin', 'round'); m.setAttribute('stroke-linecap', 'round');
+        m.setAttribute('vector-effect', 'non-scaling-stroke');
+        m.style.pointerEvents = 'none';
+        s.appendChild(m);
+      }
+    });
+  };
+  const lineOf = (t) => {
+    const b = t.closest && t.closest('[class*="st-key-peekline__"]');
+    const m = b && b.className.match(/st-key-peekline__(.+?)__/);
+    return m ? m[1] : null;
+  };
+  const over = (e) => {
+    const o = e.target.closest && e.target.closest('[role=option]');
+    if (o) showPeek(refOf(o));
+    showLinePeek(lineOf(e.target));
+  };
   document.addEventListener('mouseover', over);
-  mem.peekOff = () => { watch.disconnect(); document.removeEventListener('mouseover', over); showPeek(null); };
+  mem.peekOff = () => { watch.disconnect(); document.removeEventListener('mouseover', over); showPeek(null); showLinePeek(null); };
 }
 """
 

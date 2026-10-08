@@ -1501,7 +1501,7 @@ with panel_col:
                         other = c.to_id if c.from_id == s.id else c.from_id
                         arrow = ("→" if c.from_id == s.id else "←") if c.flow in FLOW_KNOWN else "–"
                         if st.button(f"{arrow} {item_option(other)} · {LINE_LABELS.get(c.line_type, c.line_type)}",
-                                     key=f"go_{c.id}_{k}", type="tertiary"):
+                                     key=f"peekline__{c.id}__{k}", type="tertiary"):  # key: the map outlines it on hover
                             select((), {c.id}, zoom=True)
                             st.rerun()
                 else:
