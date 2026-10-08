@@ -205,6 +205,25 @@ def review_training_zip(review, subset: str = "Reviewed", name: str | None = Non
     return buf.getvalue(), summary
 
 
+def add_review_to_training(review, root: Path, subset: str, name: str,
+                           tile: int = 1500, stride: int = 500) -> dict:
+    """A reviewed picture straight into the training data (data/PID2Graph): the boxes, lines,
+    line types and paths as checked in the app (map, side panel or editor), scaled so its
+    median symbol is ~TARGET_SYMBOL_PX. -> summary."""
+    if not review.image_path or not Path(review.image_path).exists():
+        raise ValueError("only a review with a picture can become training data")
+    symbols, edges = review_labels(review)
+    if not symbols:
+        raise ValueError("no items to learn from")
+    from pid_dexpi_aas.image.sheet_image import to_dark_on_white
+    with Image.open(review.image_path) as im:
+        sheet = to_dark_on_white(im)
+    sheet, symbols, edges, scale = normalise_scale(sheet, symbols, edges)
+    tiles = write_sheet(dir_writer(root), sheet, name, subset, symbols, edges, tile, stride)
+    return {"symbols": len(symbols), "lines": len(edges), "tiles": tiles, "scale": round(scale, 3),
+            "arrows": sum(1 for _, l, _ in symbols if l == "arrow")}
+
+
 # -------------------------------------------------- drawings added from the review app ---
 REVIEWED_SUBSETS = ("Reviewed", "Reviewed test")
 

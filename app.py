@@ -229,9 +229,9 @@ with st.sidebar:
     st.divider()
     st.header("Training data")
     with st.expander("Add a drawing labelled in draw.io"):
-        st.caption("1. Upload a picture above, check it, and use 'Download for labelling (.drawio)' at the bottom. "
-                   "2. Correct boxes, lines and dashed / solid in draw.io (app.diagrams.net works). "
-                   "3. Upload the corrected file here to add it to the model's training data.")
+        st.caption("Checked sheets are added from 'Add this to the training data' at the bottom of the page. "
+                   "Here: a picture's drawing ('Download the drawing (.drawio)' there) corrected in desktop "
+                   "draw.io, and the list of sheets added so far.")
         label_upload = st.file_uploader("Corrected .drawio", type=["drawio", "xml"], key="label_upload")
         show_training = st.checkbox("Show the drawings added so far", key="show_training")
 
@@ -1804,17 +1804,58 @@ with st.expander("AAS details (Asset Administration Shell, IDTA 02012-1-0) - opt
     aas_base = st.text_input("Id prefix for the AAS, its Submodel and the items (leave empty for an automatic one)",
                              "", key="aas_base", help="e.g. https://your-lab.example/plants/lightup - the twins look "
                              "items up by '<prefix>:asset:<tag>'")
-if review.image_path:
-    with st.expander("Use this picture as training data (label it in draw.io)"):
-        st.caption("Training labels need exact boxes, pipe paths and solid / dashed lines - edit those in draw.io: "
-                   "download the picture with your checked items and lines as a draw.io file, correct it there "
-                   "(the file explains how; app.diagrams.net works), then add it in the sidebar under "
-                   "Training data.")
-        from pid_dexpi_aas.image.drawio_labels import review_to_drawio
-        # one click: the file is made when the button is pressed, and the page does not rerun
-        st.download_button("Download for labelling (.drawio)", lambda r=review: review_to_drawio(r).encode(),
-                           file_name=f"{Path(review.source_name).stem}_labels.drawio", mime="application/xml",
-                           on_click="ignore", key="label_dl")
+with st.expander("Add this to the training data"):
+    from pid_dexpi_aas.image.drawio_labels import review_to_drawio, safe_name
+    from pid_dexpi_aas.image.training_export import add_review_to_training, list_reviewed
+    from_drawing = review.drawio is not None and drawio_file is not None
+    st.caption("Teach the model from this sheet once it is checked: "
+               + ("the drawing is rendered by draw.io and labelled like the team's drawings (items, lines, "
+                  "dashed = signal, flow arrows)." if from_drawing else
+                  "the boxes, lines, line types and paths as you checked them here - on the map, in the side "
+                  "panel or in the editor - are the labels. Only add a sheet whose boxes fit their symbols."))
+    t1, t2 = st.columns([3, 2])
+    t_name = safe_name(t1.text_input("Name", safe_name(Path(review.source_name).stem.removesuffix(".drawio")),
+                                     key="train_name"))
+    t_use = t2.radio("Use it for", ["Training", "Held-out test"], horizontal=True, key="train_use",
+                     help="Held-out: a fixed set of unseen sheets every model is scored on. Keep a sheet in one of "
+                          "the two, never both.")
+    t_subset = "Reviewed" if t_use == "Training" else "Reviewed test"
+    t_other = "Reviewed test" if t_subset == "Reviewed" else "Reviewed"
+    t_existing = {(d["name"], d["subset"]) for d in list_reviewed(DATA_ROOT)}
+    a1, a2 = st.columns(2)
+    if (t_name, t_other) in t_existing:
+        a1.error(f"'{t_name}' is already {'held-out test' if t_other.endswith('test') else 'training'} data - "
+                 "remove it there first (Training data, in the sidebar).")
+    elif a1.button("Replace it in the training data" if (t_name, t_subset) in t_existing else "Add to the training data",
+                   type="primary", width="stretch", key="train_add"):
+        with st.spinner("Writing the training tiles..."):
+            try:
+                if from_drawing:
+                    sys.path.insert(0, str(ROOT / "ml" / "pid2graph" / "data"))
+                    from make_team_data import process as drawing_to_training
+                    with tempfile.TemporaryDirectory() as tmp:
+                        f = Path(tmp) / f"{t_name}.drawio"
+                        f.write_bytes(drawio_file.getvalue())
+                        info = drawing_to_training(f, DATA_ROOT, t_subset, 1500, 500, arrows=True)
+                    done = f"{info['symbols']} items, {info['edges']} lines, {info['patches']} tiles"
+                else:
+                    info = add_review_to_training(review, DATA_ROOT, t_subset, t_name)
+                    done = (f"{info['symbols']} items, {info['lines']} lines, {info['tiles']} tiles "
+                            f"(scaled x{info['scale']:.2f} to the model's symbol size)")
+                st.success(f"Added '{t_name}' as {'held-out test' if t_subset.endswith('test') else 'training'} "
+                           f"data: {done}. It is listed under Training data in the sidebar.")
+            except Exception as exc:
+                st.error(f"Could not add it: {exc}")
+    # the finished sheet as a .drawio file: the edited drawing, or the picture with its checked labels
+    if from_drawing:
+        a2.download_button("Download the drawing (.drawio)", drawio_file.getvalue(), file_name=f"{t_name}.drawio",
+                           mime="application/xml", width="stretch", key="train_dl")
+    elif review.image_path:
+        a2.download_button("Download the drawing (.drawio)", lambda r=review: review_to_drawio(r).encode(),
+                           file_name=f"{t_name}.drawio", mime="application/xml", on_click="ignore",
+                           width="stretch", key="train_dl")
+    st.caption("Training uses the added sheets once 'Patched/Reviewed' is in the training config "
+               "(DATA.EXTRA_TRAIN_SUBSETS); held-out ones are scored with eval_sheets.py --set reviewed.")
 
 b1, b2 = st.columns([1, 1])
 with b2:
