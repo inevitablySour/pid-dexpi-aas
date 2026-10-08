@@ -805,3 +805,25 @@ def test_picture_review_round_trips_through_the_editor():
     assert rows["a"].box[0] == 20 and "c" not in rows and rows["n"].tag == "FV 9"
     assert {c.id for c in r.connections} == {"ab", "bn"}
     assert next(c for c in r.connections if c.id == "bn").line_type == "signal"
+
+
+def test_editor_patch_draws_side_panel_additions_and_merges():
+    """Rows added in the side panel (a stream, a line) are drawn in the open editor; an item
+    merged away is handed to the kept one (its lines and tag text move there)."""
+    from pid_dexpi_aas.drawio.editor_data import editor_patch
+    from pid_dexpi_aas.drawio.parser import parse_drawio_xml
+    from pid_dexpi_aas.review import OFF_PAGE, ReviewConnection, ReviewSymbol, from_drawio
+    x = '''<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>
+    <mxCell id="p" value="P101" style="shape=mxgraph.pid.pumps.centrifugal_pump_1;" vertex="1" parent="1"><mxGeometry width="40" height="40" as="geometry"/></mxCell>
+    <mxCell id="v" value="V1" style="shape=mxgraph.pid.vessels.tank;" vertex="1" parent="1"><mxGeometry x="200" width="40" height="80" as="geometry"/></mxCell>
+    </root></mxGraphModel>'''
+    review = from_drawio(parse_drawio_xml(x, "t.drawio"))
+    review.symbols.append(ReviewSymbol(id="stream1", source="manual", box=[300, 0, 360, 30], detected_as="stream in/out",
+                                       tag="Product", dexpi_class=OFF_PAGE))
+    review.connections.append(ReviewConnection(id="m1", from_id="v", to_id="stream1", flow="reviewer"))
+    review.merged = {"old": "p"}
+    patch = editor_patch(review)
+    assert patch["stream1"]["create"]["vertex"] and patch["stream1"]["create"]["style"].startswith("text")
+    assert patch["m1"]["create"] == {"edge": True, "source": "v", "target": "stream1",
+                                     "style": "edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic;"}
+    assert "create" not in patch["p"] and patch["p"]["absorbs"] == ["old"]

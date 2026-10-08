@@ -270,7 +270,8 @@ if st.session_state.get("editor_open") and EDITOR_INSTALLED:
         st.session_state["editor_was_open"] = True
         saved = drawio_editor(doc["xml"], editor_patch(prev), title=prev.source_name, mode="picture")
         if saved and saved.get("t") != st.session_state.get("editor_t"):  # a new Save
-            changes = apply_editor_drawing(prev, saved["xml"], doc["ids"])
+            # the rows the editor was showing (it adds the side panel's new ones as they come)
+            changes = apply_editor_drawing(prev, saved["xml"], set(saved.get("ids") or doc["ids"]))
             doc.update(xml=saved["xml"], ids=drawing_ids(saved["xml"]))
             st.session_state["editor_t"] = saved["t"]
             st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
@@ -1412,6 +1413,7 @@ def _merge(keep_id: str, other_ids: list) -> None:
             c.from_id = keep_id if c.from_id == o.id else c.from_id
             c.to_id = keep_id if c.to_id == o.id else c.to_id
     gone = {o.id for o in others}
+    review.merged = {k: (keep_id if v in gone else v) for k, v in review.merged.items()} | {g: keep_id for g in gone}
     review.symbols = [x for x in review.symbols if x.id not in gone]
     if not keep.tag and keep.box and review.unattached_tags:
         # the merged box may now hold a tag no single box claimed ("V101" printed inside)

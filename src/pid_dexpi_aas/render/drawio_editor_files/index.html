@@ -60,7 +60,9 @@ window.addEventListener("message", (e) => {
     } else if (m.event === "save") {
       saved = m.xml;
       toEditor({ action: "status", message: "Sent to the app", modified: false });
-      toApp("streamlit:setComponentValue", { value: { xml: m.xml, t: Date.now() }, dataType: "json" });
+      // ids: the rows this drawing was showing - only those can have been deleted here
+      toApp("streamlit:setComponentValue", { value: { xml: m.xml, t: Date.now(), ids: Object.keys(lastPatch || {}) },
+                                             dataType: "json" });
     }
     return;
   }
@@ -205,15 +207,34 @@ function setStyle(cell, fields) {
 
 // The app's view of every cell (args.patch). Applied in full when a drawing is loaded;
 // afterwards only the cells whose entry changed (a side-panel edit), so details changed
-// here and not yet saved are not overwritten.
+// here and not yet saved are not overwritten. A cell the patch has and the drawing lacks
+// is drawn ("create": added in the side panel or on the map); a cell whose row left the
+// patch since last time is removed (merged away, deleted there).
 function applyPatch(full) {
   const patch = args.patch || {};
   const prev = full ? {} : (lastPatch || {});
   const m = graph.getModel();
+  const same = (id) => !full && JSON.stringify(prev[id]) === JSON.stringify(patch[id]);
   m.beginUpdate();
   try {
+    // 1. new cells: items first, then the lines between them
+    for (const pass of ["vertex", "edge"]) {
+      for (const [id, entry] of Object.entries(patch)) {
+        const c = entry.create;
+        if (!c || !c[pass] || m.getCell(id) || same(id)) continue;
+        const parent = (c.parent && m.getCell(c.parent)) || graph.getDefaultParent();
+        if (pass === "vertex") {
+          const [x, y, w, h] = c.geometry;
+          graph.insertVertex(parent, id, c.label || "", x, y, w, h, c.style);
+        } else {
+          const s = m.getCell(c.source), t = m.getCell(c.target);
+          if (s && t) graph.insertEdge(parent, id, "", s, t, c.style);
+        }
+      }
+    }
+    // 2. details, style, ends, box
     for (const [id, entry] of Object.entries(patch)) {
-      if (!full && JSON.stringify(prev[id]) === JSON.stringify(entry)) continue;
+      if (same(id)) continue;
       const cell = m.getCell(id);
       if (!cell) continue;
       if (entry.attrs) setData(cell, entry.attrs);
@@ -223,6 +244,28 @@ function applyPatch(full) {
         if (s && m.getTerminal(cell, true) !== s) m.setTerminal(cell, s, true);
         if (t && m.getTerminal(cell, false) !== t) m.setTerminal(cell, t, false);
       }
+      if (entry.geometry && cell.geometry) {
+        const [x, y, w, h] = entry.geometry, g = cell.geometry;
+        if (Math.max(Math.abs(g.x - x), Math.abs(g.y - y), Math.abs(g.width - w), Math.abs(g.height - h)) > 0.5) {
+          const ng = g.clone(); ng.x = x; ng.y = y; ng.width = w; ng.height = h;
+          m.setGeometry(cell, ng);
+        }
+      }
+    }
+    // 3. rows that went: lines first, then items; an item merged into another hands it its
+    //    lines and tag text first
+    if (!full) {
+      for (const [id, entry] of Object.entries(patch)) {
+        const keep = m.getCell(id);
+        for (const goneId of entry.absorbs || []) {
+          const o = m.getCell(goneId);
+          if (keep && o && !(goneId in patch)) absorb(keep, o);
+        }
+      }
+      const gone = Object.keys(prev).filter((id) => !(id in patch)).map((id) => m.getCell(id)).filter(Boolean);
+      const lines = gone.filter((c) => m.isEdge(c)), items = gone.filter((c) => !m.isEdge(c));
+      if (lines.length) graph.removeCells(lines, false);
+      if (items.length) graph.removeCells(items, false);
     }
   } finally { m.endUpdate(); }
   if (full && ui.editor.undoManager) ui.editor.undoManager.clear();
@@ -246,9 +289,12 @@ function render() {
   panel.innerHTML = "";
   if (!graph || !args) { panel.append(el("div", { cls: "sub" }, "Loading the editor...")); return; }
   const sel = graph.getSelectionCells();
+  const items = sel.filter((c) => graph.getModel().isVertex(c));
+  if (items.length >= 2) { renderMerge(items); panel.append(foot()); return; }
   if (sel.length !== 1) {
     panel.append(el("h3", {}, sel.length ? `${sel.length} selected` : "DEXPI details"),
-      el("div", { cls: "sub" }, "Select one item or line to set its DEXPI type, tag, line type, flow and specifications."),
+      el("div", { cls: "sub" }, "Select one item or line to set its DEXPI type, tag, line type, flow and specifications. " +
+        "Select two or more items (Shift+click) to merge them."),
       el("div", { cls: "hint" }, (args.mode === "picture"
         ? "Move or resize a box to fit its symbol; for a missed symbol drag an item box from 'Lines and labels' " +
           "over it. Lines follow the pipes traced on the picture - drag a line's bend points to correct one. "
@@ -312,6 +358,141 @@ function renderItem(cell) {
   if (val(cell, "section")) panel.append(...field("Plant section", el("div", {}, val(cell, "section"))));
   const cls = isAuto ? auto : val(cell, "dexpi_class");
   specs(cell, cls && schema && schema.classes[cls] ? cls : null);
+  tools(cell);
+}
+
+// ---------------------------------------------------------------- item tools ---
+// The side panel's Connect tools, here: streams, taking an in-line item out, merging.
+const effClass = (c) => val(c, "dexpi_auto") !== "0" ? val(c, "auto_class") : val(c, "dexpi_class");
+const button = (text, act, title) => el("button", { textContent: text, onclick: act, title: title || "",
+  style: "width:100%;margin-top:6px;padding:6px;border:1px solid #c8ced6;border-radius:4px;background:#fff;cursor:pointer;font:inherit" });
+
+function tools(cell) {
+  const m = graph.getModel();
+  const box = el("details", { open: false }, el("summary", {}, "Streams and other tools"));
+  const name = el("input", { type: "text", placeholder: "Name, e.g. Product, N2, Vent" });
+  box.append(...field("New stream", name),
+    el("div", { cls: "row" },
+      button("Add feed (in)", () => addStream(cell, false, name.value.trim() || "Feed"), "A pipe entering the drawing here"),
+      button("Add product (out)", () => addStream(cell, true, name.value.trim() || "Product"), "A pipe leaving the drawing here")));
+  const lines = m.getEdges(cell).filter((e) => m.getTerminal(e, true) && m.getTerminal(e, false));
+  const others = [...new Set(lines.map((e) => m.getTerminal(e, true) === cell ? m.getTerminal(e, false) : m.getTerminal(e, true)))];
+  if (lines.length === 2 && others.length === 2 && !others.includes(cell)) {
+    box.append(button(`Take it out: join ${itemName(others[0])} – ${itemName(others[1])}`, () => takeOut(cell, lines, others),
+      "Removes this item and its two lines, and draws one line between its neighbours"));
+  }
+  panel.append(box);
+}
+
+function addStream(cell, out, name) {
+  const m = graph.getModel(), g = cell.geometry;
+  if (!g) return;
+  const w = Math.max(60, 0.6 * g.width), h = w / 2, gap = Math.max(40, 0.5 * Math.max(g.width, g.height));
+  // beside the item (outlets right, inlets left), below any stream already there
+  const x = out ? g.x + g.width + gap : g.x - gap - w;
+  let y = g.y + g.height / 2 - h / 2;
+  const taken = m.getEdges(cell).map((e) => m.getTerminal(e, true) === cell ? m.getTerminal(e, false) : m.getTerminal(e, true))
+    .filter((o) => o && o.geometry && Math.abs(o.geometry.x - x) < w);
+  y += taken.length * 1.6 * h;
+  const parent = m.getParent(cell);
+  m.beginUpdate();
+  try {
+    const v = graph.insertVertex(parent, null, name, x, y, w, h,
+      "text;html=1;align=center;verticalAlign=middle;strokeColor=#000000;");
+    setData(v, { dexpi_class: schema.off_page, dexpi_auto: "0", tag: name, tag_auto: "0", in_dexpi: "1" });
+    const style = "edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=classic;";
+    graph.insertEdge(parent, null, "", out ? cell : v, out ? v : cell, style);
+    graph.setSelectionCell(v);
+  } finally { m.endUpdate(); }
+}
+
+function takeOut(cell, lines, others) {
+  const m = graph.getModel();
+  // keep the direction: the neighbour whose line flows into this item comes first
+  const into = lines.find((e) => m.getTerminal(e, false) === cell && styleOf(e, "endArrow") !== "none");
+  const first = into ? m.getTerminal(into, true) : others[0];
+  const second = others.find((o) => o !== first);
+  const arrow = lines.some((e) => styleOf(e, "endArrow") !== "none" || (styleOf(e, "startArrow") || "none") !== "none");
+  m.beginUpdate();
+  try {
+    graph.removeCells([...lines, cell], false);
+    graph.insertEdge(m.getParent(first), null, "", first, second,
+      `edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=${arrow ? "classic" : "none"};` +
+      (styleOf(lines[0], "dashed") == 1 ? "dashed=1;" : ""));
+  } finally { m.endUpdate(); }
+}
+
+// `o` is folded into `keep`: its lines move to `keep` - attached ones, and lines that only end
+// next to it (draw.io lets a line end loose; the converter would otherwise join it to whatever
+// is nearest once `o` is gone) - and its own tag text goes with it.
+function absorb(keep, o) {
+  const m = graph.getModel();
+  for (const e of m.getEdges(o)) {
+    if (m.getTerminal(e, true) === o) m.setTerminal(e, keep, true);
+    if (m.getTerminal(e, false) === o) m.setTerminal(e, keep, false);
+  }
+  const g = o.geometry, pad = 15;
+  if (g) {
+    for (const e of Object.values(m.cells)) {
+      if (!m.isEdge(e) || !e.geometry) continue;
+      for (const src of [true, false]) {
+        if (m.getTerminal(e, src)) continue;
+        const pt = e.geometry.getTerminalPoint(src);
+        if (pt && pt.x >= g.x - pad && pt.x <= g.x + g.width + pad && pt.y >= g.y - pad && pt.y <= g.y + g.height + pad) {
+          m.setTerminal(e, keep, src);
+        }
+      }
+    }
+  }
+  const tc = val(o, "tag_cell") && m.getCell(val(o, "tag_cell"));
+  if (tc && tc !== keep) graph.removeCells([tc], false);
+}
+
+function renderMerge(items) {
+  panel.append(el("h3", {}, `${items.length} items selected`),
+    el("div", { cls: "sub" }, "Duplicates of one item (two boxes on one symbol)? Merge them: their lines move " +
+      "to the one you keep, a missing tag, type or specifications are taken from the others."));
+  const keep = el("select", {});
+  items.forEach((c, i) => keep.append(el("option", { value: String(i), textContent: `${itemName(c)} (${effClass(c) || "new"})` })));
+  panel.append(...field("Keep", keep), button("Merge into it", () => {
+    const k = items[Number(keep.value)];
+    mergeItems(k, items.filter((c) => c !== k));
+  }));
+}
+
+function mergeItems(keep, others) {
+  const m = graph.getModel();
+  m.beginUpdate();
+  try {
+    for (const o of others) {
+      const otherTag = val(o, "tag") || labelOf(o);
+      if (!(val(keep, "tag") || labelOf(keep)) && otherTag) { setData(keep, { tag: otherTag, tag_auto: "0" }); setLabel(keep, otherTag); }
+      const kc = effClass(keep), oc = effClass(o);
+      if ((!kc || kc === schema.skip) && oc && oc !== schema.skip) setData(keep, { dexpi_class: oc, dexpi_auto: "0" });
+      let ks = {}, os = {};
+      try { ks = JSON.parse(val(keep, "specs") || "{}"); os = JSON.parse(val(o, "specs") || "{}"); } catch (err) { /* keep */ }
+      for (const part of ["dexpi", "custom"]) if (os[part]) ks[part] = Object.assign({}, os[part], ks[part] || {});
+      if (Object.keys(ks).length) setData(keep, { specs: JSON.stringify(ks) });
+      if (args.mode === "picture" && keep.geometry && o.geometry) {  // the box covers both
+        const a = keep.geometry, b = o.geometry, g = a.clone();
+        g.x = Math.min(a.x, b.x); g.y = Math.min(a.y, b.y);
+        g.width = Math.max(a.x + a.width, b.x + b.width) - g.x; g.height = Math.max(a.y + a.height, b.y + b.height) - g.y;
+        m.setGeometry(keep, g);
+      }
+      absorb(keep, o);
+    }
+    // lines that now join the kept item to itself, or repeat another of its lines, go
+    const seen = new Set(), drop = [];
+    for (const e of m.getEdges(keep)) {
+      const a = m.getTerminal(e, true), b = m.getTerminal(e, false);
+      if (a === b) { drop.push(e); continue; }
+      const key = [a && a.id, b && b.id].sort().join("|") + "|" + (styleOf(e, "dashed") || "0");
+      if (seen.has(key)) drop.push(e); else seen.add(key);
+    }
+    if (drop.length) graph.removeCells(drop, false);
+    graph.removeCells(others, false);
+    graph.setSelectionCell(keep);
+  } finally { m.endUpdate(); }
 }
 
 function lineKind(cell) {

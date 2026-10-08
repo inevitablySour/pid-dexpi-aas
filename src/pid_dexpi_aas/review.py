@@ -114,6 +114,9 @@ class ReviewDiagram:
     # draw.io mode: what each row was before anyone changed it - {row id: {"dexpi_class",
     # "tag", "notes"}} - so the Editor tab can tell automatic values from ones set by a person
     auto: dict = field(default_factory=dict)
+    # items folded into another by a merge: {merged-away id: kept id} - the Editor tab moves
+    # their lines (attached or merely ending next to them) and their tag text onto the kept one
+    merged: dict = field(default_factory=dict)
 
     def symbol_rows(self) -> list[dict]:
         return [asdict(s) for s in self.symbols]

@@ -108,7 +108,7 @@ def apply_editor_drawing(review, xml: str, known_ids: set) -> dict:
     rows the editor was showing - only those can have been deleted there (rows added
     elsewhere meanwhile stay). -> counts of what changed."""
     from pid_dexpi_aas.dexpi.mapping import classify_tag, map_shape
-    from pid_dexpi_aas.review import (DEXPI_CLASS_CHOICES, FLOW_KNOWN, SKIP, ReviewConnection, ReviewSymbol,
+    from pid_dexpi_aas.review import (DEXPI_CLASS_CHOICES, FLOW_KNOWN, OFF_PAGE, SKIP, ReviewConnection, ReviewSymbol,
                                       _instrument_attributes, _mapping_to_class)
 
     root = ET.fromstring(xml)
@@ -123,7 +123,8 @@ def apply_editor_drawing(review, xml: str, known_ids: set) -> dict:
             x, y = float(geo.get("x", 0)), float(geo.get("y", 0))
             w, h = float(geo.get("width", 0)), float(geo.get("height", 0))
             vertices[cid] = {"box": [x, y, x + w, y + h], "label": _strip_html(label), "data": data,
-                             "token": _extract_shape_token(cell.get("style", ""))}
+                             "token": _extract_shape_token(cell.get("style", "")),
+                             "text": (cell.get("style") or "").split(";")[0] == "text"}
         elif cell.get("edge") == "1":
             pts = [] if geo is None else [(float(p.get("x", 0)), float(p.get("y", 0)))
                                           for p in geo.findall("Array[@as='points']/mxPoint")]
@@ -137,7 +138,9 @@ def apply_editor_drawing(review, xml: str, known_ids: set) -> dict:
         d, s = v["data"], rows.get(sid)
         if s is None:  # drawn in the editor: a box, or a symbol from the P&ID library
             tag = d.get("tag") if d.get("tag_auto") == "0" else v["label"]
-            if v["token"] and not v["token"].startswith("plain:"):
+            if v["text"]:  # a text at a line's end: a stream entering or leaving (off-page connector)
+                cls = OFF_PAGE
+            elif v["token"] and not v["token"].startswith("plain:"):
                 cls = _mapping_to_class(map_shape(v["token"], tag or "", ""))
             else:
                 cls = classify_tag(tag or "")[1] or SKIP
