@@ -109,8 +109,10 @@ def _shift(raw: dict[str, Route], edges, shapes=()) -> tuple[int, int] | None:
         r = raw.get(e.id)
         if not r:
             continue
-        for end, pt in ((r[0], e.source_point), (r[-1], e.target_point)):
-            if pt:
+        # an end with an arrowhead is drawn short (the line stops where the head starts):
+        # it would put the shift a head's length off
+        for end, pt, arrow in ((r[0], e.source_point, e.has_start_arrow), (r[-1], e.target_point, e.has_end_arrow)):
+            if pt and not arrow:
                 shifts[(round(end[0] - pt[0]), round(end[1] - pt[1]))] += 1
     if shifts:
         return shifts.most_common(1)[0][0]
@@ -193,9 +195,11 @@ def find_junctions(edges, routes: dict[str, Route], tol: float = 8.0, gap: float
     loose = []
     for e in live:
         r = routes[e.id]
-        for end, attached in ((0, e.source), (1, e.target)):
+        for end, attached, stored in ((0, e.source, e.source_point), (1, e.target, e.target_point)):
             if attached is None:
-                loose.append((e.id, end, r[0] if end == 0 else r[-1], _out_dir(r, end)))
+                # the end point the file stores is exact; the drawn line stops short of it
+                # where it carries an arrowhead
+                loose.append((e.id, end, stored or (r[0] if end == 0 else r[-1]), _out_dir(r, end)))
     joins: dict[tuple[str, int], str] = {}
     straight_through = set()
     # 0. A pipe drawn with a GAP where it crosses another line (a "line jump"): two loose

@@ -881,3 +881,25 @@ def test_tee_drawn_in_the_editor_is_a_pipe_network(tmp_path):
     _, result = to_dexpi(review)
     segs = result.model.conceptualModel.pipingNetworkSystems[0].segments
     assert sum(isinstance(i, pp.PipeTee) for s in segs for i in s.items) == 1
+
+
+@needs_routes
+def test_branch_ending_with_an_arrowhead_on_a_pipe_corner(tmp_path):
+    """A branch whose loose end (with an arrowhead) sits on another pipe's bend is a tee. The
+    arrowhead makes draw.io stop the drawn line short: the stored end point is used, and such
+    ends don't calibrate the route alignment (they put it a head's length off)."""
+    from pid_dexpi_aas.drawio.parser import parse_drawio_xml_resolved
+    from pid_dexpi_aas.review import from_drawio
+    x = '''<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>
+    <mxCell id="t" value="V1" style="shape=mxgraph.pid.vessels.tank;" vertex="1" parent="1"><mxGeometry x="100" y="50" width="40" height="40" as="geometry"/></mxCell>
+    <mxCell id="p" value="P1" style="shape=mxgraph.pid.pumps.centrifugal_pump_1;" vertex="1" parent="1"><mxGeometry x="380" y="400" width="40" height="40" as="geometry"/></mxCell>
+    <mxCell id="v" value="GV1" style="shape=mxgraph.pid.valves.gate_valve;" vertex="1" parent="1"><mxGeometry x="600" y="60" width="40" height="20" as="geometry"/></mxCell>
+    <mxCell id="e1" edge="1" source="t" target="p" parent="1" style="edgeStyle=orthogonalEdgeStyle;endArrow=classic;"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="400" y="70"/></Array></mxGeometry></mxCell>
+    <mxCell id="e2" edge="1" source="v" parent="1" style="edgeStyle=orthogonalEdgeStyle;endArrow=classic;"><mxGeometry relative="1" as="geometry"><mxPoint x="400" y="70" as="targetPoint"/></mxGeometry></mxCell>
+    </root></mxGraphModel>'''
+    f = tmp_path / "corner.drawio"
+    f.write_text(f'<mxfile><diagram id="p" name="P">{x}</diagram></mxfile>')
+    review = from_drawio(parse_drawio_xml_resolved(x, source_file=f.name, drawio_path=f))
+    tag = {s.id: s.tag for s in review.symbols}
+    assert {frozenset((tag[c.from_id], tag[c.to_id])) for c in review.connections} == {
+        frozenset(("V1", "P1")), frozenset(("GV1", "P1")), frozenset(("V1", "GV1"))}
