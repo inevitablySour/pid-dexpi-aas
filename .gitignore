@@ -20,3 +20,4 @@ __pycache__/
 
 # the draw.io web editor for the Editor tab (scripts/get_drawio_editor.py)
 /src/pid_dexpi_aas/render/drawio_editor_files/webapp/
+/src/pid_dexpi_aas/render/drawio_editor_files/schema.json

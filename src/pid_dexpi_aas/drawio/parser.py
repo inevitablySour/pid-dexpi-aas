@@ -23,6 +23,9 @@ class Shape:
     width: float
     height: float
     style: str
+    # data fields of a draw.io <object>/<UserObject> cell - the Editor tab keeps each item's
+    # DEXPI details there (drawio/editor_data.py)
+    data: dict = field(default_factory=dict)
 
     @property
     def is_labeled_only(self) -> bool:
@@ -86,6 +89,7 @@ class Edge:
     flow_basis: str = ""
     # a closed frame drawn around a plant section (sections.py) - not a pipe
     is_section_frame: bool = False
+    data: dict = field(default_factory=dict)  # as Shape.data
 
 
 @dataclass
@@ -138,8 +142,7 @@ def parse_drawio_xml(xml_text: str, source_file: str) -> ParsedDiagram:
     root = ET.fromstring(xml_text)
     diagram = ParsedDiagram(source_file=source_file)
 
-    for cell in root.iter("mxCell"):
-        cell_id = cell.get("id")
+    for cell, cell_id, value, data in _cells(root):
         if cell_id in (None, "0", "1"):
             continue  # the two mxGraph root cells carry no shape data
 
@@ -196,6 +199,7 @@ def parse_drawio_xml(xml_text: str, source_file: str) -> ParsedDiagram:
                     has_end_arrow=end_arrow_match is None or end_arrow_match.group(1) != "none",
                     has_start_arrow=start_arrow_match is not None
                     and start_arrow_match.group(1) != "none",
+                    data=data,
                 )
             )
             continue
@@ -211,16 +215,34 @@ def parse_drawio_xml(xml_text: str, source_file: str) -> ParsedDiagram:
                 Shape(
                     id=cell_id,
                     shape_token=_extract_shape_token(style),
-                    text=_strip_html(cell.get("value", "")),
+                    text=_strip_html(value),
                     x=x,
                     y=y,
                     width=width,
                     height=height,
                     style=style,
+                    data=data,
                 )
             )
 
     return diagram
+
+
+_OBJECT_TAGS = ("object", "UserObject")
+_NOT_DATA = {"id", "label", "placeholders", "tooltip", "link"}
+
+
+def _cells(root: ET.Element):
+    """Every cell: (mxCell, id, label, data). A cell with data fields is written by draw.io
+    as <object id label ...fields><mxCell .../></object> - id and label on the wrapper."""
+    for cell in root.iter():
+        if cell.tag == "mxCell":
+            yield cell, cell.get("id"), cell.get("value", ""), {}
+        elif cell.tag in _OBJECT_TAGS:
+            inner = cell.find("mxCell")
+            if inner is not None:
+                yield inner, cell.get("id"), cell.get("label", ""), {
+                    k: v for k, v in cell.attrib.items() if k not in _NOT_DATA}
 
 
 def _distance_to_shape(shape: Shape, x: float, y: float) -> float:

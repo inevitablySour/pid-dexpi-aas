@@ -246,16 +246,26 @@ if st.session_state.get("editor_base") != upload_id:
     st.session_state.update(editor_base=upload_id)
     st.session_state.pop("editor_xml", None)
 if st.session_state.get("editor_open") and EDITOR_INSTALLED:
+    from pid_dexpi_aas.drawio.editor_data import editor_patch
+    from pid_dexpi_aas.render.drawio_editor import write_schema
     st.markdown("### draw.io editor")
-    st.caption("Shapes from the P&ID libraries on the left become DEXPI items; lines must start and end on a "
-               "shape (dashed = signal line). **Save** (Ctrl+S) loads the drawing into the check below - "
-               "that rebuilds it, so side-panel edits made since the last save are replaced.")
-    start = st.session_state.get("editor_xml") or (uploaded_drawio.getvalue().decode("utf-8", "replace")
-                                                   if uploaded_drawio else "")
-    saved = drawio_editor(start, title=uploaded_drawio.name if uploaded_drawio else "new drawing")
-    if saved and saved["t"] != st.session_state.get("editor_t"):
+    st.caption("Draw with the P&ID libraries on the left; set each item's and line's DEXPI details in the panel on "
+               "the right. **Save** (Ctrl+S) loads the drawing into the check below. The side panel below and this "
+               "editor stay in step: details changed in either show up in both.")
+    write_schema()
+    # each cell's details from the review as the last run left it (side-panel edits included);
+    # a Save rebuilds the review further down, which reruns once to bring them here
+    prev = st.session_state.get("review")
+    saved = drawio_editor(st.session_state.get("editor_xml") or (uploaded_drawio.getvalue().decode("utf-8", "replace")
+                                                               if uploaded_drawio else ""),
+                          editor_patch(prev) if prev is not None and prev.drawio is not None else {},
+                          title=uploaded_drawio.name if uploaded_drawio else "new drawing")
+    if saved and saved.get("t") != st.session_state.get("editor_t"):  # a new Save
         stem = Path(uploaded_drawio.name).stem if uploaded_drawio else "drawing"
-        st.session_state.update(editor_t=saved["t"], editor_xml=saved["xml"], editor_name=f"{stem} (edited).drawio")
+        xml = saved["xml"]
+        if not xml.lstrip().startswith("<mxfile"):  # embed mode saves the bare graph: make it a .drawio file
+            xml = f'<mxfile host="pid-dexpi-aas"><diagram id="page-1" name="Page-1">{xml}</diagram></mxfile>'
+        st.session_state.update(editor_t=saved["t"], editor_xml=xml, editor_name=f"{stem} (edited).drawio")
         st.rerun()
 drawio_file = (EditedDrawing(st.session_state["editor_name"], st.session_state["editor_xml"].encode())
                if st.session_state.get("editor_xml") else uploaded_drawio)
@@ -432,6 +442,8 @@ if st.session_state.get("input_key") != input_key:
     else:
         review = build_review()
     st.session_state.update(input_key=input_key, review=review, editor_version=0)
+    if st.session_state.get("editor_open"):
+        st.rerun()  # the editor at the top takes each cell's details from this new review
 review: ReviewDiagram = st.session_state["review"]
 
 mode = " + ".join(x for x, f in (("draw.io", drawio_file), ("image", image_file)) if f) or "saved review"

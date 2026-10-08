@@ -19,6 +19,8 @@ def decode_drawio(path: str | Path) -> list[str]:
         content = f.read()
 
     diagrams = re.findall(r"<diagram[^>]*>(.*?)</diagram>", content, re.S)
+    if not diagrams and "<mxGraphModel" in content:
+        return [content.strip()]  # a bare graph model (draw.io's embed mode saves these)
     decoded = []
     for payload in diagrams:
         payload = payload.strip()

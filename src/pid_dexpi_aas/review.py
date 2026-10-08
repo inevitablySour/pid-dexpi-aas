@@ -111,6 +111,9 @@ class ReviewDiagram:
     # "connections": [ReviewConnection], "match": {draw.io item id: picture item id}} - for
     # the app's Picture and Compare views (the rows themselves stay draw.io's)
     picture: dict | None = None
+    # draw.io mode: what each row was before anyone changed it - {row id: {"dexpi_class",
+    # "tag", "notes"}} - so the Editor tab can tell automatic values from ones set by a person
+    auto: dict = field(default_factory=dict)
 
     def symbol_rows(self) -> list[dict]:
         return [asdict(s) for s in self.symbols]
@@ -192,8 +195,45 @@ def from_drawio(diagram: ParsedDiagram) -> ReviewDiagram:
             ("pipe network joined at a junction; one end guessed - check" if resolution == "junction+guess"
              else "endpoint inferred from a loose line end - check"),
         ))
+    review.auto = {s.id: {"dexpi_class": s.dexpi_class, "tag": s.tag, "notes": s.notes} for s in review.symbols}
+    review.auto.update({c.id: {"notes": c.notes} for c in review.connections})
+    _apply_editor_data(review, diagram)
     _exclude_dangling(review)
     return review
+
+
+def _apply_editor_data(review: ReviewDiagram, diagram: ParsedDiagram) -> None:
+    """Details set by a person and kept in the drawing (the Editor tab, drawio/editor_data.py):
+    a chosen DEXPI type or tag (an automatic one is worked out again - the shape or its label
+    may have changed), left out of DEXPI, notes, specifications, plant section."""
+    import json
+    data = {sh.id: sh.data for sh in diagram.shapes if sh.data}
+    data.update({e.id: e.data for e in diagram.edges if e.data})
+    for row in [*review.symbols, *review.connections]:
+        d = data.get(row.id)
+        if not d:
+            continue
+        if isinstance(row, ReviewSymbol):
+            if d.get("dexpi_auto") == "0" and d.get("dexpi_class") in DEXPI_CLASS_CHOICES:
+                row.dexpi_class, row.identified_by = d["dexpi_class"], "set in the editor"
+                row.include = row.dexpi_class != SKIP
+            if d.get("tag_auto") == "0" and "tag" in d:
+                row.tag, row.tag_source = d["tag"], "set in the editor"
+            if d.get("section"):
+                row.section = d["section"]
+        if d.get("in_dexpi") == "0":
+            row.include = False
+        elif d.get("in_dexpi") == "1" and isinstance(row, ReviewSymbol) and row.dexpi_class != SKIP:
+            row.include = True
+        if d.get("notes"):
+            row.notes = d["notes"]
+        try:
+            specs = json.loads(d.get("specs") or "{}")
+        except ValueError:
+            specs = {}
+        for part in ("dexpi", "custom"):
+            if specs.get(part):
+                row.attributes = {**(row.attributes or {}), part: specs[part]}
 
 
 def _exclude_dangling(review: ReviewDiagram) -> None:

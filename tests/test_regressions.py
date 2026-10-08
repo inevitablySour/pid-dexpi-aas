@@ -739,3 +739,37 @@ def test_drawio_pid_library_shapes_map_by_family():
     for (token, tag), cls in cases.items():
         assert map_shape(token, tag).dexpi_class_name == cls, token
     assert map_shape("mxgraph.pid.misc.unknown", "").dexpi_class_name is None
+
+
+def test_editor_details_travel_in_the_drawing():
+    """The Editor tab keeps each item's DEXPI details as data on its draw.io cell: a type or
+    tag set by a person is read back; an automatic one is worked out again from the shape."""
+    from pid_dexpi_aas.drawio.editor_data import editor_patch
+    from pid_dexpi_aas.drawio.parser import parse_drawio_xml
+    from pid_dexpi_aas.review import from_drawio
+    x = '''<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>
+    <UserObject id="p" label="P101" dexpi_class="BallValve" dexpi_auto="1" tag="P101" tag_auto="1">
+      <mxCell style="shape=mxgraph.pid.pumps.centrifugal_pump_1;" vertex="1" parent="1"><mxGeometry width="40" height="40" as="geometry"/></mxCell></UserObject>
+    <UserObject id="v" label="" dexpi_class="GlobeValve" dexpi_auto="0" tag="XV7" tag_auto="0" notes="checked on site" specs='{"custom": {"Material": "316L"}}'>
+      <mxCell style="shape=mxgraph.pid.valves.gate_valve;" vertex="1" parent="1"><mxGeometry x="200" width="40" height="20" as="geometry"/></mxCell></UserObject>
+    <UserObject id="e" label="" in_dexpi="0"><mxCell edge="1" source="p" target="v" parent="1" style="endArrow=classic;"><mxGeometry relative="1" as="geometry"/></mxCell></UserObject>
+    </root></mxGraphModel>'''
+    review = from_drawio(parse_drawio_xml(x, "t.drawio"))
+    rows = {s.id: s for s in review.symbols}
+    assert rows["p"].dexpi_class == "CentrifugalPump"            # automatic: from the shape, not the stale field
+    assert (rows["v"].dexpi_class, rows["v"].tag, rows["v"].notes) == ("GlobeValve", "XV7", "checked on site")
+    assert rows["v"].attributes["custom"] == {"Material": "316L"}
+    assert not next(c for c in review.connections if c.id == "e").include
+    patch = editor_patch(review)
+    assert patch["p"]["attrs"]["dexpi_auto"] == "1" and patch["v"]["attrs"]["dexpi_auto"] == "0"
+    assert patch["e"]["attrs"]["in_dexpi"] == "0"
+
+
+def test_bare_graph_model_is_read():
+    """draw.io's embed mode saves the bare <mxGraphModel> (no <mxfile>/<diagram>)."""
+    from pid_dexpi_aas.drawio.decode import decode_drawio
+    import tempfile, pathlib
+    with tempfile.TemporaryDirectory() as d:
+        f = pathlib.Path(d) / "x.drawio"
+        f.write_text('<mxGraphModel><root><mxCell id="0"/></root></mxGraphModel>')
+        assert decode_drawio(f)[0].startswith("<mxGraphModel")

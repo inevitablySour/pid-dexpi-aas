@@ -4,21 +4,43 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  html, body { margin: 0; height: 100%; background: #ffffff; }
-  iframe { border: 0; width: 100%; height: 100%; display: block; }
+  html, body { margin: 0; height: 100%; background: #ffffff; font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; color: #1f2933; }
+  #wrap { display: flex; height: 100%; }
+  iframe { border: 0; flex: 1; height: 100%; display: block; min-width: 0; }
+  #panel { width: 330px; flex: none; border-left: 1px solid #d9dde3; overflow-y: auto; padding: 14px 16px 24px; box-sizing: border-box; background: #fafbfc; }
+  #panel h3 { margin: 0 0 2px; font-size: 15px; }
+  #panel .sub { color: #5f6b7a; margin-bottom: 12px; }
+  #panel label.f { display: block; margin: 10px 0 3px; font-weight: 600; font-size: 12px; color: #3e4a59; }
+  #panel input[type=text], #panel input[type=number], #panel select { width: 100%; box-sizing: border-box; padding: 5px 7px; border: 1px solid #c8ced6; border-radius: 4px; font: inherit; background: #fff; }
+  #panel .row { display: flex; gap: 6px; }
+  #panel .row > * { flex: 1; }
+  #panel .seg { display: flex; border: 1px solid #c8ced6; border-radius: 4px; overflow: hidden; }
+  #panel .seg button { flex: 1; border: 0; background: #fff; padding: 5px 4px; font: inherit; cursor: pointer; border-right: 1px solid #c8ced6; }
+  #panel .seg button:last-child { border-right: 0; }
+  #panel .seg button.on { background: #ff4b4b; color: #fff; }
+  #panel .check { display: flex; align-items: center; gap: 6px; margin-top: 12px; }
+  #panel .hint { color: #5f6b7a; font-size: 12px; margin-top: 3px; }
+  #panel details { margin-top: 14px; border-top: 1px solid #e3e6ea; padding-top: 8px; }
+  #panel summary { cursor: pointer; font-weight: 600; }
+  #panel .foot { margin-top: 18px; color: #5f6b7a; font-size: 12px; border-top: 1px solid #e3e6ea; padding-top: 10px; }
 </style>
 </head>
 <body>
-<iframe id="ed" title="draw.io editor"></iframe>
+<div id="wrap"><iframe id="ed" title="draw.io editor"></iframe><aside id="panel"></aside></div>
 <script>
-// The app's Editor tab: draw.io (webapp/, served by this component) in embed mode.
-// Streamlit -> here: args {xml, params, config, height}. draw.io's JSON protocol:
-// it asks for its configuration, then says "init" (we send the drawing); Save / Ctrl+S
-// gives "save" with the XML, which goes back to the app as the component's value.
+// The app's Editor tab: draw.io (webapp/, served by this component) in embed mode, plus the
+// DEXPI panel. draw.io's JSON protocol: it asks for its configuration, says "init" (we send
+// the drawing), and Save / Ctrl+S gives "save" with the XML, which goes back to the app.
+// Same origin as the editor, so the panel works on its graph directly (window W below).
+// Each cell's DEXPI details are data fields on it (see pid_dexpi_aas/drawio/editor_data.py).
 const ed = document.getElementById("ed");
+const panel = document.getElementById("panel");
 const toApp = (type, extra) => window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type }, extra || {}), "*");
 const toEditor = (msg) => ed.contentWindow && ed.contentWindow.postMessage(JSON.stringify(msg), "*");
 let args = null, ready = false, shown = null, saved = null;
+let ui = null, graph = null, W = null, lastPatch = null, schema = null;
+
+fetch("schema.json").then((r) => r.json()).then((s) => { schema = s; render(); }).catch(() => { schema = {}; });
 
 window.addEventListener("message", (e) => {
   if (e.source === ed.contentWindow) {
@@ -29,7 +51,11 @@ window.addEventListener("message", (e) => {
     } else if (m.event === "init") {
       ready = true;
       shown = args.xml || "";
+      lastPatch = null;
       toEditor({ action: "load", xml: shown, title: args.title || "" });
+      hookEditor();
+    } else if (m.event === "load") {
+      if (graph) { applyPatch(true); render(); }
     } else if (m.event === "save") {
       saved = m.xml;
       toEditor({ action: "status", message: "Sent to the app", modified: false });
@@ -45,12 +71,323 @@ window.addEventListener("message", (e) => {
     ed.src = "webapp/index.html?" + args.params;
     toApp("streamlit:setFrameHeight", { height: args.height });
   } else if (ready && args.xml !== shown && args.xml !== saved) {
-    // a different drawing was chosen in the app (not the one just saved from here)
     shown = args.xml || "";
+    lastPatch = null;
     toEditor({ action: "load", xml: shown, title: args.title || "" });
+  } else if (graph) {
+    applyPatch(false);
+    render();
   }
 });
 toApp("streamlit:componentReady", { apiVersion: 1 });
+
+// ------------------------------------------------------------------ editor set-up ---
+function hookEditor() {
+  const w = ed.contentWindow;
+  if (!w.Draw || !w.Draw.loadPlugin) { setTimeout(hookEditor, 200); return; }
+  w.Draw.loadPlugin((u) => {
+    ui = u; graph = u.editor.graph; W = w;
+    trim();
+    graph.getSelectionModel().addListener(W.mxEvent.CHANGE, () => render());
+    graph.getModel().addListener(W.mxEvent.CHANGE, () => render());
+    applyPatch(true);
+    render();
+  });
+}
+
+// What a P&ID needs from draw.io, and nothing that would break the conversion: no other
+// files or pages, no raw XML / style / data editing, no groups, images or links.
+function trim() {
+  const doc = ed.contentDocument;
+  for (const name of ["editDiagram", "editStyle", "editData", "group", "ungroup", "insertImage", "insertLink",
+       "editLink", "editTooltip", "pageSetup", "print", "plugins", "tags", "insertTemplate", "fromText",
+       "formatSql", "import", "editConnectionPoints", "insertPage", "duplicatePage", "removePage",
+       "fromTemplate", "insertMermaid", "insertPlantUml", "insertLayout", "outline", "editShape",
+       "copyAsImage", "createShape", "addWaypoint", "insertRectangle", "insertEllipse", "insertRhombus",
+       "insertText", "insertNote", "insertTable", "editImage", "crop", "makeCopy", "share", "publishLink"]) {
+    const a = ui.actions.get(name);
+    if (a) { a.setEnabled(false); a.isEnabled = () => false; a.visible = false; }
+  }
+  if (ui.formatWindow == null && ui.toggleFormatPanel && ui.isFormatPanelVisible && ui.isFormatPanelVisible()) {
+    ui.toggleFormatPanel(false);
+  }
+  const hide = () => {
+    doc.querySelectorAll(".geMenubar a.geItem, .geMenubarContainer a.geItem").forEach((el) => {
+      if (["File", "Extras", "Help"].includes(el.textContent.trim())) el.style.display = "none";
+    });
+  };
+  hide(); setTimeout(hide, 500);
+  // draw.io's tool for each part of a P&ID: tags and stream ends are text, pipes and signal lines are lines
+  const sb = ui.sidebar;
+  const pipe = "endArrow=classic;html=1;edgeStyle=orthogonalEdgeStyle;rounded=0;";
+  sb.addPaletteFunctions("dexpi", "Lines and labels", true, [
+    sb.createVertexTemplateEntry("text;html=1;align=center;verticalAlign=middle;", 60, 24, "TAG 101", "Tag (put it next to the item)"),
+    sb.createVertexTemplateEntry("text;html=1;align=center;verticalAlign=middle;strokeColor=#000000;rounded=0;", 80, 30, "Product", "Stream end (feed / product - a pipe ends on it)"),
+    sb.createEdgeTemplateEntry(pipe, 120, 0, "", "Process pipe"),
+    sb.createEdgeTemplateEntry(pipe + "dashed=1;", 120, 0, "", "Signal line (dashed)"),
+  ]);
+  const pal = sb.palettes && sb.palettes["dexpi"];
+  // no scratchpad (a personal shape store) and no other libraries ("More Shapes")
+  const strip = () => {
+    sb.container.querySelectorAll(".geTitle").forEach((t) => {
+      if (t.textContent.trim() === "Scratchpad") {
+        t.style.display = "none";
+        if (t.nextElementSibling) t.nextElementSibling.style.display = "none";
+      }
+    });
+    doc.querySelectorAll("button, a").forEach((b) => {
+      if (b.textContent.trim().endsWith("More Shapes")) b.style.display = "none";
+    });
+  };
+  strip(); setTimeout(strip, 500);
+  if (pal && pal[0] && pal[0].parentNode) {
+    const parent = pal[0].parentNode;
+    const firstPalette = [...parent.children].find((n) => n.classList.contains("geTitle"));
+    for (const n of pal) parent.insertBefore(n, firstPalette || null);
+  }
+  // one page per drawing: the converter reads the first page only
+  const css = doc.createElement("style");
+  css.textContent = ".geTabContainer { display: none !important; }";
+  doc.head.appendChild(css);
+  if (ui.tabContainer) { ui.tabContainer.style.display = "none"; ui.tabContainerHeight = 0; ui.refresh && ui.refresh(); }
+}
+
+// ------------------------------------------------------------------- cell data ---
+const val = (cell, name) => (cell && cell.value && typeof cell.value === "object" && cell.value.getAttribute)
+  ? cell.value.getAttribute(name) : null;
+const labelOf = (cell) => {
+  if (!cell) return "";
+  const v = cell.value && typeof cell.value === "object" ? cell.value.getAttribute("label") : cell.value;
+  const t = document.createElement("div"); t.innerHTML = v || ""; return t.textContent.trim();
+};
+// read from the cell's own style (the view's computed style lags behind a change)
+const styleOf = (cell, key) => {
+  const m = new RegExp("(?:^|;)" + key + "=([^;]*)").exec(graph.getModel().getStyle(cell) || "");
+  return m ? m[1] : null;
+};
+
+function setData(cell, fields) {
+  const m = graph.getModel();
+  m.beginUpdate();
+  try {
+    for (const [k, v] of Object.entries(fields)) {
+      if ((val(cell, k) || "") !== (v == null ? "" : String(v))) graph.setAttributeForCell(cell, k, v == null ? "" : String(v));
+    }
+  } finally { m.endUpdate(); }
+}
+function setLabel(cell, text) {
+  if (cell.value && typeof cell.value === "object") graph.setAttributeForCell(cell, "label", text);
+  else graph.getModel().setValue(cell, text);
+}
+function setStyle(cell, fields) {
+  const m = graph.getModel();
+  m.beginUpdate();
+  try {
+    for (const [k, v] of Object.entries(fields)) if (String(styleOf(cell, k)) !== String(v)) graph.setCellStyles(k, v, [cell]);
+  } finally { m.endUpdate(); }
+}
+
+// The app's view of every cell (args.patch). Applied in full when a drawing is loaded;
+// afterwards only the cells whose entry changed (a side-panel edit), so details changed
+// here and not yet saved are not overwritten.
+function applyPatch(full) {
+  const patch = args.patch || {};
+  const prev = full ? {} : (lastPatch || {});
+  const m = graph.getModel();
+  m.beginUpdate();
+  try {
+    for (const [id, entry] of Object.entries(patch)) {
+      if (!full && JSON.stringify(prev[id]) === JSON.stringify(entry)) continue;
+      const cell = m.getCell(id);
+      if (!cell) continue;
+      if (entry.attrs) setData(cell, entry.attrs);
+      if (entry.style) setStyle(cell, entry.style);
+      if (entry.ends) {
+        const s = m.getCell(entry.ends.source), t = m.getCell(entry.ends.target);
+        if (s && m.getTerminal(cell, true) !== s) m.setTerminal(cell, s, true);
+        if (t && m.getTerminal(cell, false) !== t) m.setTerminal(cell, t, false);
+      }
+    }
+  } finally { m.endUpdate(); }
+  if (full && ui.editor.undoManager) ui.editor.undoManager.clear();
+  lastPatch = patch;
+}
+
+// ---------------------------------------------------------------------- panel ---
+const el = (tag, attrs, ...kids) => {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k.startsWith("on")) n.addEventListener(k.slice(2), v); else if (k === "cls") n.className = v; else n[k] = v;
+  }
+  for (const c of kids) if (c != null) n.append(c);
+  return n;
+};
+const field = (label, input, hint) => [el("label", { cls: "f" }, label), input, hint ? el("div", { cls: "hint" }, hint) : null]
+  .filter((n) => n != null);
+
+function render() {
+  if (!panel) return;
+  panel.innerHTML = "";
+  if (!graph || !args) { panel.append(el("div", { cls: "sub" }, "Loading the editor...")); return; }
+  const sel = graph.getSelectionCells();
+  if (sel.length !== 1) {
+    panel.append(el("h3", {}, sel.length ? `${sel.length} selected` : "DEXPI details"),
+      el("div", { cls: "sub" }, "Select one item or line to set its DEXPI type, tag, line type, flow and specifications."),
+      el("div", { cls: "hint" }, "Add items from the P&ID libraries on the left. Draw a line by dragging from a " +
+        "shape's blue arrows onto another shape. A tag is a text next to its item; a pipe ending on a text " +
+        "(\"Product\", \"N2\") is a stream entering or leaving the drawing."),
+      foot());
+    return;
+  }
+  const cell = sel[0];
+  if (graph.getModel().isEdge(cell)) renderLine(cell); else renderItem(cell);
+  panel.append(foot());
+}
+const foot = () => el("div", { cls: "foot" }, "Save (Ctrl+S) to load the drawing into the check below.");
+
+function itemName(cell) {
+  if (!cell) return "(loose end)";
+  return val(cell, "tag") || labelOf(cell) || "(no tag)";
+}
+
+function renderItem(cell) {
+  const isText = /^text(;|$)/.test(graph.getModel().getStyle(cell) || "");
+  const known = val(cell, "dexpi_class") != null;
+  if (isText && !known) {
+    panel.append(el("h3", {}, labelOf(cell) || "Text"),
+      el("div", { cls: "sub" }, "A text. Next to an item it is read as the item's tag. At the end of a line it is " +
+        "a stream entering or leaving the drawing (DEXPI off-page connector)."));
+    return;
+  }
+  const auto = val(cell, "auto_class");
+  const isAuto = val(cell, "dexpi_auto") !== "0";
+  panel.append(el("h3", {}, itemName(cell)),
+    el("div", { cls: "sub" }, known ? (isAuto ? `${auto} (from the shape)` : `${val(cell, "dexpi_class")} (set by you)`)
+                                    : "New - its DEXPI type is worked out when you Save"));
+
+  const tag = el("input", { type: "text", value: val(cell, "tag") || labelOf(cell) || "", onchange: (e) => {
+    const text = e.target.value.trim();
+    const m = graph.getModel();
+    m.beginUpdate();
+    try {
+      setData(cell, { tag: text, tag_auto: "0" });
+      const tc = val(cell, "tag_cell") && m.getCell(val(cell, "tag_cell"));
+      setLabel(tc || cell, text);   // the tag shown on the drawing: its own text, or the item's label
+    } finally { m.endUpdate(); }
+  } });
+  panel.append(...field("Tag", tag, "Also changes the tag shown on the drawing."));
+
+  const choices = (schema && schema.choices) || [];
+  const type = el("select", { onchange: (e) => {
+    if (e.target.value === "") setData(cell, { dexpi_auto: "1" });
+    else setData(cell, { dexpi_class: e.target.value, dexpi_auto: "0", in_dexpi: e.target.value === schema.skip ? "0" : "1" });
+  } });
+  type.append(el("option", { value: "", textContent: `Automatic${auto ? ` (${auto})` : ""}` }));
+  for (const c of choices) type.append(el("option", { value: c, textContent: c }));
+  type.value = isAuto ? "" : (val(cell, "dexpi_class") || "");
+  panel.append(...field("DEXPI type", type));
+
+  inDexpi(cell);
+  notes(cell);
+  if (val(cell, "section")) panel.append(...field("Plant section", el("div", {}, val(cell, "section"))));
+  const cls = isAuto ? auto : val(cell, "dexpi_class");
+  specs(cell, cls && schema && schema.classes[cls] ? cls : null);
+}
+
+function lineKind(cell) {
+  const m = graph.getModel();
+  const cls = (t) => t ? (val(t, "dexpi_auto") !== "0" ? val(t, "auto_class") : val(t, "dexpi_class")) : null;
+  const ends = [m.getTerminal(cell, true), m.getTerminal(cell, false)].map(cls);
+  const inst = ends.filter((c) => schema.instruments.includes(c)).length;
+  const signal = styleOf(cell, "dashed") == 1;
+  if (inst === 2) return ["Signal line", "SignalLineFunction"];
+  if (inst && signal && ends.some((c) => schema.valves.includes(c))) return ["Signal line", "SignalLineFunction"];
+  if (inst) return ["Measuring line", "MeasuringLineFunction"];
+  return ["Pipe", "PipingNetworkSegment"];
+}
+
+function renderLine(cell) {
+  const m = graph.getModel();
+  const a = m.getTerminal(cell, true), b = m.getTerminal(cell, false);
+  const [kind, cls] = schema && schema.instruments ? lineKind(cell) : ["Line", null];
+  panel.append(el("h3", {}, `${itemName(a)} – ${itemName(b)}`), el("div", { cls: "sub" }, `${kind} in DEXPI`));
+  if (!a || !b) panel.append(el("div", { cls: "hint" }, "A loose end is joined to the nearest item when you Save - " +
+    "drag the end onto the item to be sure."));
+
+  const dashed = styleOf(cell, "dashed") == 1;
+  const seg = (opts, on) => {
+    const s = el("div", { cls: "seg" });
+    for (const [text, isOn, act] of opts) s.append(el("button", { cls: isOn ? "on" : "", textContent: text, onclick: act }));
+    return s;
+  };
+  panel.append(...field("Line", seg([
+    ["Process pipe", !dashed, () => setStyle(cell, { dashed: "0" })],
+    ["Signal line", dashed, () => setStyle(cell, { dashed: "1" })],
+  ]), "Signal lines are drawn dashed."));
+
+  const endA = styleOf(cell, "endArrow"), startA = styleOf(cell, "startArrow");
+  const toB = endA !== "none", toA = startA != null && startA !== "none";  // no endArrow = draw.io's default arrow
+  panel.append(...field("Flow", seg([
+    [`→ ${itemName(b)}`, toB && !toA, () => setStyle(cell, { endArrow: "classic", startArrow: "none" })],
+    [`→ ${itemName(a)}`, toA && !toB, () => setStyle(cell, { endArrow: "none", startArrow: "classic" })],
+    ["None", !toA && !toB, () => setStyle(cell, { endArrow: "none", startArrow: "none" })],
+  ]), "The arrowhead on the drawing."));
+
+  inDexpi(cell);
+  notes(cell);
+  specs(cell, cls && schema && schema.classes[cls] ? cls : null);
+}
+
+function inDexpi(cell) {
+  const box = el("input", { type: "checkbox", checked: val(cell, "in_dexpi") !== "0",
+                            onchange: (e) => setData(cell, { in_dexpi: e.target.checked ? "1" : "0" }) });
+  panel.append(el("label", { cls: "check" }, box, "In DEXPI"));
+}
+
+function notes(cell) {
+  panel.append(...field("Notes", el("input", { type: "text", value: val(cell, "notes") || "",
+    onchange: (e) => setData(cell, { notes: e.target.value }) })));
+}
+
+function specs(cell, cls) {
+  if (!cls) return;
+  const fields = schema.classes[cls];
+  if (!fields.length) return;
+  let data = {};
+  try { data = JSON.parse(val(cell, "specs") || "{}"); } catch (err) { data = {}; }
+  const filled = fields.filter((f) => ((data[f.custom ? "custom" : "dexpi"] || {})[f.name])).length;
+  const box = el("details", {}, el("summary", {}, `Specifications ${filled}/${fields.length}`));
+  const write = (f, v) => {
+    const part = f.custom ? "custom" : "dexpi";
+    data[part] = data[part] || {};
+    if (v == null || v === "") delete data[part][f.name]; else data[part][f.name] = v;
+    if (!Object.keys(data[part]).length) delete data[part];
+    setData(cell, { specs: Object.keys(data).length ? JSON.stringify(data) : "" });
+  };
+  for (const f of fields) {
+    const cur = (data[f.custom ? "custom" : "dexpi"] || {})[f.name];
+    const label = f.label + (f.custom ? " (custom)" : "");
+    if (f.kind === "quantity") {
+      const num = el("input", { type: "number", step: "any", value: cur && cur.value != null ? cur.value : "" });
+      const unit = el("select", {});
+      for (const u of f.units) unit.append(el("option", { value: u, textContent: u }));
+      unit.value = (cur && cur.unit) || f.units[0];
+      const upd = () => write(f, num.value === "" ? null : { value: parseFloat(num.value), unit: unit.value });
+      num.addEventListener("change", upd); unit.addEventListener("change", upd);
+      box.append(...field(label, el("div", { cls: "row" }, num, unit)));
+    } else if (f.kind === "choice") {
+      const s = el("select", { onchange: (e) => write(f, e.target.value || null) });
+      s.append(el("option", { value: "", textContent: "" }));
+      for (const o of f.options) s.append(el("option", { value: o, textContent: o }));
+      s.value = cur || "";
+      box.append(...field(label, s));
+    } else {
+      box.append(...field(label, el("input", { type: f.kind === "number" ? "number" : "text", value: cur != null ? cur : "",
+        onchange: (e) => write(f, e.target.value === "" ? null : (f.kind === "number" ? parseFloat(e.target.value) : e.target.value)) })));
+    }
+  }
+  panel.append(box);
+}
 </script>
 </body>
 </html>
