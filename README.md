@@ -10,8 +10,9 @@ project background in [`docs/HANDOFF.md`](docs/HANDOFF.md).
 ```bash
 git clone https://github.com/inevitablySour/pid-dexpi-aas.git && cd pid-dexpi-aas
 ./launch_app.sh              # installs and opens the app - draw.io files work straight away
-./scripts/get_drawio.sh      # Linux: the draw.io app, for line routes, tees and the flow map
-                             # (macOS / Windows: install draw.io normally)
+./scripts/get_drawio.sh      # Linux: the draw.io app, for line routes, tees and the flow map,
+                             # and its editor for the app's Editor tab
+                             # (macOS / Windows: install draw.io, then .venv/bin/python scripts/get_drawio_editor.py)
 ```
 
 For pictures (image mode), also install the model environment and download the model:
@@ -33,6 +34,7 @@ Upload in the sidebar:
 | draw.io file | the file itself |
 | picture | the trained model, OCR for the tags, and a pipe tracer that follows the drawn lines |
 | both | the drawing is the truth; the picture checks it (the Compare tab shows where they differ) |
+| Editor tab | draw.io itself, in the page: draw a P&ID or change the uploaded one; Save loads it |
 
 Click anything on the map to edit it in the side panel: tag, DEXPI type, connections,
 streams in / out, and DEXPI specifications for items and pipes. Draw a box with **Add item**

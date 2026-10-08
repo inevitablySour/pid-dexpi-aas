@@ -205,7 +205,74 @@ def map_shape(shape_token: str | None, tag_text: str, style: str = "") -> Mappin
             return MappingResult(Category.UNMAPPED, None, f"{shape_token} has no DEXPI equivalent")
         return MappingResult(Category.EQUIPMENT, dexpi_class, "")
 
+    family = _library_family(shape_token, tag_text, style)
+    if family is not None:
+        return family
     return MappingResult(Category.UNMAPPED, None, f"unrecognized shape token {shape_token!r}")
+
+
+# --- draw.io's P&ID libraries, by family -----------------------------------------------------
+# The table above lists the shapes the team's drawings use. The editor (Editor tab) offers
+# draw.io's whole P&ID library, so any shape from it maps by its family
+# (mxgraph.pid.<family>.<name>, mxgraph.pid2<family>.<name>) and words in its name.
+_EQUIPMENT_FAMILIES: list[tuple[tuple[str, ...], str, list[tuple[str, str]]]] = [
+    (("pumps",), "Pump", [("peristaltic", "CustomPump"), ("centrifugal", "CentrifugalPump"),
+                         ("reciprocat", "ReciprocatingPump"), ("piston", "ReciprocatingPump"),
+                         ("diaphragm", "ReciprocatingPump"), ("rotary", "RotaryPump"), ("gear", "RotaryPump"),
+                         ("screw", "RotaryPump"), ("ejector", "EjectorPump"), ("jet", "EjectorPump")]),
+    (("compressors", "compressors_-_iso"), "Compressor",
+     [("centrifugal", "CentrifugalCompressor"), ("reciprocat", "ReciprocatingCompressor"),
+      ("piston", "ReciprocatingCompressor"), ("rotary", "RotaryCompressor"), ("screw", "RotaryCompressor"),
+      ("axial", "AxialCompressor")]),
+    (("fans_blowers", "blowers", "fans"), "Blower", [("fan", "Fan"), ("centrifugal", "CentrifugalBlower"),
+                                                   ("axial", "AxialBlower")]),
+    (("heat_exchangers",), "HeatExchanger", [("plate", "PlateHeatExchanger"), ("spiral", "SpiralHeatExchanger"),
+                                             ("shell", "TubularHeatExchanger"), ("tube", "TubularHeatExchanger"),
+                                             ("heater", "Heater"), ("furnace", "Heater")]),
+    (("filters",), "Filter", [("gas", "GasFilter"), ("liquid", "LiquidFilter")]),
+    (("mixers",), "Mixer", [("static", "StaticMixer"), ("rotary", "RotaryMixer")]),
+    (("agitators",), "Agitator", []),
+    (("separators",), "Separator", [("gravit", "GravitationalSeparator"), ("scrub", "ScrubbingSeparator")]),
+    (("vessels",), "Vessel", [("tank", "Tank"), ("cistern", "Tank"), ("silo", "Silo"), ("bottle", "CustomVessel"),
+                              ("pressur", "PressureVessel"), ("column", "ProcessColumn")]),
+]
+_VALVE_WORDS = [("gate", "GateValve"), ("globe", "GlobeValve"), ("ball", "BallValve"),
+                ("butterfly", "ButterflyValve"), ("needle", "NeedleValve"), ("plug", "PlugValve"),
+                ("swing", "SwingCheckValve"), ("check", "CheckValve"), ("non_return", "CheckValve"),
+                ("relief", "SpringLoadedGlobeSafetyValve"), ("safety", "SpringLoadedGlobeSafetyValve"),
+                ("angle", "AngleValve")]
+
+
+def _library_family(shape_token: str, tag_text: str, style: str) -> MappingResult | None:
+    token = shape_token.lower()
+    if token.startswith("mxgraph.pid2"):
+        family, _, name = token[len("mxgraph.pid2"):].partition(".")
+    elif token.startswith("mxgraph.pid."):
+        family, _, name = token[len("mxgraph.pid."):].partition(".")
+    else:
+        return None
+    note = f"draw.io P&ID library shape '{name.replace('_', ' ')}'"
+    if family.startswith(("valves", "valve")):
+        tag_class, tag_note = classify_valve_tag(tag_text)
+        if not tag_note.startswith("unrecognized") and tag_class in _FUNCTION_VALVES:
+            return MappingResult(Category.PIPING, tag_class, tag_note)
+        drawn = next((cls for word, cls in _VALVE_WORDS if word in name), None)
+        if drawn:
+            return MappingResult(Category.PIPING, drawn, note)
+        dexpi_class, valve_note = _classify_valve(tag_text, style)
+        return MappingResult(Category.PIPING, dexpi_class, valve_note or note)
+    if family.startswith(("inst", "instruments", "flow_sensors")):
+        if classify_tag(tag_text)[0] == "valve":
+            dexpi_class, valve_note = classify_valve_tag(tag_text)
+            return MappingResult(Category.PIPING, dexpi_class, valve_note)
+        dexpi_class, _ = classify_instrument_tag(tag_text)
+        return MappingResult(Category.INSTRUMENTATION, dexpi_class, note)
+    for families, default, words in _EQUIPMENT_FAMILIES:
+        if family in families or any(family.startswith(f) for f in families):
+            return MappingResult(Category.EQUIPMENT, next((c for w, c in words if w in name), default), note)
+    if "column" in name:
+        return MappingResult(Category.EQUIPMENT, "ProcessColumn", note)
+    return None
 
 
 # --- tag-prefix -> equipment class (image path: OCR tags, no draw.io shape token) -----------

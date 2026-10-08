@@ -39,6 +39,7 @@ import streamlit as st  # noqa: E402
 import streamlit.components.v2  # noqa: E402,F401  (st.components.v2: the clickable map)
 from PIL import Image  # noqa: E402
 
+from pid_dexpi_aas.render.drawio_editor import INSTALLED as EDITOR_INSTALLED, drawio_editor  # noqa: E402
 from pid_dexpi_aas.render.check_sheet import build_check_sheet, number_items, numbered_overlay, render_after_png  # noqa: E402
 from pid_dexpi_aas.render.flow_map import (  # noqa: E402
     BOX_CHECK, BOX_IN, BOX_LEGEND, BOX_OUT, BOX_PICTURE, MAP_CSS, MAP_JS, OCR_TAG, Box, Layers, add_edits,
@@ -182,8 +183,27 @@ with st.sidebar:
         st.info("Logged out - reload the page.")
         st.stop()
     st.header("Input")
-    drawio_file = st.file_uploader("draw.io file (optional)", type=["drawio", "xml"])
-    image_file = st.file_uploader("P&ID image (optional)", type=["png", "jpg", "jpeg"])
+    in_drawio, in_picture, in_editor = st.tabs(["draw.io file", "Picture", "Editor"])
+    with in_drawio:
+        uploaded_drawio = st.file_uploader("draw.io file", type=["drawio", "xml"])
+    with in_picture:
+        image_file = st.file_uploader("P&ID image", type=["png", "jpg", "jpeg"])
+        st.caption("With a draw.io file as well, the drawing is checked against the picture.")
+    with in_editor:
+        if not EDITOR_INSTALLED:
+            st.caption("The editor is not installed on this server (scripts/get_drawio_editor.py).")
+        else:
+            st.caption("Draw a P&ID, or change the uploaded draw.io file, in draw.io right here. "
+                       "**Save** (Ctrl+S) in the editor loads it into the app.")
+            st.toggle("Show the editor", key="editor_open")
+            if st.session_state.get("editor_xml"):
+                st.download_button("Download the edited drawing", st.session_state["editor_xml"].encode(),
+                                   file_name=st.session_state["editor_name"], mime="application/xml",
+                                   width="stretch")
+                if st.button("Discard the edits", width="stretch",
+                             help="Back to the uploaded draw.io file (or nothing)"):
+                    st.session_state.pop("editor_xml")
+                    st.rerun()
     if PUBLIC:
         checkpoint, device = DEFAULT_CHECKPOINT, "auto"
     else:
@@ -206,6 +226,39 @@ with st.sidebar:
                    "3. Upload the corrected file here to add it to the model's training data.")
         label_upload = st.file_uploader("Corrected .drawio", type=["drawio", "xml"], key="label_upload")
         show_training = st.checkbox("Show the drawings added so far", key="show_training")
+
+
+
+class EditedDrawing:
+    """A drawing saved in the Editor tab, standing in for an uploaded .drawio file."""
+
+    def __init__(self, name: str, data: bytes) -> None:
+        self.name, self._data = name, data
+
+    def getvalue(self) -> bytes:
+        return self._data
+
+
+# The Editor tab: draw.io on the page. It starts from the uploaded draw.io file (or a blank
+# page); each Save replaces the drawing the app works on, until a new file is uploaded.
+upload_id = hashlib.sha256(uploaded_drawio.getvalue()).hexdigest() if uploaded_drawio else ""
+if st.session_state.get("editor_base") != upload_id:
+    st.session_state.update(editor_base=upload_id)
+    st.session_state.pop("editor_xml", None)
+if st.session_state.get("editor_open") and EDITOR_INSTALLED:
+    st.markdown("### draw.io editor")
+    st.caption("Shapes from the P&ID libraries on the left become DEXPI items; lines must start and end on a "
+               "shape (dashed = signal line). **Save** (Ctrl+S) loads the drawing into the check below - "
+               "that rebuilds it, so side-panel edits made since the last save are replaced.")
+    start = st.session_state.get("editor_xml") or (uploaded_drawio.getvalue().decode("utf-8", "replace")
+                                                   if uploaded_drawio else "")
+    saved = drawio_editor(start, title=uploaded_drawio.name if uploaded_drawio else "new drawing")
+    if saved and saved["t"] != st.session_state.get("editor_t"):
+        stem = Path(uploaded_drawio.name).stem if uploaded_drawio else "drawing"
+        st.session_state.update(editor_t=saved["t"], editor_xml=saved["xml"], editor_name=f"{stem} (edited).drawio")
+        st.rerun()
+drawio_file = (EditedDrawing(st.session_state["editor_name"], st.session_state["editor_xml"].encode())
+               if st.session_state.get("editor_xml") else uploaded_drawio)
 
 DATA_ROOT = ROOT / "data" / "PID2Graph"
 if label_upload is not None or show_training:
@@ -260,7 +313,8 @@ if label_upload is not None or show_training:
     st.stop()
 
 if drawio_file is None and image_file is None and review_upload is None:
-    st.info("Upload a draw.io file and/or a P&ID image in the sidebar to get started.")
+    st.info("Upload a draw.io file and/or a P&ID image in the sidebar - or draw one in the Editor tab - "
+            "to get started.")
     st.stop()
 
 WORK = Path(tempfile.gettempdir()) / "pid_dexpi_app"

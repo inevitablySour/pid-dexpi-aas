@@ -17,3 +17,6 @@ __pycache__/
 
 # pictures being labelled in draw.io (pid_dexpi_aas.image.drawio_labels)
 /labelling/
+
+# the draw.io web editor for the Editor tab (scripts/get_drawio_editor.py)
+/src/pid_dexpi_aas/render/drawio_editor_files/webapp/

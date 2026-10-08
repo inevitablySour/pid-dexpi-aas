@@ -724,3 +724,18 @@ def test_lowercase_words_are_not_tags():
     tok = lambda text, x: {"text": text, "box": [x, 0, x + 40, 20], "conf": 0.99}
     tags = {t.text for t in assemble_tags([tok("disc", 0), tok("Fl", 100), tok("PI", 200)])}
     assert "DISC" not in tags and {"FI", "PI"} <= tags
+
+
+def test_drawio_pid_library_shapes_map_by_family():
+    """Shapes dragged from draw.io's P&ID library in the Editor tab (not only the ones the
+    team drawings use) become DEXPI items - a centrifugal pump came out 'not in DEXPI'."""
+    from pid_dexpi_aas.dexpi.mapping import map_shape
+    cases = {("mxgraph.pid.pumps.centrifugal_pump_1", "P101"): "CentrifugalPump",
+             ("mxgraph.pid.vessels.tank_(dished_roof)", ""): "Tank",
+             ("mxgraph.pid.valves.gate_valve", "GV1"): "GateValve",
+             ("mxgraph.pid.heat_exchangers.plate_heat_exchanger", ""): "PlateHeatExchanger",
+             ("mxgraph.pid.instruments.indicator", "PI 101"): "ProcessInstrumentationFunction",
+             ("mxgraph.pid.vessels.gas_bottle", ""): "CustomVessel"}  # the exact table still wins
+    for (token, tag), cls in cases.items():
+        assert map_shape(token, tag).dexpi_class_name == cls, token
+    assert map_shape("mxgraph.pid.misc.unknown", "").dexpi_class_name is None
