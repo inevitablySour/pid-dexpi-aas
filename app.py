@@ -1388,10 +1388,12 @@ def _merge_label(s: ReviewSymbol, o: ReviewSymbol) -> str:
     return f"{item_option(o.id)} ({friendly_class(o.dexpi_class)}{where})"
 
 
-def _merge(keep_id: str, other_ids: list) -> None:
+def _merge(keep_id: str, other_ids: list, cover: bool = False) -> None:
     """Fold duplicate boxes of one item into `keep_id`: their lines move to it (dropping
     lines that would join it to itself or repeat an existing line), a missing tag / type /
-    specifications are taken from them, the box grows to cover them all, their rows go."""
+    specifications are taken from them, their rows go. The kept item keeps its own box -
+    pick the tight one to keep - unless `cover`: then its box grows to cover them all (the
+    model split one symbol into parts)."""
     keep = by_sym[keep_id]
     others = [by_sym[i] for i in other_ids if i in by_sym and i != keep_id]
     for o in others:
@@ -1406,7 +1408,7 @@ def _merge(keep_id: str, other_ids: list) -> None:
                     keep.attributes[key].setdefault(k2, v)
         if o.attributes.get("specs") and not keep.attributes.get("specs"):
             keep.attributes["specs"] = o.attributes["specs"]
-        if keep.box and o.box:
+        if cover and keep.box and o.box:
             keep.box = [min(keep.box[0], o.box[0]), min(keep.box[1], o.box[1]),
                         max(keep.box[2], o.box[2]), max(keep.box[3], o.box[3])]
         keep.include = keep.include or o.include
@@ -1626,8 +1628,11 @@ with panel_col:
                     pick = st.selectbox("Same item drawn twice? Merge with", [""] + labels, key=f"merge_{s.id}_{k}",
                                         help="Folds the other box into this item: its lines move here and its row goes. "
                                              "Type to search; the most overlapping come first.")
+                    cover = st.checkbox("Grow its box to cover both", key=f"merge_cover_{s.id}_{k}",
+                                        help=f"Off: {item_name(s.id)} keeps its own box - keep the tight one. On: "
+                                             "the box grows to cover both (one symbol the model found in parts).")
                     if pick and st.button(f"Merge into {item_name(s.id)}", key=f"do_merge_{s.id}_{k}", width="stretch"):
-                        _merge(s.id, [near[labels.index(pick)].id])
+                        _merge(s.id, [near[labels.index(pick)].id], cover=cover)
                         st.rerun()
             if can_stream:
                 with tabs["Streams"]:
