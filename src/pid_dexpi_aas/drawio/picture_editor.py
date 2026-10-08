@@ -34,13 +34,18 @@ def _kind(s) -> str:
     return {Category.PIPING: "valve", Category.INSTRUMENTATION: "instrument"}.get(cat, "equipment")
 
 
+def sizes(review) -> tuple[float, int, int]:
+    """(typical item size, label font size, line width) for drawing a picture review."""
+    W, H = review.image_size or (2000, 1500)
+    s = sorted(max(b[2] - b[0], b[3] - b[1]) for x in review.symbols if (b := x.box))
+    unit = s[len(s) // 2] if s else max(W, H) / 30
+    return unit, max(8, min(28, round(unit * 0.2))), max(2, min(6, round(unit / 30)))
+
+
 def review_to_editor_xml(review, picture_url: str) -> str:
     """The picture review as a draw.io drawing; ids are the review's row ids."""
     W, H = review.image_size or (2000, 1500)
-    sizes = sorted(max(b[2] - b[0], b[3] - b[1]) for s in review.symbols if (b := s.box))
-    unit = sizes[len(sizes) // 2] if sizes else max(W, H) / 30
-    font = max(8, min(28, round(unit * 0.2)))
-    stroke = max(2, min(6, round(unit / 30)))
+    unit, font, stroke = sizes(review)
 
     root = ET.Element("mxGraphModel", grid="0", gridSize="10", guides="1", tooltips="1", connect="1", arrows="1",
                       fold="1", page="0", pageScale="1", pageWidth=str(W), pageHeight=str(H), math="0", shadow="0",
@@ -93,6 +98,13 @@ def review_to_editor_xml(review, picture_url: str) -> str:
     return ET.tostring(root, encoding="unicode")
 
 
+def _seg_dist(p, a, b) -> float:
+    vx, vy = b[0] - a[0], b[1] - a[1]
+    L = vx * vx + vy * vy
+    t = 0.0 if L == 0 else max(0.0, min(1.0, ((p[0] - a[0]) * vx + (p[1] - a[1]) * vy) / L))
+    return ((p[0] - a[0] - t * vx) ** 2 + (p[1] - a[1] - t * vy) ** 2) ** 0.5
+
+
 def _on_border(box, toward):
     """The point of `box`'s outline in the direction of `toward` from its centre."""
     x1, y1, x2, y2 = box
@@ -129,8 +141,28 @@ def apply_editor_drawing(review, xml: str, known_ids: set) -> dict:
         elif cell.get("edge") == "1":
             pts = [] if geo is None else [(float(p.get("x", 0)), float(p.get("y", 0)))
                                           for p in geo.findall("Array[@as='points']/mxPoint")]
+            ends = {} if geo is None else {p.get("as"): (float(p.get("x", 0)), float(p.get("y", 0)))
+                                           for p in geo.findall("mxPoint") if p.get("as") in ("sourcePoint", "targetPoint")}
             edges[cid] = {"source": cell.get("source"), "target": cell.get("target"), "style": cell.get("style", ""),
-                          "points": pts, "data": data}
+                          "points": pts, "data": data, "ends": ends}
+    # a loose end lying on another line (dropped there, not attached): a branch of that line
+    centre = lambda b: ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
+    unit = sizes(review)[0]
+    for eid, e in edges.items():
+        for key, pt in (("source", e["ends"].get("sourcePoint")), ("target", e["ends"].get("targetPoint"))):
+            if e[key] is not None or pt is None:
+                continue
+            best = None
+            for fid, f in edges.items():
+                fa, fb = vertices.get(f["source"]), vertices.get(f["target"])
+                if fid == eid or fa is None or fb is None:
+                    continue
+                line = [centre(fa["box"]), *f["points"], centre(fb["box"])]
+                d = min(_seg_dist(pt, p, q) for p, q in zip(line, line[1:]))
+                if d <= max(8.0, 0.15 * unit) and (best is None or d < best[0]):
+                    best = (d, fid)
+            if best:
+                e[key] = best[1]
 
     style_val = lambda st, k: next((p.split("=", 1)[1] for p in st.split(";") if p.startswith(k + "=")), None)
     counts = {"moved": 0, "added": 0, "removed": 0, "lines added": 0, "lines removed": 0, "lines changed": 0}

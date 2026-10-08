@@ -121,12 +121,25 @@ function trim() {
     });
   };
   hide(); setTimeout(hide, 500);
+  // a line can end ON another line (a tee): draw.io then attaches it to that line
+  graph.setConnectableEdges(true);
   // draw.io's tool for each part of a P&ID: tags and stream ends are text, pipes and signal lines are lines
   const sb = ui.sidebar;
-  const pipe = "endArrow=classic;html=1;edgeStyle=orthogonalEdgeStyle;rounded=0;";
-  const extra = args.mode === "picture" ? [  // a picture: draw a box around a symbol the model missed
-    sb.createVertexTemplateEntry("rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#d9480f;strokeWidth=3;" +
-      "fontColor=#d9480f;fontStyle=1;verticalLabelPosition=top;verticalAlign=bottom;", 80, 80, "TAG",
+  const picture = args.mode === "picture";
+  // a picture review: new lines and boxes look like the ones drawn from the review
+  const width = picture ? (Object.values(graph.getModel().cells).map((c) => graph.getModel().isEdge(c) && styleOf(c, "strokeWidth"))
+    .find((w) => w) || "3") : "1";
+  const pipe = picture ? `edgeStyle=none;rounded=0;html=1;strokeColor=#d9480f;strokeWidth=${width};endArrow=classic;startArrow=none;`
+                       : "endArrow=classic;html=1;edgeStyle=orthogonalEdgeStyle;rounded=0;";
+  const signal = picture ? pipe.replace("#d9480f", "#2456c4") + "dashed=1;" : pipe + "dashed=1;";
+  if (picture) {  // lines drawn from a shape's hover arrows too
+    const st = Object.fromEntries(pipe.split(";").filter(Boolean).map((kv) => kv.split("=")));
+    graph.defaultEdgeStyle = Object.assign({}, st);
+    graph.currentEdgeStyle = Object.assign({}, st);
+  }
+  const extra = picture ? [  // a picture: draw a box around a symbol the model missed
+    sb.createVertexTemplateEntry("rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#d9480f;" +
+      `strokeWidth=${width};fontColor=#d9480f;fontStyle=1;verticalLabelPosition=top;verticalAlign=bottom;`, 80, 80, "TAG",
       "Item box - put it around a missed symbol, then set its type and tag"),
   ] : [];
   sb.addPaletteFunctions("dexpi", "Lines and labels", true, [
@@ -134,7 +147,7 @@ function trim() {
     sb.createVertexTemplateEntry("text;html=1;align=center;verticalAlign=middle;", 60, 24, "TAG 101", "Tag (put it next to the item)"),
     sb.createVertexTemplateEntry("text;html=1;align=center;verticalAlign=middle;strokeColor=#000000;rounded=0;", 80, 30, "Product", "Stream end (feed / product - a pipe ends on it)"),
     sb.createEdgeTemplateEntry(pipe, 120, 0, "", "Process pipe"),
-    sb.createEdgeTemplateEntry(pipe + "dashed=1;", 120, 0, "", "Signal line (dashed)"),
+    sb.createEdgeTemplateEntry(signal, 120, 0, "", "Signal line (dashed)"),
   ]);
   const pal = sb.palettes && sb.palettes["dexpi"];
   // no scratchpad (a personal shape store) and no other libraries ("More Shapes")

@@ -903,3 +903,24 @@ def test_branch_ending_with_an_arrowhead_on_a_pipe_corner(tmp_path):
     tag = {s.id: s.tag for s in review.symbols}
     assert {frozenset((tag[c.from_id], tag[c.to_id])) for c in review.connections} == {
         frozenset(("V1", "P1")), frozenset(("GV1", "P1")), frozenset(("V1", "GV1"))}
+
+
+def test_picture_editor_branch_dropped_on_a_line():
+    """Picture review in the editor: a line whose loose end lies on another line (dropped
+    there, not attached) is a branch - its item joins the items at both ends of that line."""
+    from pid_dexpi_aas.drawio.picture_editor import apply_editor_drawing
+    from pid_dexpi_aas.review import ReviewConnection, ReviewDiagram, ReviewSymbol
+    sym = lambda i, x, y: ReviewSymbol(id=i, source="image model", box=[x, y, x + 40, y + 40], detected_as="valve", tag=i,
+                                       dexpi_class="GateValve")
+    r = ReviewDiagram(source_name="p", image_path="p", image_size=(500, 300),
+                      symbols=[sym("A", 0, 0), sym("B", 300, 0), sym("C", 150, 200)],
+                      connections=[ReviewConnection(id="ab", from_id="A", to_id="B")])
+    x = '''<mxGraphModel><root><mxCell id="0"/><mxCell id="picture" parent="0"/><mxCell id="items" parent="0"/>
+    <mxCell id="A" vertex="1" parent="items"><mxGeometry x="0" y="0" width="40" height="40" as="geometry"/></mxCell>
+    <mxCell id="B" vertex="1" parent="items"><mxGeometry x="300" y="0" width="40" height="40" as="geometry"/></mxCell>
+    <mxCell id="C" vertex="1" parent="items"><mxGeometry x="150" y="200" width="40" height="40" as="geometry"/></mxCell>
+    <mxCell id="ab" edge="1" source="A" target="B" parent="items" style="endArrow=none;"><mxGeometry relative="1" as="geometry"/></mxCell>
+    <mxCell id="br" edge="1" source="C" parent="items" style="endArrow=classic;"><mxGeometry relative="1" as="geometry"><mxPoint x="170" y="22" as="targetPoint"/></mxGeometry></mxCell>
+    </root></mxGraphModel>'''
+    apply_editor_drawing(r, x, {"A", "B", "C", "ab"})
+    assert sorted((c.from_id, c.to_id) for c in r.connections) == [("A", "B"), ("C", "A"), ("C", "B")]

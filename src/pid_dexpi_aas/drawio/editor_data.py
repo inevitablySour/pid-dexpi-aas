@@ -117,9 +117,10 @@ BOX_STYLE = ("rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeWidth=3;font
 def _picture_patch(review) -> dict:
     """A picture review in the editor (picture_editor.review_to_editor_xml): cell ids are row
     ids. Boxes take their kind's colour; lines their type, flow arrowhead and ends."""
-    from pid_dexpi_aas.drawio.picture_editor import _COLOURS, _kind
+    from pid_dexpi_aas.drawio.picture_editor import _COLOURS, _kind, sizes
     from pid_dexpi_aas.review import FLOW_KNOWN
     out, boxes = {}, set()
+    width = str(sizes(review)[2])
     for s in review.symbols:
         if not s.box:
             continue
@@ -127,7 +128,7 @@ def _picture_patch(review) -> dict:
         colour = _COLOURS[_kind(s)]
         x1, y1, x2, y2 = s.box
         out[s.id] = {"attrs": _item_attrs(s, review.auto.get(s.id, {})),
-                     "style": {"strokeColor": colour, "fontColor": colour,
+                     "style": {"strokeColor": colour, "fontColor": colour, "strokeWidth": width,
                                "dashed": "1" if _kind(s) == "left out" else "0"},
                      "geometry": [x1, y1, x2 - x1, y2 - y1],
                      "create": {"vertex": True, "label": s.tag or "", "geometry": [x1, y1, x2 - x1, y2 - y1],
@@ -142,7 +143,7 @@ def _picture_patch(review) -> dict:
                                "endArrow": "classic" if c.flow in FLOW_KNOWN or c.flow == "both ways" else "none",
                                "startArrow": "classic" if c.flow == "both ways" else "none",
                                "strokeColor": "#c92a2a" if not c.include else "#2456c4" if c.line_type == "signal"
-                               else "#d9480f", "opacity": "100" if c.include else "50"},
+                               else "#d9480f", "opacity": "100" if c.include else "50", "strokeWidth": width},
                      "ends": {"source": c.from_id, "target": c.to_id},
                      "create": {"edge": True, "source": c.from_id, "target": c.to_id, "parent": "items",
                                 "style": "edgeStyle=none;rounded=0;html=1;strokeWidth=3;"}}
