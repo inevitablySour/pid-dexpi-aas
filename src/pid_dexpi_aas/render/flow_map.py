@@ -170,8 +170,8 @@ def build_layers(diagram: ParsedDiagram, drawio_path: str | Path, boxes: list | 
     from pid_dexpi_aas.drawio.line_routes import routes_for, sheet_png
     from pid_dexpi_aas.dexpi.mapping import Category, map_shape
 
-    got = sheet_png(drawio_path, diagram.edges)
-    routes = routes_for(drawio_path, diagram.edges)
+    got = sheet_png(drawio_path, diagram.edges, diagram.shapes)
+    routes = routes_for(drawio_path, diagram.edges, diagram.shapes)
     if not got or not routes:
         return None
     png, (dx, dy) = got

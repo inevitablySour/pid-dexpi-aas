@@ -853,3 +853,31 @@ def test_two_way_pipe_is_dual_flow():
     _, result = to_dexpi(review)
     segs = result.model.conceptualModel.pipingNetworkSystems[0].segments
     assert any(str(s.flowDirection) == "dual flow" for s in segs)
+
+
+@needs_routes
+def test_tee_drawn_in_the_editor_is_a_pipe_network(tmp_path):
+    """The editor attaches a line end dropped on another line TO that line: a branch, read as
+    a T-junction (pipe network, DEXPI tee) - and a drawing with every line attached (no loose
+    ends to align the routes with) still gets its routes, from the shapes."""
+    import pydexpi.dexpi_classes.piping as pp
+    from pid_dexpi_aas.drawio.parser import parse_drawio_xml_resolved
+    from pid_dexpi_aas.review import from_drawio, to_dexpi
+    x = '''<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>
+    <mxCell id="t" value="V1" style="shape=mxgraph.pid.vessels.tank;" vertex="1" parent="1"><mxGeometry x="100" y="50" width="40" height="40" as="geometry"/></mxCell>
+    <mxCell id="p" value="P1" style="shape=mxgraph.pid.pumps.centrifugal_pump_1;" vertex="1" parent="1"><mxGeometry x="660" y="50" width="40" height="40" as="geometry"/></mxCell>
+    <mxCell id="v" value="GV1" style="shape=mxgraph.pid.valves.gate_valve;" vertex="1" parent="1"><mxGeometry x="380" y="250" width="40" height="20" as="geometry"/></mxCell>
+    <mxCell id="e1" edge="1" source="t" target="p" parent="1" style="edgeStyle=orthogonalEdgeStyle;endArrow=classic;"><mxGeometry relative="1" as="geometry"/></mxCell>
+    <mxCell id="e2" edge="1" source="v" target="e1" parent="1" style="edgeStyle=orthogonalEdgeStyle;endArrow=classic;"><mxGeometry relative="1" as="geometry"/></mxCell>
+    </root></mxGraphModel>'''
+    f = tmp_path / "tee.drawio"
+    f.write_text(f'<mxfile><diagram id="p" name="P">{x}</diagram></mxfile>')
+    d = parse_drawio_xml_resolved(x, source_file=f.name, drawio_path=f)
+    assert d.routes
+    review = from_drawio(d)
+    tag = {s.id: s.tag for s in review.symbols}
+    assert {frozenset((tag[c.from_id], tag[c.to_id])) for c in review.connections} == {
+        frozenset(("V1", "P1")), frozenset(("GV1", "P1")), frozenset(("V1", "GV1"))}
+    _, result = to_dexpi(review)
+    segs = result.model.conceptualModel.pipingNetworkSystems[0].segments
+    assert sum(isinstance(i, pp.PipeTee) for s in segs for i in s.items) == 1

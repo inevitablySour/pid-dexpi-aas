@@ -588,8 +588,9 @@ def parse_drawio_xml_resolved(xml_text: str, source_file: str, drawio_path: str 
     routes = None
     if drawio_path is not None:
         from pid_dexpi_aas.drawio.line_routes import find_junctions, routes_for
-        routes = routes_for(drawio_path, diagram.edges)
+        routes = routes_for(drawio_path, diagram.edges, diagram.shapes)
         if routes:
+            _ends_on_lines(diagram, routes)
             # section frames first: closed lines around groups of items are not pipes
             from pid_dexpi_aas.drawio.sections import find_sections
             find_sections(diagram, routes)
@@ -614,6 +615,22 @@ def parse_drawio_xml_resolved(xml_text: str, source_file: str, drawio_path: str 
     diagram.flow = infer_flow(diagram)
     diagram.routes = routes or None
     return diagram
+
+
+def _ends_on_lines(diagram: ParsedDiagram, routes: dict) -> None:
+    """A line attached to another LINE (draw.io connects a line end dropped on a line to it -
+    how the Editor tab draws a tee) is a branch ending on that line: a loose end at the point
+    draw.io draws it, which find_junctions then joins as a T-junction (a pipe network, a
+    DEXPI tee), like a branch whose end was merely placed on the line."""
+    line_ids = {e.id for e in diagram.edges}
+    for e in diagram.edges:
+        r = routes.get(e.id)
+        if not r:
+            continue
+        if e.source in line_ids:
+            e.source, e.source_point, e.source_resolution = None, r[0], "unresolved"
+        if e.target in line_ids:
+            e.target, e.target_point, e.target_resolution = None, r[-1], "unresolved"
 
 
 def parse_drawio_file(path: str | Path) -> ParsedDiagram:

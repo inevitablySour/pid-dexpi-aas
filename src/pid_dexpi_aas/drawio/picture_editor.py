@@ -184,6 +184,23 @@ def apply_editor_drawing(review, xml: str, known_ids: set) -> dict:
             continue
         keep.append(c)
     review.connections = keep
+    # a branch attached to another line (a tee drawn in the editor): the branch's item joins
+    # the items at both ends of that line - pairwise, as the pipe tracer reports tees
+    for eid, e in list(edges.items()):
+        a, b = e["source"], e["target"]
+        on = next(((end, x) for end, x in (("source", a), ("target", b)) if x in edges), None)
+        if on is None:
+            continue
+        end, line = on
+        item = b if end == "source" else a
+        la, lb = edges[line]["source"], edges[line]["target"]
+        del edges[eid]
+        if item not in rows:
+            continue
+        for n, other in enumerate(x for x in (la, lb) if x in rows and x != item):
+            edges[eid if n == 0 else f"{eid}-tee{n}"] = {
+                "source": item, "target": other, "points": [], "data": e["data"],
+                "style": (e["style"] or "").replace("endArrow=classic", "endArrow=none").replace("startArrow=classic", "startArrow=none")}
     for eid, e in edges.items():
         a, b = e["source"], e["target"]
         if a not in rows or b not in rows or a == b:

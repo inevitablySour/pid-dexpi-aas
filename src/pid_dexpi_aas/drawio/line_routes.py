@@ -98,9 +98,12 @@ def _raw_routes(text: str) -> dict[str, Route]:
     return raw
 
 
-def _shift(raw: dict[str, Route], edges) -> tuple[int, int] | None:
+def _shift(raw: dict[str, Route], edges, shapes=()) -> tuple[int, int] | None:
     """Image pixel = draw.io coordinate + shift, calibrated from the loose line ends the
-    file stores in both systems (LightUp: 175 of 219 agree exactly)."""
+    file stores in both systems (LightUp: 175 of 219 agree exactly). A drawing with every
+    line attached at both ends (one made in the Editor tab) has none: then from the shapes -
+    a symbol's outline starts at the left / top of its box, so the most common gap between
+    its drawn outline and its box (else the smallest) is the shift, per axis."""
     shifts = Counter()
     for e in edges:
         r = raw.get(e.id)
@@ -109,16 +112,27 @@ def _shift(raw: dict[str, Route], edges) -> tuple[int, int] | None:
         for end, pt in ((r[0], e.source_point), (r[-1], e.target_point)):
             if pt:
                 shifts[(round(end[0] - pt[0]), round(end[1] - pt[1]))] += 1
-    return shifts.most_common(1)[0][0] if shifts else None
+    if shifts:
+        return shifts.most_common(1)[0][0]
+    xs, ys = Counter(), Counter()
+    for sh in shapes:
+        r = raw.get(sh.id)
+        if r and sh.width and sh.height:
+            xs[round(min(x for x, _ in r) - sh.x)] += 1
+            ys[round(min(y for _, y in r) - sh.y)] += 1
+    if not xs:
+        return None
+    pick = lambda c: (lambda v, n: v if n >= 2 else min(c))(*c.most_common(1)[0])
+    return pick(xs), pick(ys)
 
 
-def routes_for(drawio_path: str | Path, edges) -> dict[str, Route] | None:
+def routes_for(drawio_path: str | Path, edges, shapes=()) -> dict[str, Route] | None:
     """{edge id: polyline in draw.io coordinates} for every line draw.io drew, or None."""
     text = _export_svg(Path(drawio_path))
     if text is None:
         return None
     raw = _raw_routes(text)
-    shift = _shift(raw, edges)
+    shift = _shift(raw, edges, shapes)
     if shift is None:
         return None
     dx, dy = shift
@@ -126,12 +140,12 @@ def routes_for(drawio_path: str | Path, edges) -> dict[str, Route] | None:
     return {cid: [(x - dx, y - dy) for x, y in pts] for cid, pts in raw.items() if cid in ids}
 
 
-def sheet_png(drawio_path: str | Path, edges) -> tuple[Path, tuple[int, int]] | None:
+def sheet_png(drawio_path: str | Path, edges, shapes=()) -> tuple[Path, tuple[int, int]] | None:
     """The drawing rendered by draw.io (PNG, cached) and the shift from draw.io coordinates
     to its pixels (same export origin as the SVG the routes come from)."""
     drawio_path = Path(drawio_path)
     text = _export_svg(drawio_path)
-    shift = _shift(_raw_routes(text), edges) if text else None
+    shift = _shift(_raw_routes(text), edges, shapes) if text else None
     if shift is None:
         return None
     key = hashlib.sha256(drawio_path.read_bytes()).hexdigest()[:20]
