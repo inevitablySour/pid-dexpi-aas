@@ -193,8 +193,8 @@ with st.sidebar:
         if not EDITOR_INSTALLED:
             st.caption("The editor is not installed on this server (scripts/get_drawio_editor.py).")
         else:
-            st.caption("Draw a P&ID, or change the uploaded draw.io file, in draw.io right here. "
-                       "**Save** (Ctrl+S) in the editor loads it into the app.")
+            st.caption("Draw a P&ID, or change the uploaded draw.io file - or a picture's result - in draw.io "
+                       "right here. **Save** (Ctrl+S) in the editor loads it into the app.")
             st.toggle("Show the editor", key="editor_open")
             if st.session_state.get("editor_xml"):
                 st.download_button("Download the edited drawing", st.session_state["editor_xml"].encode(),
@@ -256,17 +256,41 @@ if st.session_state.get("editor_open") and EDITOR_INSTALLED:
     # each cell's details from the review as the last run left it (side-panel edits included);
     # a Save rebuilds the review further down, which reruns once to bring them here
     prev = st.session_state.get("review")
-    saved = drawio_editor(st.session_state.get("editor_xml") or (uploaded_drawio.getvalue().decode("utf-8", "replace")
-                                                               if uploaded_drawio else ""),
-                          editor_patch(prev) if prev is not None and prev.drawio is not None else {},
-                          title=uploaded_drawio.name if uploaded_drawio else "new drawing")
-    if saved and saved.get("t") != st.session_state.get("editor_t"):  # a new Save
-        stem = Path(uploaded_drawio.name).stem if uploaded_drawio else "drawing"
-        xml = saved["xml"]
-        if not xml.lstrip().startswith("<mxfile"):  # embed mode saves the bare graph: make it a .drawio file
-            xml = f'<mxfile host="pid-dexpi-aas"><diagram id="page-1" name="Page-1">{xml}</diagram></mxfile>'
-        st.session_state.update(editor_t=saved["t"], editor_xml=xml, editor_name=f"{stem} (edited).drawio")
-        st.rerun()
+    if prev is not None and prev.drawio is None and prev.image_path and not uploaded_drawio:
+        # a picture review: the model's result drawn over the picture, rebuilt from the review each
+        # time the editor is switched on (so map edits made meanwhile are in it); a Save updates the rows
+        from pid_dexpi_aas.drawio.picture_editor import apply_editor_drawing, drawing_ids, review_to_editor_xml
+        from pid_dexpi_aas.render.drawio_editor import picture_url
+        doc = st.session_state.get("editor_pic_doc")
+        if (doc is None or doc["key"] != st.session_state.get("input_key")
+                or not st.session_state.get("editor_was_open")):
+            xml = review_to_editor_xml(prev, picture_url(prev.image_path))
+            doc = {"key": st.session_state.get("input_key"), "xml": xml, "ids": drawing_ids(xml)}
+            st.session_state["editor_pic_doc"] = doc
+        st.session_state["editor_was_open"] = True
+        saved = drawio_editor(doc["xml"], editor_patch(prev), title=prev.source_name, mode="picture")
+        if saved and saved.get("t") != st.session_state.get("editor_t"):  # a new Save
+            changes = apply_editor_drawing(prev, saved["xml"], doc["ids"])
+            doc.update(xml=saved["xml"], ids=drawing_ids(saved["xml"]))
+            st.session_state["editor_t"] = saved["t"]
+            st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
+            done = ", ".join(f"{v} {k}" for k, v in changes.items() if v)
+            st.toast(f"Loaded from the editor: {done or 'details updated'}.")
+            st.rerun()
+    else:
+        saved = drawio_editor(st.session_state.get("editor_xml") or (uploaded_drawio.getvalue().decode("utf-8", "replace")
+                                                                   if uploaded_drawio else ""),
+                              editor_patch(prev) if prev is not None and prev.drawio is not None else {},
+                              title=uploaded_drawio.name if uploaded_drawio else "new drawing")
+        if saved and saved.get("t") != st.session_state.get("editor_t"):  # a new Save
+            stem = Path(uploaded_drawio.name).stem if uploaded_drawio else "drawing"
+            xml = saved["xml"]
+            if not xml.lstrip().startswith("<mxfile"):  # embed mode saves the bare graph: make it a .drawio file
+                xml = f'<mxfile host="pid-dexpi-aas"><diagram id="page-1" name="Page-1">{xml}</diagram></mxfile>'
+            st.session_state.update(editor_t=saved["t"], editor_xml=xml, editor_name=f"{stem} (edited).drawio")
+            st.rerun()
+else:
+    st.session_state["editor_was_open"] = False
 drawio_file = (EditedDrawing(st.session_state["editor_name"], st.session_state["editor_xml"].encode())
                if st.session_state.get("editor_xml") else uploaded_drawio)
 

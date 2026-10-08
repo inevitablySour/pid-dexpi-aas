@@ -26,7 +26,7 @@ def editor_patch(review) -> dict:
     """{cell id: {"attrs": {...}, "style": {...}, "ends": {"source", "target"}}}."""
     diagram = review.drawio
     if diagram is None:
-        return {}
+        return _picture_patch(review) if review.image_path else {}
     shapes = {sh.id: sh for sh in diagram.shapes}
     edges = {e.id: e for e in diagram.edges}
     tag_cell = {}
@@ -38,17 +38,7 @@ def editor_patch(review) -> dict:
         if s.id not in shapes:
             continue
         auto = review.auto.get(s.id, {})
-        attrs = {
-            "dexpi_class": s.dexpi_class,
-            "dexpi_auto": "1" if s.dexpi_class == auto.get("dexpi_class") else "0",
-            "auto_class": auto.get("dexpi_class", ""),
-            "tag": s.tag,
-            "tag_auto": "1" if s.tag == auto.get("tag") else "0",
-            "in_dexpi": "1" if s.include else "0",
-            "notes": s.notes if s.notes != auto.get("notes") else "",
-            "specs": _specs(s.attributes),
-            "section": s.section,
-        }
+        attrs = _item_attrs(s, auto)
         if len(tag_cell.get(s.id, [])) == 1:
             attrs["tag_cell"] = tag_cell[s.id][0]
         out[s.id] = {"attrs": attrs}
@@ -70,6 +60,48 @@ def editor_patch(review) -> dict:
             entry.setdefault("style", {}).update({"endArrow": "classic" if to_target else "none",
                                                   "startArrow": "none" if to_target else "classic"})
         out[c.id] = entry
+    return out
+
+
+def _item_attrs(s, auto: dict) -> dict:
+    return {
+        "dexpi_class": s.dexpi_class,
+        "dexpi_auto": "1" if s.dexpi_class == auto.get("dexpi_class") else "0",
+        "auto_class": auto.get("dexpi_class", ""),
+        "tag": s.tag,
+        "tag_auto": "1" if s.tag == auto.get("tag") else "0",
+        "in_dexpi": "1" if s.include else "0",
+        "notes": s.notes if s.notes != auto.get("notes") else "",
+        "specs": _specs(s.attributes),
+        "section": s.section,
+    }
+
+
+def _picture_patch(review) -> dict:
+    """A picture review in the editor (picture_editor.review_to_editor_xml): cell ids are row
+    ids. Boxes take their kind's colour; lines their type, flow arrowhead and ends."""
+    from pid_dexpi_aas.drawio.picture_editor import _COLOURS, _kind
+    from pid_dexpi_aas.review import FLOW_KNOWN
+    out, boxes = {}, set()
+    for s in review.symbols:
+        if not s.box:
+            continue
+        boxes.add(s.id)
+        colour = _COLOURS[_kind(s)]
+        out[s.id] = {"attrs": _item_attrs(s, review.auto.get(s.id, {})),
+                     "style": {"strokeColor": colour, "fontColor": colour,
+                               "dashed": "1" if _kind(s) == "left out" else "0"}}
+    for c in review.connections:
+        if c.from_id not in boxes or c.to_id not in boxes or c.from_id == c.to_id:
+            continue
+        auto = review.auto.get(c.id, {})
+        out[c.id] = {"attrs": {"in_dexpi": "1" if c.include else "0",
+                               "notes": c.notes if c.notes != auto.get("notes") else "", "specs": _specs(c.attributes)},
+                     "style": {"dashed": "1" if c.line_type == "signal" else "0",
+                               "endArrow": "classic" if c.flow in FLOW_KNOWN else "none", "startArrow": "none",
+                               "strokeColor": "#c92a2a" if not c.include else "#2456c4" if c.line_type == "signal"
+                               else "#d9480f", "opacity": "100" if c.include else "50"},
+                     "ends": {"source": c.from_id, "target": c.to_id}}
     return out
 
 

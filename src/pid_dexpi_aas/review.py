@@ -303,6 +303,8 @@ def from_image(infer: dict, source_name: str) -> ReviewDiagram:
     _bridge_arrows(review)
     _imply_flow(review)
     _exclude_dangling(review)
+    review.auto = {s.id: {"dexpi_class": s.dexpi_class, "tag": s.tag, "notes": s.notes} for s in review.symbols}
+    review.auto.update({c.id: {"notes": c.notes} for c in review.connections})
     return review
 
 

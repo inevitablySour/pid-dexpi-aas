@@ -773,3 +773,35 @@ def test_bare_graph_model_is_read():
         f = pathlib.Path(d) / "x.drawio"
         f.write_text('<mxGraphModel><root><mxCell id="0"/></root></mxGraphModel>')
         assert decode_drawio(f)[0].startswith("<mxGraphModel")
+
+
+def test_picture_review_round_trips_through_the_editor():
+    """A picture review drawn for the Editor tab and saved back: unchanged = no changes; a box
+    moved, an item deleted (with its lines), a new box and line drawn - all reach the rows."""
+    from xml.etree import ElementTree as ET
+    from pid_dexpi_aas.drawio.picture_editor import apply_editor_drawing, drawing_ids, review_to_editor_xml
+    from pid_dexpi_aas.review import ReviewConnection, ReviewDiagram, ReviewSymbol
+    sym = lambda i, x, cls, tag: ReviewSymbol(id=i, source="image model", box=[x, 0.33, x + 40.27, 40.0],
+                                              detected_as="valve", tag=tag, dexpi_class=cls)
+    r = ReviewDiagram(source_name="p.png", image_path="p.png", image_size=(400, 100),
+                      symbols=[sym("a", 0, "GateValve", "GV1"), sym("b", 100, "Tank", "T1"), sym("c", 200, "Pump", "P1")],
+                      connections=[ReviewConnection(id="ab", from_id="a", to_id="b"),
+                                   ReviewConnection(id="bc", from_id="b", to_id="c", flow="drawn arrow")])
+    xml = review_to_editor_xml(r, "pic.png")
+    ids = drawing_ids(xml)
+    assert set(apply_editor_drawing(r, xml, ids).values()) == {0}
+    root = ET.fromstring(xml)
+    cells = root.find("root")
+    byid = {c.get("id"): c for c in cells}
+    byid["a"].find("mxGeometry").set("x", "20")
+    cells.remove(byid["c"])
+    v = ET.SubElement(cells, "mxCell", id="n", value="FV 9", parent="items", vertex="1", style="rounded=0;")
+    ET.SubElement(v, "mxGeometry", x="300", y="0", width="30", height="30", **{"as": "geometry"})
+    e = ET.SubElement(cells, "mxCell", id="bn", edge="1", parent="items", source="b", target="n", style="dashed=1;")
+    ET.SubElement(e, "mxGeometry", relative="1", **{"as": "geometry"})
+    counts = apply_editor_drawing(r, ET.tostring(root, encoding="unicode"), ids)
+    assert counts["moved"] == 1 and counts["added"] == 1 and counts["removed"] == 1 and counts["lines added"] == 1
+    rows = {s.id: s for s in r.symbols}
+    assert rows["a"].box[0] == 20 and "c" not in rows and rows["n"].tag == "FV 9"
+    assert {c.id for c in r.connections} == {"ab", "bn"}
+    assert next(c for c in r.connections if c.id == "bn").line_type == "signal"

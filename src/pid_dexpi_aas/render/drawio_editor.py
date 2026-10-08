@@ -52,11 +52,29 @@ def write_schema() -> None:
         path.write_text(data)
 
 
+def picture_url(image_path: str) -> str:
+    """The picture as a file the editor loads (served with it; never inside the drawing,
+    which goes back and forth on every page update). Dark-theme exports made dark-on-white."""
+    import hashlib as _h
+
+    from PIL import Image
+
+    from pid_dexpi_aas.image.sheet_image import to_dark_on_white
+    name = _h.sha1(Path(image_path).read_bytes()).hexdigest()[:16] + ".png"
+    out = FILES / "pictures" / name
+    if not out.exists():
+        out.parent.mkdir(exist_ok=True)
+        with Image.open(image_path) as im:
+            to_dark_on_white(im).save(out)
+    return f"../pictures/{name}"  # relative to webapp/index.html
+
+
 def drawio_editor(xml: str, patch: dict | None = None, *, title: str = "", height: int = 820,
-                  key: str = "drawio_editor") -> dict | None:
+                  mode: str = "drawing", key: str = "drawio_editor") -> dict | None:
     """Show the editor with `xml` (a draw.io file's text; "" = a blank page) and each cell's
-    DEXPI details (`patch`, editor_data.editor_patch). Returns {"xml", "t"} after each Save,
+    DEXPI details (`patch`, editor_data.editor_patch). mode "picture": a picture review drawn
+    over its picture (picture_editor.py) - the panel offers a box for a missed item. Returns {"xml", "t"} after each Save,
     else the last value (None before the first)."""
     patch = patch or {}
     return _component(xml=xml, patch=patch, patch_id=hashlib.sha1(json.dumps(patch, sort_keys=True).encode()).hexdigest(),
-                      title=title, params=PARAMS, config=CONFIG, height=height, key=key, default=None)
+                      title=title, mode=mode, params=PARAMS, config=CONFIG, height=height, key=key, default=None)

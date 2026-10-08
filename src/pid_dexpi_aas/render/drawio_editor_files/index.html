@@ -56,6 +56,7 @@ window.addEventListener("message", (e) => {
       hookEditor();
     } else if (m.event === "load") {
       if (graph) { applyPatch(true); render(); }
+      setTimeout(closeLayers, 300);
     } else if (m.event === "save") {
       saved = m.xml;
       toEditor({ action: "status", message: "Sent to the app", modified: false });
@@ -92,6 +93,7 @@ function hookEditor() {
     graph.getModel().addListener(W.mxEvent.CHANGE, () => render());
     applyPatch(true);
     render();
+    setTimeout(closeLayers, 300);
   });
 }
 
@@ -120,7 +122,13 @@ function trim() {
   // draw.io's tool for each part of a P&ID: tags and stream ends are text, pipes and signal lines are lines
   const sb = ui.sidebar;
   const pipe = "endArrow=classic;html=1;edgeStyle=orthogonalEdgeStyle;rounded=0;";
+  const extra = args.mode === "picture" ? [  // a picture: draw a box around a symbol the model missed
+    sb.createVertexTemplateEntry("rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#d9480f;strokeWidth=3;" +
+      "fontColor=#d9480f;fontStyle=1;verticalLabelPosition=top;verticalAlign=bottom;", 80, 80, "TAG",
+      "Item box - put it around a missed symbol, then set its type and tag"),
+  ] : [];
   sb.addPaletteFunctions("dexpi", "Lines and labels", true, [
+    ...extra,
     sb.createVertexTemplateEntry("text;html=1;align=center;verticalAlign=middle;", 60, 24, "TAG 101", "Tag (put it next to the item)"),
     sb.createVertexTemplateEntry("text;html=1;align=center;verticalAlign=middle;strokeColor=#000000;rounded=0;", 80, 30, "Product", "Stream end (feed / product - a pipe ends on it)"),
     sb.createEdgeTemplateEntry(pipe, 120, 0, "", "Process pipe"),
@@ -150,6 +158,14 @@ function trim() {
   css.textContent = ".geTabContainer { display: none !important; }";
   doc.head.appendChild(css);
   if (ui.tabContainer) { ui.tabContainer.style.display = "none"; ui.tabContainerHeight = 0; ui.refresh && ui.refresh(); }
+}
+
+// draw.io opens its Layers window for a drawing with layers (a picture under the items):
+// the picture layer is locked anyway, so keep the canvas clear
+function closeLayers(tries) {
+  const lw = ui && ((ui.actions && ui.actions.layersWindow) || ui.layersWindow);
+  if (lw && lw.window && lw.window.isVisible()) lw.window.setVisible(false);
+  if ((tries || 0) < 10) setTimeout(() => closeLayers((tries || 0) + 1), 300);  // it may open a moment later
 }
 
 // ------------------------------------------------------------------- cell data ---
@@ -233,7 +249,10 @@ function render() {
   if (sel.length !== 1) {
     panel.append(el("h3", {}, sel.length ? `${sel.length} selected` : "DEXPI details"),
       el("div", { cls: "sub" }, "Select one item or line to set its DEXPI type, tag, line type, flow and specifications."),
-      el("div", { cls: "hint" }, "Add items from the P&ID libraries on the left. Draw a line by dragging from a " +
+      el("div", { cls: "hint" }, (args.mode === "picture"
+        ? "Move or resize a box to fit its symbol; for a missed symbol drag an item box from 'Lines and labels' " +
+          "over it. Lines follow the pipes traced on the picture - drag a line's bend points to correct one. "
+        : "Add items from the P&ID libraries on the left. ") + "Draw a line by dragging from a " +
         "shape's blue arrows onto another shape. A tag is a text next to its item; a pipe ending on a text " +
         "(\"Product\", \"N2\") is a stream entering or leaving the drawing."),
       foot());
@@ -262,7 +281,8 @@ function renderItem(cell) {
   const auto = val(cell, "auto_class");
   const isAuto = val(cell, "dexpi_auto") !== "0";
   panel.append(el("h3", {}, itemName(cell)),
-    el("div", { cls: "sub" }, known ? (isAuto ? `${auto} (from the shape)` : `${val(cell, "dexpi_class")} (set by you)`)
+    el("div", { cls: "sub" }, known ? (isAuto ? `${auto} (${args.mode === "picture" ? "found by the model" : "from the shape"})`
+                                             : `${val(cell, "dexpi_class")} (set by you)`)
                                     : "New - its DEXPI type is worked out when you Save"));
 
   const tag = el("input", { type: "text", value: val(cell, "tag") || labelOf(cell) || "", onchange: (e) => {
