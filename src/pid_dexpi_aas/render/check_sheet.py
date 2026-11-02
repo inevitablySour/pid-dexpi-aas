@@ -305,7 +305,7 @@ def build_check_sheet(review: ReviewDiagram, result: BuildResult, mode: str,
         row += 3
     bws.cell(row, 1, "AFTER - what the DEXPI file the tool produced contains, drawn with standard symbols at the "
                      "drawing's positions and pipe routes. An item or pipe missing here is missing from the DEXPI file. "
-                     "Signal lines and instrument taps are not in the DEXPI file yet, so they are not drawn."
+                     "Instruments are drawn with their line to where they measure; signal lines (dashed) are in the DEXPI file but not drawn."
              ).font = Font(name=FONT, bold=True)
     bws.cell(row, 1).alignment = Alignment(wrap_text=True)
     bws.row_dimensions[row].height = 32

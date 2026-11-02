@@ -37,7 +37,7 @@ from pydexpi.dexpi_classes.graphics import (
     Text,
     TextAlignment,
 )
-from pydexpi.dexpi_classes import piping
+from pydexpi.dexpi_classes import instrumentation, piping
 from pydexpi.dexpi_classes.pydantic_classes import DexpiBaseModel, DexpiModel
 
 from pid_dexpi_aas.dexpi.build_model import BuildResult
@@ -174,6 +174,33 @@ def _routed_edge_elements(diagram: ParsedDiagram, result: BuildResult) -> list:
     return out
 
 
+def _stream_end_elements(diagram: ParsedDiagram, shape) -> list:
+    """An inlet / outlet made from a pipe's loose end: an arrowhead at the end, pointing into
+    the drawing for an inlet and out of it for an outlet, and its name just beyond the end."""
+    routes = diagram.routes or {}
+    edge = next((e for e in diagram.edges if shape.id in (e.source, e.target) and e.id in routes), None)
+    if edge is None or len(routes[edge.id]) < 2:
+        return []
+    r = routes[edge.id]
+    end, nxt = (r[0], r[1]) if edge.source == shape.id else (r[-1], r[-2])
+    D = lambda p: (p[0], -p[1])
+    ex, ey = D(end)
+    nx, ny = D(nxt)
+    length = math.hypot(ex - nx, ey - ny) or 1.0
+    ux, uy = (ex - nx) / length, (ey - ny) / length   # along the pipe, out through the loose end
+    inlet = shape.text.lower().startswith("inlet")
+    tip = (ex - 14 * ux, ey - 14 * uy) if inlet else (ex, ey)
+    tail = (ex, ey) if inlet else (ex - 14 * ux, ey - 14 * uy)
+    label = Text(
+        position=Point(x=ex + 10 * ux, y=ey + 10 * uy),
+        rotation=0.0,
+        alignment=(TextAlignment.LeftCenter if ux > 0.5 else TextAlignment.RightCenter if ux < -0.5
+                   else TextAlignment.CenterTop if uy < 0 else TextAlignment.CenterBottom),
+        color=_LABEL_COLOR, font="Arial", size=12.0, text=shape.text,
+    )
+    return [_arrow_any(tip, tail), label]
+
+
 def build_diagram(diagram: ParsedDiagram, result: BuildResult, model: DexpiModel) -> Diagram:
     """Construct and return a Diagram; also sets model.diagram."""
     representation_groups: list[RepresentationGroup] = []
@@ -210,6 +237,18 @@ def build_diagram(diagram: ParsedDiagram, result: BuildResult, model: DexpiModel
             box_center_x = shape.x + width / 2.0
             box_center_y = -(shape.y + height / 2.0)
             shape_boxes[shape.id] = (box_center_x, box_center_y, box_center_x, box_center_y)
+            if shape.data.get("loose_end"):
+                # a stream made from a pipe's loose end (parser.add_stream_ends): no drawn label
+                # of its own, so draw its arrow (the flow's way) and its name here
+                elements = _stream_end_elements(diagram, shape)
+                if elements:
+                    representation_groups.append(
+                        RepresentationGroup(represents=dexpi_object, groups=[Static(elements=elements)]))
+                    for el in elements:
+                        for pt in [getattr(el, "position", None)] + list(getattr(el, "points", None) or []):
+                            if pt is not None:
+                                min_x, max_x = min(min_x, pt.x - 60), max(max_x, pt.x + 60)
+                                min_y, max_y = min(min_y, pt.y - 20), max(max_y, pt.y + 20)
             min_x = min(min_x, shape.x)
             max_x = max(max_x, shape.x + width)
             min_y = min(min_y, -(shape.y + height))
@@ -243,9 +282,20 @@ def build_diagram(diagram: ParsedDiagram, result: BuildResult, model: DexpiModel
         # rendered with no label at all until this fallback was added (confirmed against
         # the gramflow reactor file: 19 instrument bubbles, all missing their tags).
         tags = tag_lookup.get(shape.id) or ([shape.text] if shape.text else [])
-        if tags:
+        if tags and isinstance(dexpi_object, instrumentation.ProcessInstrumentationFunction):
+            # an instrument's tag is written in its bubble ("TI 101"), as on a P&ID
             label_text = Text(
-                position=Point(x=shape.x, y=-(shape.y + height) - 15.0),
+                position=Point(x=shape.x + width / 2.0, y=-(shape.y + height / 2.0)),
+                rotation=0.0,
+                alignment=TextAlignment.CenterCenter,
+                color=_LABEL_COLOR,
+                font="Arial",
+                size=max(6.0, min(14.0, height * 0.3, width * 1.6 / max(1, len(", ".join(tags))))),
+                text=", ".join(tags),
+            )
+        elif tags:
+            label_text = Text(
+                position=Point(x=shape.x + width / 2.0, y=-(shape.y + height) - 15.0),
                 rotation=0.0,
                 alignment=TextAlignment.CenterTop,
                 color=_LABEL_COLOR,
@@ -253,6 +303,7 @@ def build_diagram(diagram: ParsedDiagram, result: BuildResult, model: DexpiModel
                 size=14.0,
                 text=", ".join(tags),
             )
+        if tags:
             elements.append(label_text)
 
         representation_groups.append(

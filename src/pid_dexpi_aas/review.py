@@ -238,7 +238,8 @@ def from_drawio(diagram: ParsedDiagram) -> ReviewDiagram:
         tag = _tag_name(shape, tag_lookup) or shape.text
         mapping = map_shape(shape.shape_token, shape.text or tag or "", shape.style)  # same rule as build_model
         if shape.is_labeled_only:
-            dexpi_class, identified_by = OFF_PAGE, "text label a pipe ends on"
+            dexpi_class, identified_by = OFF_PAGE, ("a pipe's loose end: a stream in or out of the drawing"
+                                                    if shape.data.get("loose_end") else "text label a pipe ends on")
         else:
             dexpi_class = _mapping_to_class(mapping)
             identified_by = f"draw.io shape '{_short_token(shape.shape_token)}'"
@@ -834,12 +835,15 @@ def to_dexpi(review: ReviewDiagram) -> tuple[ParsedDiagram, BuildResult]:
         # association and labels still work; rows replace their cells.
         shapes = [copy.copy(sh) for sh in base.shapes if sh.id not in row_ids]
     overrides, tag_overrides = {}, {}
+    # a stream made from a pipe's loose end stays marked as one (the renderer draws its arrow)
+    loose_ends = {sh.id for sh in base.shapes if sh.data.get("loose_end")} if base is not None else set()
     for s in review.symbols:
         box = s.box or [0, 0, 0, 0]
         off_page = s.include and s.dexpi_class == OFF_PAGE
         shapes.append(Shape(
             id=s.id, shape_token=None if off_page else f"review:{s.detected_as}", text=s.tag or "",
             x=box[0], y=box[1], width=box[2] - box[0], height=box[3] - box[1], style="",
+            data={"loose_end": "1"} if off_page and s.id in loose_ends else {},
         ))
         if not off_page:
             overrides[s.id] = _mapping_for_row(s)

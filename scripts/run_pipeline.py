@@ -36,7 +36,8 @@ def main() -> None:
     xml_variants = decode_drawio(drawio_path)
     xml_text = xml_variants[0]  # first <diagram> in the file
 
-    diagram = parse_drawio_xml_resolved(xml_text, source_file=drawio_path.name)
+    # with the file: line routes (draw.io app), as in the app - tees, instrument taps, loose ends
+    diagram = parse_drawio_xml_resolved(xml_text, source_file=drawio_path.name, drawio_path=drawio_path)
     result = build_model(diagram)
 
     report = report_for_diagram(diagram, result)

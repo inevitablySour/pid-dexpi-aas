@@ -680,11 +680,51 @@ def parse_drawio_xml_resolved(xml_text: str, source_file: str, drawio_path: str 
     resolve_floating_edge_endpoints(diagram)
     redirect_label_endpoints(diagram)
     if routes:
+        add_stream_ends(diagram, routes)
         join_pipe_networks(diagram, routes)
     from pid_dexpi_aas.drawio.flow_direction import infer_flow
     diagram.flow = infer_flow(diagram)
     diagram.routes = routes or None
     return diagram
+
+
+def add_stream_ends(diagram: ParsedDiagram, routes: dict) -> None:
+    """A process line with one end on a symbol (or a pipe) and the other loose in open space is
+    a stream entering or leaving the drawing (a reviewer's P&ID, 2026-11: the feed line before
+    the first valve, the product line after the column). Before, it was dropped with its pipe;
+    now its loose end gets an invisible end point - a text label "Inlet n" / "Outlet n" with no
+    symbol - which the review and the DEXPI build turn into a FlowIn / FlowOut off-page
+    connector, as for a stream drawn as a text label.
+
+    Only with line routes (the draw.io app): without them a line ending on another pipe (a tee)
+    cannot be told from one ending in open space. Not for decorative or dashed (signal) lines,
+    nor a line loose at both ends (a stray stroke, not a stream)."""
+    n_in = n_out = 0
+    shape_ids = {sh.id for sh in diagram.shapes}
+    for e in diagram.edges:
+        if e.is_decorative or e.is_dashed or e.id not in routes:
+            continue
+        loose = [e.source is None and e.source_junction is None, e.target is None and e.target_junction is None]
+        if all(loose) or not any(loose):
+            continue
+        end = 0 if loose[0] else 1
+        other = e.target if end == 0 else e.source
+        if other is not None and other not in shape_ids:
+            continue
+        x, y = routes[e.id][0] if end == 0 else routes[e.id][-1]
+        if end == 0:
+            n_in += 1
+            text = f"Inlet {n_in}"
+        else:
+            n_out += 1
+            text = f"Outlet {n_out}"
+        sid = f"{e.id}:{'in' if end == 0 else 'out'}"
+        diagram.shapes.append(Shape(id=sid, shape_token=None, text=text, x=x, y=y, width=0.0, height=0.0,
+                                    style="", data={"loose_end": "1"}))
+        if end == 0:
+            e.source, e.source_resolution = sid, "loose end"
+        else:
+            e.target, e.target_resolution = sid, "loose end"
 
 
 def _ends_on_lines(diagram: ParsedDiagram, routes: dict) -> None:

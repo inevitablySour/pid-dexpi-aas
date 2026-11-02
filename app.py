@@ -2380,7 +2380,7 @@ if build_clicked:
             st.info("No picture uploaded - compare with your draw.io drawing.")
     with after_col:
         st.caption("After: what the DEXPI file contains, drawn at the drawing's positions and pipe routes. "
-                   "Signal lines and instrument taps are not in the DEXPI file yet, so they are not drawn.")
+                   "Instruments are drawn with their line to where they measure; signal lines (dashed) are in the DEXPI file but not drawn.")
         try:
             after = render_after_png(diagram, result)
             if after is None:
