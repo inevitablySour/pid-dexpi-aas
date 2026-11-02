@@ -13,6 +13,7 @@ dependencies = [
     "numpy",
     "pandas",
     "pillow",
+    "pypdfium2",  # a P&ID uploaded as a PDF: its page as the picture the model reads
     "openpyxl",
     "cairosvg",  # check sheet "after" drawing; needs the cairo library (macOS: brew install cairo)
     "networkx",

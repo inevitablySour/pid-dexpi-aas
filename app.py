@@ -231,6 +231,36 @@ div[data-testid="stMetricValue"] {font-size: 1.6rem;}
 </style>""")
 
 # ------------------------------------------------------------------------------ inputs ---
+class UploadedPicture:
+    """A picture made in the app (a PDF's page) where an uploaded file is expected: name + getvalue()."""
+
+    def __init__(self, name: str, data: bytes):
+        self.name, self._data = name, data
+
+    def getvalue(self) -> bytes:
+        return self._data
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def pdf_page_count(data: bytes) -> int:
+    import pypdfium2 as pdfium
+    return len(pdfium.PdfDocument(data))
+
+
+@st.cache_data(show_spinner="Reading the PDF...", max_entries=4)
+def pdf_page_png(data: bytes, index: int) -> bytes:
+    """One PDF page as a PNG, its longer side about 7000 px (100-300 dpi): an A0 sheet at
+    150 dpi, the scale the model was checked at. In memory only (uploads are not kept on disk)."""
+    import pypdfium2 as pdfium
+    page = pdfium.PdfDocument(data)[index]
+    w, h = page.get_size()   # points, 1/72 inch
+    dpi = min(300.0, max(100.0, 7000.0 / (max(w, h) / 72.0)))
+    image = page.render(scale=dpi / 72.0).to_pil().convert("RGB")
+    buf = io.BytesIO()
+    image.save(buf, "PNG")
+    return buf.getvalue()
+
+
 with st.sidebar:
     if APP_PASSWORD and st.button("Log out", type="tertiary", help="Forget this browser's login"):
         auth_cookie(data={"cookie": f"{AUTH_COOKIE}=; Max-Age=0; Path=/; SameSite=Strict"}, key="auth_cookie_logout")
@@ -248,7 +278,18 @@ with st.sidebar:
                  "left out. Tick to use each as a plant section instead: its name goes onto the items inside it "
                  "(DEXPI PlantSectionName).")
     with in_picture:
-        image_file = st.file_uploader("P&ID image", type=["png", "jpg", "jpeg"])
+        image_file = st.file_uploader("P&ID image or PDF", type=["png", "jpg", "jpeg", "pdf"])
+        if image_file is not None and image_file.name.lower().endswith(".pdf"):
+            # a PDF (e.g. plotted from AutoCAD): one page as the picture the model reads
+            try:
+                n_pages = pdf_page_count(image_file.getvalue())
+                page = st.number_input("Page", 1, n_pages, 1, key="pdf_page") if n_pages > 1 else 1
+                png = pdf_page_png(image_file.getvalue(), page - 1)
+                stem = Path(image_file.name).stem + (f" (page {page})" if n_pages > 1 else "")
+                image_file = UploadedPicture(f"{stem}.png", png)
+            except Exception as exc:  # damaged or password-protected
+                st.error(f"This PDF can't be read: {exc}")
+                image_file = None
         st.caption("With a draw.io file as well, the drawing is checked against the picture.")
         if image_file is not None:
             with st.popover("Re-run the model on this picture", width="stretch"):
