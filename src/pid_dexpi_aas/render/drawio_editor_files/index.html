@@ -716,7 +716,7 @@ function hookGuide() {
           && val(c, "checked") == null) setData(c, { checked: "1" });
     }
   });
-  graph.getModel().addListener(W.mxEvent.CHANGE, () => { if (guide) setTimeout(marks, 0); });
+  graph.getModel().addListener(W.mxEvent.CHANGE, () => setTimeout(marks, 0));   // a loose end attached: its ! goes
   graph.getSelectionModel().addListener(W.mxEvent.CHANGE, () => { if (guide) setTimeout(dim, 0); });
   const keys = (e) => {
     if (!guide || graph.isEditing()) return;
@@ -734,6 +734,14 @@ function hookGuide() {
 let marked = [];
 let showFlags = true;
 const MARK_LOOK = SVG('<text x="8" y="12.5" font-size="12" font-family="sans-serif" font-weight="bold" fill="#fff" text-anchor="middle">!</text>', "#f08c00");
+// A line with an end on no symbol (and on no other line): it reads as connected but is not - a
+// reviewer's lines all carried a green tick while two of them were loose (2026-11). Flagged
+// everywhere, a tick or not: in open space the end becomes an inlet / outlet, near an item it
+// is guessed onto that item - either way not what the drawing shows unless it is meant.
+const looseEnds = (c) => graph.getModel().isEdge(c)
+  ? [graph.getModel().getTerminal(c, true), graph.getModel().getTerminal(c, false)].filter((t) => !t).length : 0;
+const LOOSE_TIP = "Not attached at one end - drag the end onto its symbol until the symbol is outlined in blue. " +
+  "Ending in open space it becomes an inlet / outlet of the drawing.";
 const MARK_FLOW = SVG('<path d="M3 8h8M8 5l3 3-3 3" stroke="#fff" stroke-width="1.6" fill="none"/>', "#868e96");
 function marks() {
   for (const c of marked) graph.removeCellOverlays(c);
@@ -743,7 +751,11 @@ function marks() {
     const m = graph.getModel();
     for (const c of Object.values(m.cells)) {
       if (arrowHidden(c)) continue;
-      if (m.isVertex(c) && val(c, "look") && !isChecked(c)) {
+      if (looseEnds(c)) {
+        graph.addCellOverlay(c, new W.mxCellOverlay(new W.mxImage(MARK_LOOK, 16, 16), LOOSE_TIP,
+          W.mxConstants.ALIGN_CENTER, W.mxConstants.ALIGN_MIDDLE));
+        marked.push(c);
+      } else if (m.isVertex(c) && val(c, "look") && !isChecked(c)) {
         const o = new W.mxCellOverlay(new W.mxImage(MARK_LOOK, 16, 16), "Needs a look: " + val(c, "look"),
           W.mxConstants.ALIGN_RIGHT, W.mxConstants.ALIGN_TOP);
         graph.addCellOverlay(c, o); marked.push(c);
@@ -764,7 +776,8 @@ function marks() {
   };
   if (guide.step === 1) for (const c of checkItems()) { if (isChecked(c)) put(c, MARK_OK, "Checked", true); }
   else for (const c of checkLines().all) {
-    if (isChecked(c)) put(c, MARK_OK, "Checked");
+    if (looseEnds(c)) put(c, MARK_LOOK, LOOSE_TIP);
+    else if (isChecked(c)) put(c, MARK_OK, "Checked");
     else if (val(c, "low") === "1") put(c, MARK_ASK, "To check");
   }
   dim();
@@ -974,6 +987,7 @@ function renderFinder() {
   const kinds = {
     "All": () => items,
     "Needs a look": () => items.filter((c) => val(c, "look") && !isChecked(c)),
+    "Loose ends": () => lines.filter((c) => looseEnds(c) > 0),
     "Left out": () => items.filter((c) => val(c, "in_dexpi") === "0" || effClass(c) === (schema && schema.skip)),
     "Unknown flow": () => lines.filter((c) => val(c, "flow_unknown") === "1" && styleOf(c, "endArrow") === "none"
                                        && (styleOf(c, "startArrow") == null || styleOf(c, "startArrow") === "none")),
@@ -1336,8 +1350,10 @@ function renderLine(cell) {
   const [kind, cls] = schema && schema.instruments ? lineKind(cell) : ["Line", null];
   panel.append(el("h3", {}, `${itemName(a)} – ${itemName(b)}`), el("div", { cls: "sub" }, `${kind} in DEXPI`));
   if (val(cell, "why")) panel.append(el("div", { cls: "hint" }, "Found: " + val(cell, "why")));
-  if (!a || !b) panel.append(el("div", { cls: "hint" }, "A loose end is joined to the nearest item when you Save - " +
-    "drag the end onto the item to be sure."));
+  if (!a || !b) panel.append(el("div", { cls: "hint", style: "color:#b35c00;margin-bottom:6px" },
+    "Not attached at one end. Near a symbol the end is guessed onto it; in open space it becomes an " +
+    "inlet / outlet of the drawing. To connect it, drag the end onto the symbol (or onto a pipe, for a branch) " +
+    "until it is outlined in blue."));
 
   const dashed = styleOf(cell, "dashed") == 1;
   const seg = (opts, on) => {
