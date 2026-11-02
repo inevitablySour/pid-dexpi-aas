@@ -1,0 +1,5 @@
+# The app's dependencies are declared in pyproject.toml; this installs the app with them:
+#   pip install -r requirements.txt
+# Tests too: pip install -e ".[dev]"
+# The picture model has its own environment: ml/pid2graph/setup.sh (README).
+-e .

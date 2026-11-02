@@ -15,7 +15,6 @@ import tempfile
 from datetime import date
 from pathlib import Path
 
-import cairosvg
 
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as XLImage
@@ -144,8 +143,18 @@ def number_items(review: ReviewDiagram, result: BuildResult) -> list[tuple[int, 
     return list(enumerate(converted, start=1))
 
 
-def render_after_png(diagram: ParsedDiagram, result: BuildResult, width: int = 1600) -> bytes:
-    """The P&ID re-drawn from the built DEXPI model (generic symbols), as a PNG."""
+CAIRO_MISSING = ("The re-drawn P&ID needs the Cairo graphics library (README: Install). "
+                 "Everything else works without it.")
+
+
+def render_after_png(diagram: ParsedDiagram, result: BuildResult, width: int = 1600) -> bytes | None:
+    """The P&ID re-drawn from the built DEXPI model (generic symbols), as a PNG - None when the
+    Cairo library cairosvg draws with is not installed (common on Windows), so the app and the
+    check sheet still work without it."""
+    try:
+        import cairosvg
+    except (ImportError, OSError):
+        return None
     with tempfile.TemporaryDirectory() as tmp:
         svg = Path(tmp) / "after.svg"
         render_diagram_svg(build_diagram(diagram, result, result.model), svg)
@@ -302,7 +311,11 @@ def build_check_sheet(review: ReviewDiagram, result: BuildResult, mode: str,
     bws.row_dimensions[row].height = 32
     if diagram is not None:
         try:
-            _place_image(bws, render_after_png(diagram, result), row + 1)
+            after = render_after_png(diagram, result)
+            if after is None:
+                bws.cell(row + 1, 1, CAIRO_MISSING)
+            else:
+                _place_image(bws, after, row + 1)
         except Exception as exc:  # a rendering failure must not block the check sheet
             bws.cell(row + 1, 1, f"(Re-drawing failed: {exc})").font = Font(name=FONT, italic=True)
 

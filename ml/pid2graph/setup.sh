@@ -86,6 +86,11 @@ fi
 # metadata pulls an unpinned torch, which would replace the cu121 build above.
 "$PY" -m pip install -q --no-deps easyocr==1.7.2
 "$PY" -m pip install -q opencv-python-headless python-bidi Shapely pyclipper
+# docTR: the default text reader (infer_sheet.py --ocr doctr, since 2026-10-14). --no-deps for the
+# same reason (it requires torch); its other requirements listed here. cv2 comes from the headless
+# OpenCV above.
+"$PY" -m pip install -q --no-deps python-doctr==1.1.0
+"$PY" -m pip install -q anyascii h5py huggingface-hub langdetect onnx pypdfium2 rapidfuzz validators tqdm
 # tensorboard: torch.utils.tensorboard.SummaryWriter needs it at import time.
 # loguru + pycocotools: pulled in by metrics/coco.py, which the mAP evaluator uses.
 # None of these three are in the repo's own requirements.txt.

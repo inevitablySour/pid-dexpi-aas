@@ -46,13 +46,25 @@ winget install JGraph.Draw                       # optional: line routes, tees, 
 git clone https://github.com/inevitablySour/pid-dexpi-aas.git
 cd pid-dexpi-aas
 py -m venv .venv
-.venv\Scripts\pip install -e ".[dev]"
+.venv\Scripts\pip install -r requirements.txt
 .venv\Scripts\python scripts\get_drawio_editor.py   # optional: the Editor tab
 .venv\Scripts\streamlit run app.py
 ```
 
 Next time: `cd pid-dexpi-aas` and `.venv\Scripts\streamlit run app.py`
 (Linux / macOS: `./launch_app.sh`). Stop the app with Ctrl+C in that window.
+
+### Cairo (optional: the re-drawn P&ID)
+
+The check sheet and the build page show the P&ID re-drawn from the DEXPI file. That drawing
+uses **Cairo**, a graphics library installed on the computer itself (not with pip). Without it
+everything works except that one picture, which is replaced by a note.
+
+| OS | Install |
+|---|---|
+| Linux | usually already there; else `sudo apt install libcairo2` |
+| macOS | `brew install cairo` |
+| Windows | install the *GTK for Windows Runtime* (github.com/tschoonj/GTK-for-Windows-Runtime-Environment-Installer), then reopen PowerShell; or skip it |
 
 ### The picture model (optional)
 
@@ -74,6 +86,7 @@ the normal NVIDIA driver; training also needs the CUDA toolkit.
 | Browser does not open | Open http://localhost:8501 yourself |
 | Port 8501 in use | `./launch_app.sh --server.port 8502` (Windows: add `--server.port 8502`) |
 | "ML environment not found" | Run the picture model steps, or use draw.io files only |
+| "The re-drawn P&ID needs the Cairo graphics library" | Install Cairo (above), or ignore it |
 | Editor tab missing | Run `scripts/get_drawio_editor.py` with the app's Python (above) |
 
 ## Using the app

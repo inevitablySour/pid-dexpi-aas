@@ -43,7 +43,8 @@ import streamlit.components.v2  # noqa: E402,F401  (st.components.v2: the clicka
 from PIL import Image  # noqa: E402
 
 from pid_dexpi_aas.render.drawio_editor import INSTALLED as EDITOR_INSTALLED, drawio_editor  # noqa: E402
-from pid_dexpi_aas.render.check_sheet import build_check_sheet, number_items, numbered_overlay, render_after_png  # noqa: E402
+from pid_dexpi_aas.render.check_sheet import (CAIRO_MISSING, build_check_sheet, number_items,  # noqa: E402
+                                              numbered_overlay, render_after_png)
 from pid_dexpi_aas.render.flow_map import (  # noqa: E402
     BOX_CHECK, BOX_IN, BOX_LEGEND, BOX_OUT, BOX_PICTURE, MAP_CSS, MAP_JS, OCR_TAG, Box, Layers, add_edits,
     Line, build_layers, hide, image_layers, map_markup, review_overrides,
@@ -2381,7 +2382,11 @@ if build_clicked:
         st.caption("After: what the DEXPI file contains, drawn at the drawing's positions and pipe routes. "
                    "Signal lines and instrument taps are not in the DEXPI file yet, so they are not drawn.")
         try:
-            st.image(Image.open(io.BytesIO(render_after_png(diagram, result))), width="stretch")
+            after = render_after_png(diagram, result)
+            if after is None:
+                st.info(CAIRO_MISSING)
+            else:
+                st.image(Image.open(io.BytesIO(after)), width="stretch")
         except Exception as exc:
             st.warning(f"Could not re-draw from the DEXPI file: {exc}")
     if report.skipped_details:
