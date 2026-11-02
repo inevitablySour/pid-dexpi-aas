@@ -48,6 +48,7 @@ SETS = {
     "team-v4": {"dir": DATA / "Complete" / "Team v4 test", "scale": 1.0},
     # flow arrows boxed at OPEN100's size (0.35 of a symbol), not the drawn head (Team v4)
     "team-v5": {"dir": DATA / "Complete" / "Team v5 test", "scale": 1.0},
+    "team-v6": {"dir": DATA / "Complete" / "Team v6 test", "scale": 1.0},
     # pictures checked in the review app and held out (the app's "held-out test" export, e.g. the
     # MEM4CHEM sheets): already scaled to the team drawings' symbol size
     "reviewed": {"dir": DATA / "Complete" / "Reviewed test", "scale": 1.0},
@@ -67,15 +68,17 @@ def sheet_paths(which: str, fold: int | None) -> list[tuple[Path, Path]]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--checkpoint", required=True)
+    ap.add_argument("--checkpoint", required=True, help="a checkpoint, or several comma-separated (an ensemble)")
     ap.add_argument("--set", choices=sorted(SETS), default="open100")
     ap.add_argument("--fold", type=int, default=None,
                     help="open100 only: score just this fold's 3 test sheets (omit = all 12, valid only for "
                          "a model that never trained on OPEN100)")
-    ap.add_argument("--tile", type=int, default=1500, help="tile size at training-patch scale")
-    ap.add_argument("--stride", type=int, default=750)
+    ap.add_argument("--tile", default="1500", help="tile size at training-patch scale; several, comma-separated, "
+                                                   "read the sheet at several zooms (stride: half the tile)")
+    ap.add_argument("--ensemble", default="mean", choices=["mean", "max"], help="how several runs combine (detect)")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--out", default=None, help="write results JSON here")
+    ap.add_argument("--merge", default="wbf", choices=["wbf", "greedy"], help="how tiles are merged (stitch.py)")
     args = ap.parse_args()
 
     # The metric code (metrics/boxap.py) gathers across processes even when there is one;
@@ -89,14 +92,17 @@ def main() -> None:
         dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port}", rank=0, world_size=1)
 
     scale = SETS[args.set]["scale"]
-    tile, stride = round(args.tile / scale), round(args.stride / scale)
+    tile = [round(int(t) / scale) for t in args.tile.split(",")]
+    stride = [t // 2 for t in tile]
+    checkpoints = args.checkpoint.split(",")  # several: an ensemble
     metric = NodeEdgeMeanAP(max_detections=1000)  # whole sheets hold > 100 symbols
     per_class_found = {c: [0, 0] for c in CLASS_NAMES}  # [found at IoU>=0.5 any class, total]
     sheets = sheet_paths(args.set, args.fold)
     for img_path, g_path in sheets:
         labels, boxes, edges = _collapse_graph(nx.read_graphml(g_path))
         sheet = load_sheet(str(img_path))
-        symbols, conns = detect(sheet, args.checkpoint, tile, stride, args.device, min_prob=0.01)
+        symbols, conns = detect(sheet, checkpoints, tile, stride, args.device, min_prob=0.01, merge=args.merge,
+                                ensemble=args.ensemble)
         pb = np.array([s["box"] for s in symbols], dtype=np.float32).reshape(-1, 4)
         pc = np.array([CLASS_NAMES.index(s["class"]) for s in symbols], dtype=np.int64)
         ps = np.array([s["score"] for s in symbols], dtype=np.float32)

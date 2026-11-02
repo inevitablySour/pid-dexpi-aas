@@ -68,9 +68,17 @@ def associate_tags(diagram: ParsedDiagram) -> list[TagAssociation]:
     # A text a line ends on that is not a tag ("Product", "Fume hood [atm]") names the
     # stream leaving there (an off-page connector), never the tag of the symbol beside it.
     line_ends = {x for e in diagram.edges for x in (e.source, e.target) if x}
+    # a tag label made in the editor ("Add a tag label") is linked to its item (the item's
+    # tag_cell): it is that item's tag wherever it has been moved to
+    shape_ids = {s.id for s in diagram.shapes}
+    linked = {s.data["tag_cell"]: s.id for s in diagram.shapes
+              if (s.data or {}).get("tag_cell") and s.data["tag_cell"] in shape_ids and s.data["tag_cell"] != s.id}
 
     for label in diagram.shapes:
         if not label.is_labeled_only or not label.text:
+            continue
+        if label.id in linked:
+            associations.append(TagAssociation(label.id, label.text, linked[label.id], 0.0))
             continue
 
         if not labeled_shapes:

@@ -36,15 +36,24 @@ EQUIPMENT_CLASSES = sorted(
     and issubclass(getattr(eq, n), eq.Equipment) and n != "Equipment"
 )
 VALVE_CLASSES = sorted(n for n in dir(piping) if not n.startswith("_") and ("Valve" in n or n.endswith("Fitting")))
+# every in-line piping component an item can be (valves, strainers, reducers, blinds, flame
+# arrestors, sight glasses, ...): not the abstract base, the off-page connectors (streams have
+# their own choice) or a tee (worked out from the lines)
+PIPING_CLASSES = sorted(
+    n for n in dir(piping)
+    if not n.startswith("_") and isinstance(getattr(piping, n), type)
+    and issubclass(getattr(piping, n), piping.PipingComponent)
+    and n not in ("PipingComponent", "PipeTee") and "OffPageConnector" not in n
+)
 INSTRUMENT_CLASSES = ["ProcessInstrumentationFunction", "SignalOffPageConnector"]
 # One dropdown for the reviewer; the DEXPI category is implied by the class picked.
-DEXPI_CLASS_CHOICES = [SKIP, OFF_PAGE] + INSTRUMENT_CLASSES + VALVE_CLASSES + EQUIPMENT_CLASSES
+DEXPI_CLASS_CHOICES = [SKIP, OFF_PAGE] + INSTRUMENT_CLASSES + PIPING_CLASSES + EQUIPMENT_CLASSES
 
 
 def category_for_class(dexpi_class: str | None) -> Category:
     if dexpi_class in EQUIPMENT_CLASSES:
         return Category.EQUIPMENT
-    if dexpi_class in VALVE_CLASSES:
+    if dexpi_class in PIPING_CLASSES:
         return Category.PIPING
     if dexpi_class in INSTRUMENT_CLASSES:
         return Category.INSTRUMENTATION
@@ -69,6 +78,7 @@ class ReviewSymbol:
     image_check: str = ""  # both-inputs mode only
     section: str = ""  # the plant section (frame) it was drawn in - sections.py; editable
     include: bool = True
+    checked: bool = False  # confirmed by a person (the editor's guided check), or drawn by one
 
 
 @dataclass
@@ -91,6 +101,71 @@ class ReviewConnection:
     # image mode: the pipe as traced on the picture (image pixels, From -> To), for the map
     # and the re-drawn DEXPI picture
     path: list | None = None
+    checked: bool = False  # confirmed by a person (the editor's guided check), or drawn by one
+
+
+def is_flow_arrow(s: ReviewSymbol) -> bool:
+    """A flow arrow the picture model found: not an item - only evidence for which way its pipe
+    flows (and the pipe is joined through it, _bridge_arrows). Not shown or counted as an
+    item; given a real type by a person (it was read wrongly), it is an item like any other."""
+    return s.detected_as == "arrow" and s.dexpi_class == SKIP
+
+
+def look_reasons(s: ReviewSymbol) -> list[str]:
+    """Why an item needs a person's look ([] = it does not): the map's "to check" items, and
+    the editor's flagged ones."""
+    if s.source == "manual" or is_flow_arrow(s):
+        return []
+    why = []
+    if s.dexpi_class == SKIP and s.source != "draw.io":
+        why.append("no DEXPI type")
+    if s.confidence is not None and s.confidence < 0.7:
+        why.append(f"the model is only {s.confidence:.0%} sure")
+    if "overrides" in s.notes:
+        why.append("its tag suggests another type")
+    if s.image_check and not s.image_check.startswith("model agrees"):
+        why.append(f"picture: {s.image_check}")
+    if s.detected_as == MISSED:
+        why.append("possible missed item - the model drew no box here")
+    elif s.source == "image model" and not s.tag and s.dexpi_class != SKIP:
+        why.append("no tag read")
+    return why
+
+
+def item_why(s: ReviewSymbol) -> str:
+    """How an item got its type and tag, in a line."""
+    parts = [s.identified_by or s.detected_as]
+    if s.confidence is not None and s.source == "image model":
+        parts.append(f"model {s.confidence:.0%} sure")
+    if s.tag:
+        parts.append(f"tag from {s.tag_source or 'the drawing'}")
+    return "; ".join(p for p in parts if p)
+
+
+def line_why(c: ReviewConnection) -> str:
+    """How a line was found, in a line."""
+    if c.source == "image model":
+        return f"predicted by the model ({c.confidence}), not traced on the picture"
+    if c.source == "picture tracing":
+        return "traced along a drawn line on the picture"
+    if c.source == "manual":
+        return "added by a person"
+    return {"explicit": "draw.io: line attached to both items", "junction": "draw.io: joined at a tee",
+            "adjacent": "draw.io: items drawn touching",
+            "junction+guess": "draw.io: tee, one end guessed"}.get(c.confidence, "draw.io: one end guessed (loose line end)")
+
+
+SURE_DRAWIO = ("explicit", "adjacent", "junction")
+MODEL_ONLY_MIN = 0.6  # a model prediction the tracer did not confirm is kept from this sure (from_image)
+
+
+def low_confidence(c: ReviewConnection) -> bool:
+    """A connection to check one by one: the picture model's prediction (not traced along a
+    drawn line - where its extra connections come from), or a draw.io line with an end guessed
+    (a loose end put on the nearest item). Traced lines, stated ends and drawn lines are not."""
+    if c.source == "image model":
+        return True
+    return c.source == "draw.io" and c.confidence not in SURE_DRAWIO
 
 
 FLOW_KNOWN = ("drawn arrow", "implied", "reviewer")
@@ -213,6 +288,7 @@ def _apply_editor_data(review: ReviewDiagram, diagram: ParsedDiagram) -> None:
     import json
     data = {sh.id: sh.data for sh in diagram.shapes if sh.data}
     data.update({e.id: e.data for e in diagram.edges if e.data})
+    texts = {sh.id: sh.text for sh in diagram.shapes}
     for row in [*review.symbols, *review.connections]:
         d = data.get(row.id)
         if not d:
@@ -223,6 +299,8 @@ def _apply_editor_data(review: ReviewDiagram, diagram: ParsedDiagram) -> None:
                 row.include = row.dexpi_class != SKIP
             if d.get("tag_auto") == "0" and "tag" in d:
                 row.tag, row.tag_source = d["tag"], "set in the editor"
+            if texts.get(d.get("tag_cell")):  # its tag label, as it reads now (edited on the drawing)
+                row.tag, row.tag_source = texts[d["tag_cell"]], "tag label"
             if d.get("section"):
                 row.section = d["section"]
         if d.get("in_dexpi") == "0":
@@ -231,6 +309,8 @@ def _apply_editor_data(review: ReviewDiagram, diagram: ParsedDiagram) -> None:
             row.include = True
         if d.get("notes"):
             row.notes = d["notes"]
+        if d.get("checked") in ("0", "1"):
+            row.checked = d["checked"] == "1"
         try:
             specs = json.loads(d.get("specs") or "{}")
         except ValueError:
@@ -251,10 +331,11 @@ def _exclude_dangling(review: ReviewDiagram) -> None:
 
 
 # ----------------------------------------------------------------------------- image ---
-def from_image(infer: dict, source_name: str) -> ReviewDiagram:
+def from_image(infer: dict, source_name: str, known_tags: list[str] | None = None) -> ReviewDiagram:
     """Rows from ml/pid2graph/pipeline/infer_sheet.py output: model symbols + OCR tags + name
-    classifier, and the model's predicted connections."""
-    tags = assemble_tags(infer.get("ocr_tokens", []))
+    classifier, and the model's predicted connections. known_tags: tags known to be on the
+    drawing (a spec sheet's, a draw.io file's) - OCR near-misses snap to them."""
+    tags = assemble_tags(infer.get("ocr_tokens", []), known=known_tags)
     boxes = {s["id"]: tuple(s["box"]) for s in infer["symbols"]}
     attached = attach_tags(boxes, tags, classes={s["id"]: s["class"] for s in infer["symbols"]})
     review = ReviewDiagram(source_name=source_name, image_path=infer.get("image"),
@@ -286,18 +367,42 @@ def from_image(infer: dict, source_name: str) -> ReviewDiagram:
     # the model's own predictions for pairs the tracer did not reach (scored on the team
     # sheets: tracer alone F1 0.68, model alone 0.70, both 0.84).
     seen = set()
-    for n, t in enumerate(infer.get("traced", [])):
+    traced = infer.get("traced", [])
+    shown = _network_trees(traced)
+    for n, t in enumerate(traced):
         a, b, path = t["from"], t["to"], t.get("path")
         if t.get("flow", 0) < 0:
             a, b, path = b, a, (path or [])[::-1]
-        seen.add(frozenset((a, b)))
+        seen.add(frozenset((a, b)))  # joined, shown or not: the model's own link for it is not added
+        if n not in shown:
+            continue
         review.connections.append(ReviewConnection(
             id=f"tc{n}", from_id=a, to_id=b, source="picture tracing", line_type=t.get("line_type", "process"),
             confidence="dashed line followed" if t.get("line_type") == "signal" else "drawn line followed",
             flow="drawn arrow" if t.get("flow") else "", path=path,
+            # the traced pipe network it is part of: DEXPI builds the network once, with tees (to_dexpi)
+            attributes={"net": f"t{t['net']}"} if t.get("net") is not None else {},
         ))
+    _add_missed(review, infer.get("missed", []), seen)
+    # the model's own predictions for pairs the tracer did not join - only the ones it is sure
+    # of and that are no "skip" (the tracer already joins the two through another item: the
+    # model jumping over an in-line valve). Scored on sheets the model never saw (v3 fold
+    # models, OPEN100 + LightUp; 2026-10-20 pipeline: four zooms, items >= 0.5, trace_lines):
+    # from 0.6 sure F1 0.76 / 0.93 (from 0.9: 0.70 / 0.91; tracer alone 0.66 / 0.90). The model's
+    # probabilities are means over the zooms now, lower than one run's - hence 0.6, not 0.9.
+    import networkx as nx
+    traced_graph = nx.Graph([tuple(p) for p in seen])
+    def skip(a, b) -> bool:
+        if a not in traced_graph or b not in traced_graph:
+            return False
+        try:
+            return nx.shortest_path_length(traced_graph, a, b) <= 2
+        except nx.NetworkXNoPath:
+            return False
     for n, c in enumerate(infer.get("connections", [])):
         if frozenset((c["from"], c["to"])) in seen:
+            continue
+        if c.get("prob", 1.0) < MODEL_ONLY_MIN or skip(c["from"], c["to"]):
             continue
         review.connections.append(ReviewConnection(
             id=f"mc{n}", from_id=c["from"], to_id=c["to"], source="image model",
@@ -312,11 +417,67 @@ def from_image(infer: dict, source_name: str) -> ReviewDiagram:
     return review
 
 
+def _network_trees(traced: list) -> set:
+    """The traced pairs to show, as indices. A pipe network with tees joins every item on it
+    to every other (the tracer reports, and the labels count, each pair: a header with ten
+    branches is 45 pairs). Drawn, that is a web of lines, and it is not how the pipes run: of
+    each network (`net`, trace_lines.py) only the shortest tree along the pipes is kept - each
+    item joined to its neighbour along the pipe, n - 1 lines. Pairs without a network (short
+    links, trace_pipes.py) are all kept."""
+    import networkx as nx
+    nets: dict = {}
+    keep = set()
+    for n, t in enumerate(traced):
+        if t.get("net") is None:
+            keep.add(n)
+        else:
+            nets.setdefault(t["net"], []).append(n)
+    for members in nets.values():
+        g = nx.Graph()
+        for n in members:
+            t = traced[n]
+            w = t.get("length") or 0.0
+            if not g.has_edge(t["from"], t["to"]) or w < g[t["from"]][t["to"]]["weight"]:
+                g.add_edge(t["from"], t["to"], weight=w, n=n)
+        keep |= {d["n"] for _, _, d in nx.minimum_spanning_edges(g, data=True)}
+    return keep
+
+
+MISSED = "possible item"  # detected_as of an item the model gave no box (_add_missed)
+
+
+def _add_missed(review: ReviewDiagram, missed: list, seen: set) -> None:
+    """Items the model drew no box for, but a traced pipe runs through (infer_sheet.py
+    possibly_missed: a symbol's outline on the pipe, or a symbol the model half saw): offered
+    as suggestions - flagged for the guided check, left out of DEXPI, the pipe left as traced.
+    Splitting the pipe through each (a -> item -> b) made both labelled sets worse: most are
+    no item (LightUp: 1.25 a drawing, nearly all false), and each split a real pipe into two
+    wrong lines and broke its network (shown lines, 2026-10-27: LightUp 6.8 -> 8.8 wrong, 10.5
+    -> 12.8 missing; OPEN100 68 -> 77 missing). A person who confirms one includes it and
+    joins its lines."""
+    for n, m in enumerate(missed):
+        bx = m["box"]
+        line = next((c for c in review.connections if c.source == "picture tracing" and c.path
+                     and any(bx[0] <= px <= bx[2] and bx[1] <= py <= bx[3] for px, py in c.path)), None)
+        if line is None:
+            continue
+        guess = m.get("class") or "valve"  # most symbols drawn on a pipe are valves
+        mapping, identified_by = classify_detection(guess, None)
+        review.symbols.append(ReviewSymbol(
+            id=f"pm{n}", source="image model", box=list(m["box"]), detected_as=MISSED,
+            dexpi_class=_mapping_to_class(mapping), identified_by=f"{identified_by} (a guess)",
+            confidence=m.get("score"), include=False,
+            notes=f"possible missed item: {m['how']} - the model drew no box here. If it is an item, "
+                  f"include it, check its type and join the pipe to it; otherwise leave it out",
+        ))
+
+
 def _bridge_arrows(review: ReviewDiagram) -> None:
     """Flow arrows are labelled as nodes on the pipe (PID2Graph / OPEN100, and the team data
     from Team v4 on), so the model and the tracer connect pump - arrow - tank. Arrows are
-    not DEXPI items: without this the pipe would be dropped with the arrow. Every two
-    items an arrow connects are joined directly (a chain of arrows is followed through)."""
+    not DEXPI items: without this the pipe would be dropped with the arrow. The items around an
+    arrow (through a chain of arrows) are joined directly, along the pipe through the arrows -
+    as a tree, one line per neighbour along the pipe."""
     arrows = {s.id for s in review.symbols if s.detected_as == "arrow"}
     if not arrows:
         return
@@ -335,20 +496,78 @@ def _bridge_arrows(review: ReviewDiagram) -> None:
                     continue
                 seen.add(other)
                 (todo if other in arrows else ends).append(other)
-        signal = any(c.line_type == "signal" for c in lines)
-        traced = all(c.source == "picture tracing" for c in lines)
-        for i, a in enumerate(sorted(ends)):
-            for b in sorted(ends)[i + 1:]:
-                if frozenset((a, b)) in have:
+        # the arrow's direction, from a line into it with a drawn direction (the tracer reads
+        # which way the arrow points): an item the flow leaves towards the arrow is upstream
+        up, down = set(), set()
+        for c in lines:
+            if c.flow != "drawn arrow":
+                continue
+            if c.to_id in arrows and c.from_id not in arrows:
+                up.add(c.from_id)
+            elif c.from_id in arrows and c.to_id not in arrows:
+                down.add(c.to_id)
+        # the chain's own lines: arrow - arrow, item - arrow (the shortest of each pair)
+        import math
+
+        import networkx as nx
+        box = {x.id: x.box for x in review.symbols}
+        centre = lambda k: ((box[k][0] + box[k][2]) / 2, (box[k][1] + box[k][3]) / 2) if box.get(k) else (0.0, 0.0)
+        h = nx.Graph()
+        for c in lines:
+            if c.from_id == c.to_id:
+                continue
+            pts = c.path or [centre(c.from_id), centre(c.to_id)]
+            w = sum(math.dist(u, v) for u, v in zip(pts, pts[1:])) or 1.0
+            if not h.has_edge(c.from_id, c.to_id) or w < h[c.from_id][c.to_id]["weight"]:
+                h.add_edge(c.from_id, c.to_id, weight=w, line=c)
+        chain = {x for x in seen if x in arrows}
+        # each pair of items across the chain: the shortest way through its arrows only (an
+        # item is never passed through); of all pairs, only the shortest tree is drawn - like a
+        # pipe network (_network_trees), not every pair across every arrow
+        routes = {}
+        for a in ends:
+            sub = h.subgraph(chain | {a})
+            dist, path = nx.single_source_dijkstra(sub, a) if a in sub else ({}, {})
+            for x in chain:
+                if x not in dist:
                     continue
-                have.add(frozenset((a, b)))
-                review.connections.append(ReviewConnection(
-                    id=f"ac{len(review.connections)}", from_id=a, to_id=b,
-                    source="picture tracing" if traced else "image model",
-                    line_type="signal" if signal else "process",
-                    confidence="through a flow arrow",
-                    notes="" if traced else "predicted by the model, not traced on the picture - check",
-                ))
+                for b in h.neighbors(x):
+                    if b in ends and b != a:
+                        cost = dist[x] + h[x][b]["weight"]
+                        key = frozenset((a, b))
+                        if key not in routes or cost < routes[key][0]:
+                            routes[key] = (cost, path[x] + [b] if path[x][0] == a else [a, *path[x][1:], b])
+        k = nx.Graph()
+        for key, (cost, route) in routes.items():
+            a, b = route[0], route[-1]
+            k.add_edge(a, b, weight=cost, route=route)
+        for a, b, data in nx.minimum_spanning_edges(k, data=True):
+            route = data["route"]
+            if frozenset((a, b)) in have:
+                continue
+            have.add(frozenset((a, b)))
+            steps = [h[u][v]["line"] for u, v in zip(route, route[1:])]
+            path = []
+            for (u, v), c in zip(zip(route, route[1:]), steps):
+                pts = list(c.path or [])
+                path += pts if c.from_id == u else pts[::-1]
+            traced = all(c.source == "picture tracing" for c in steps)
+            nets = sorted({(c.attributes or {}).get("net") for c in steps} - {None})
+            a, b = route[0], route[-1]
+            flow = ""
+            if (a in down or b in up) and not (a in up or b in down):
+                a, b, path = b, a, path[::-1]
+                flow = "drawn arrow"
+            elif (a in up or b in down) and not (a in down or b in up):
+                flow = "drawn arrow"
+            review.connections.append(ReviewConnection(
+                id=f"ac{len(review.connections)}", from_id=a, to_id=b,
+                source="picture tracing" if traced else "image model",
+                line_type="signal" if any(c.line_type == "signal" for c in steps) else "process",
+                confidence="through a flow arrow", flow=flow, path=path or None,
+                notes="" if traced else "predicted by the model, not traced on the picture - check",
+                attributes={"net": nets[0], "nets": nets} if nets else {},   # one pipe through the arrow
+            ))
 
 
 def _imply_flow(review: ReviewDiagram) -> None:
@@ -430,7 +649,7 @@ def cross_check(drawio_review: ReviewDiagram, image_review: ReviewDiagram, infer
     review = copy.deepcopy(drawio_review)
     review.image_path, review.image_size = image_review.image_path, image_review.image_size
     review.unattached_tags = image_review.unattached_tags
-    tags = assemble_tags(infer.get("ocr_tokens", []))
+    tags = assemble_tags(infer.get("ocr_tokens", []), known=[s.tag for s in drawio_review.symbols if s.tag])
     fit = align_drawio_to_image(review.drawio, tags)
     review.alignment = fit
     if fit is None:
@@ -541,6 +760,59 @@ def _picture_tees(review: ReviewDiagram) -> tuple[list, dict, dict]:
     return edges, tee_rows, sense
 
 
+def _traced_networks(review: ReviewDiagram, skip: dict) -> tuple[list, dict, dict]:
+    """Pipe networks traced on the picture (rows with a "net": the tree of lines the review
+    shows for one network, trace_lines.py; lines across a flow arrow join the networks on both
+    sides) as draw.io pipe networks, so build_model makes them DEXPI PipeTee fittings with one
+    segment per leg - not each shown line a pipe of its own. Process lines with three or more
+    items only (two items: the line is the pipe). Members are listed along the drawn tree, so
+    the tee chain follows the pipe. -> (network edges, {row id: its network's edge ids},
+    member_sense {(network, item): (+1 feeds | -1 fed | 0, basis)})."""
+    import networkx as nx
+    rows = [c for c in review.connections if c.include and c.id not in skip and c.line_type != "signal"
+            and (c.attributes or {}).get("net")]
+    parent: dict = {}
+
+    def root(x):
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    for c in rows:
+        nets = (c.attributes or {}).get("nets") or [c.attributes["net"]]
+        for n in nets[1:]:
+            parent[root(n)] = root(nets[0])
+    groups: dict = {}
+    for c in rows:
+        groups.setdefault(root(c.attributes["net"]), []).append(c)
+    edges, net_rows, sense = [], {}, {}
+    for n, legs in enumerate(groups.values()):
+        g = nx.Graph([(c.from_id, c.to_id) for c in legs])
+        if g.number_of_nodes() < 3:
+            continue
+        # along the tree: from one end of its longest path, depth first
+        start = next(iter(g.nodes))
+        far = max(nx.single_source_shortest_path_length(g, start).items(), key=lambda kv: kv[1])[0]
+        members = list(nx.dfs_preorder_nodes(g, far))
+        net = f"net-trace{n}"
+        flows = {}
+        for c in legs:
+            if c.flow in FLOW_KNOWN:  # From feeds, To is fed
+                flows.setdefault(c.from_id, 1)
+                flows.setdefault(c.to_id, -1)
+        for m in members:
+            sense[(net, m)] = (flows.get(m, 0), "arrow" if m in flows else "")
+        ids = []
+        for i, a in enumerate(members):
+            for b in members[i + 1:]:
+                e = Edge(id=f"{net}:{a}:{b}", source=a, target=b, style="pipe network")
+                edges.append(e)
+                ids.append(e.id)
+        for c in legs:
+            net_rows[c.id] = ids
+    return edges, net_rows, sense
+
+
 def _mapping_for_row(s: ReviewSymbol) -> MappingResult:
     if not s.include or s.dexpi_class == SKIP:
         return MappingResult(Category.UNMAPPED, None, "excluded by reviewer" if not s.include else s.notes or "skipped")
@@ -580,6 +852,10 @@ def to_dexpi(review: ReviewDiagram) -> tuple[ParsedDiagram, BuildResult]:
     edges = []
     tee_edges, tee_rows, member_sense = _picture_tees(review)
     edges += tee_edges
+    net_edges, net_rows, net_sense = _traced_networks(review, tee_rows)
+    edges += net_edges
+    tee_rows = {**tee_rows, **net_rows}
+    member_sense = {**member_sense, **net_sense}
     for c in review.connections:
         if not c.include or c.id in tee_rows:
             continue
@@ -651,4 +927,21 @@ def to_dexpi(review: ReviewDiagram) -> tuple[ParsedDiagram, BuildResult]:
         values, custom = (s.attributes or {}).get("dexpi"), (s.attributes or {}).get("custom")
         if obj is not None and (values or custom):
             result.spec_problems += [f"{s.tag or s.id}: {p}" for p in apply_fields(obj, values, custom)]
+            if s.dexpi_class == OFF_PAGE:  # a stream is one connector per pipe in DEXPI: each gets them
+                from pid_dexpi_aas.dexpi.build_model import pipe_twins
+                for twin in pipe_twins(obj):
+                    apply_fields(twin, values, custom)
+        if obj is not None and s.dexpi_class == OFF_PAGE and custom:
+            # a stream's fluid and temperature go onto its pipe too: DEXPI's own typed fields there
+            fluid = custom.get("FluidCode") or custom.get("Fluid")
+            temp = custom.get("OperatingTemperature")
+            for c in review.connections:
+                if s.id not in (c.from_id, c.to_id) or not c.include:
+                    continue
+                for seg in result.edge_segments.get(c.id, []):
+                    if fluid and not getattr(seg, "fluidCode", None):
+                        seg.fluidCode = str(fluid)
+                    if temp and getattr(seg, "operatingTemperature", None) is None:
+                        result.spec_problems += [f"{s.tag or s.id}: {p}"
+                                                 for p in apply_fields(seg, {"operatingTemperature": temp}, {})]
     return diagram, result

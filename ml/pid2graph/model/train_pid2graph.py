@@ -197,6 +197,37 @@ def main(rank, args):
         own = net_wo_dist.state_dict()
         # A layer whose shape changed (e.g. the relation head's output when NUM_REL_CLS
         # goes 1 -> 2 for process vs signal lines) keeps its fresh initialisation.
+        # The class head growing (7 symbol classes -> + bend, junction for DATA.LINE_POINTS)
+        # keeps its learned rows - background and the 7 symbols come first - and only the
+        # new classes start fresh.
+        n_old = state['class_embed.0.weight'].shape[0] if 'class_embed.0.weight' in state else None
+        n_new = own['class_embed.0.weight'].shape[0] if 'class_embed.0.weight' in own else None
+        if n_old and n_new and n_new > n_old:
+            for k, v in list(state.items()):
+                if k.startswith('class_embed.') and k in own and own[k].shape[1:] == v.shape[1:]:
+                    grown = own[k].detach().cpu().clone()  # the model is on the GPU, the checkpoint on the CPU
+                    grown[:v.shape[0]] = v
+                    state[k] = grown
+            # The relation head reads each item's class scores too (ADD_EMB_REL: per item
+            # [features, class scores, box]), so its input widens: the learned weights move
+            # with their inputs, the new classes' scores start with no say.
+            if config.MODEL.DECODER.ADD_EMB_REL:
+                hid = int(config.MODEL.DECODER.HIDDEN_DIM)
+                per_old, per_new = hid + n_old + 4, hid + n_new + 4
+                where = [part * per_new + o for part in (0, 1) for o in list(range(hid + n_old)) + [hid + n_new + b for b in range(4)]]
+                where += [2 * per_new + o for o in range(hid)]  # the relation token
+                where = torch.tensor(where)
+                for k, axis in (('relation_embed.layers.0.weight', 0), ('relation_embed.layers.0.bias', 0),
+                                ('relation_embed.layers.1.weight', 1)):
+                    if k in state and k in own and state[k].shape[axis] == 2 * per_old + hid:
+                        grown = own[k].detach().cpu().clone()  # the model is on the GPU, the checkpoint on the CPU
+                        if k == 'relation_embed.layers.1.weight':
+                            grown.zero_()
+                            grown[:, where] = state[k]
+                        else:
+                            grown[where] = state[k]
+                        state[k] = grown
+            print('Classes grown', n_old - 1, '->', n_new - 1, '(learned weights kept)')
         reshaped = [k for k, v in state.items() if k in own and own[k].shape != v.shape]
         state = {k: v for k, v in state.items() if k not in reshaped}
         missing_keys, unexpected_keys = net_wo_dist.load_state_dict(state, strict=False)

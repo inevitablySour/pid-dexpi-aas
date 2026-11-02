@@ -59,6 +59,8 @@ PID2GRAPH_CLASS_NAMES = [
     "tank",
     "valve",
 ]
+# Line points (DATA.LINE_POINTS models): the bends and tee/junction points of the lines.
+POINT_CLASS_NAMES = ["bend", "junction"]
 
 
 def cxcywh_to_xyxy_abs(boxes: np.ndarray, height: float, width: float) -> np.ndarray:
@@ -187,10 +189,11 @@ class NodeEdgeMeanAP(Metric):
         max_detections: int = 100,
         iou_range: Sequence[float] = (0.5, 0.95, 0.05),
         writer=None,
+        classes: Sequence[str] = tuple(PID2GRAPH_CLASS_NAMES),
     ):
         self.iou_thresholds = list(np.arange(iou_range[0], iou_range[1] + 1e-9, iou_range[2]))
         self.coco_metric = COCOMetric(
-            classes=PID2GRAPH_CLASS_NAMES,
+            classes=list(classes),
             iou_list=(0.5, 0.75),
             iou_range=iou_range,
             # Same limit as BoxAP below. COCOMetric's own default (50, 100) would silently
@@ -439,6 +442,7 @@ def build_evaluator(
         ),
         max_detections=100,
         writer=writer,
+        classes=PID2GRAPH_CLASS_NAMES + POINT_CLASS_NAMES[:int(config.MODEL.NUM_OBJ_CLS) - len(PID2GRAPH_CLASS_NAMES)],
     )
 
     evaluator = PID2GraphEvaluator(

@@ -1,2 +1,7 @@
 [browser]
 gatherUsageStats = false
+
+[server]
+# Only this computer can open the app directly; others go through the HTTPS tunnel
+# (scripts/serve_public.sh), which encrypts everything between their browser and this PC.
+address = "127.0.0.1"

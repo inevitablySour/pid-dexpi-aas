@@ -218,12 +218,68 @@ def build_package(models: list[DexpiModelInput], plant: dict, base_iri: str | No
         submodel_element=[_metadata_smc("PlantMetadata", SEM + "PlantMetadata", PLANT_FIELDS, plant)] + model_smcs,
         description=model.MultiLanguageTextType({"en": f"P&ID of {name} as DEXPI (IDTA 02012-1-0)"}))
     aas_id = f"{base}:aas"
+    submodels = [submodel]
+    hierarchy = _hierarchy(models, f"{base}:submodel:hierarchy", f"{asset_base}:plant", asset_base, name)
+    if hierarchy is not None:
+        submodels.append(hierarchy)
     shell = model.AssetAdministrationShell(
         model.AssetInformation(model.AssetKind.INSTANCE, global_asset_id=f"{asset_base}:plant"),
         aas_id, id_short=_id_short(_slug(name).replace("-", "_")) or "Plant",
-        submodel={model.ModelReference.from_referable(submodel)},
+        submodel={model.ModelReference.from_referable(sm) for sm in submodels},
         description=model.MultiLanguageTextType({"en": f"{name} (plant segment)"}))
-    return model.DictObjectStore([shell, submodel]), files, aas_id
+    return model.DictObjectStore([shell, *submodels]), files, aas_id
+
+
+HS = "https://admin-shell.io/idta/HierarchicalStructures/"
+
+
+def _sections(dexpi_xml: bytes) -> dict[str, str]:
+    """{local id: plant section} - the PlantSectionName attribute build_model writes on items
+    drawn inside a section frame (only when frames are used as plant sections)."""
+    out = {}
+    for el in ET.fromstring(dexpi_xml).iter():
+        for ga in el.iter("GenericAttribute"):
+            if ga.get("Name") == "PlantSectionName" and el.get("ID") and ga.get("Value"):
+                out.setdefault(el.get("ID"), ga.get("Value"))
+    return out
+
+
+def _hierarchy(models, sm_id: str, plant_asset: str, asset_base: str, name: str):
+    """IDTA 02011-1-1 Hierarchical Structures (ArcheType "Full"): the plant (EntryNode) has its
+    plant sections, each section its tagged items (HasPart) - across all the drawings. None
+    when no item carries a plant section."""
+    by_section: dict[str, dict[str, str]] = {}
+    for m in models:
+        secs = _sections(m.dexpi_xml)
+        for e in mapping_entries(m.dexpi_xml):
+            if e.kind == "TagMapping" and e.local_id in secs:
+                by_section.setdefault(secs[e.local_id], {})[e.tag] = f"{asset_base}:{_slug(e.tag)}"
+    if not by_section:
+        return None
+    entry_short = _id_short(_slug(name).replace("-", "_")) or "Plant"
+    ref = lambda *path: model.ModelReference(
+        (model.Key(model.KeyTypes.SUBMODEL, sm_id),) + tuple(model.Key(model.KeyTypes.ENTITY, p) for p in path), model.Entity)
+    sections, top_rels = [], []
+    for n, (sec, items) in enumerate(sorted(by_section.items()), start=1):
+        sec_short = _id_short(f"Section_{_slug(sec)}") or f"Section{n:02d}"
+        children, rels = [], []
+        for tag, asset in sorted(items.items()):
+            short = _id_short(f"Item_{_slug(tag)}")
+            children.append(model.Entity(short, model.EntityType.SELF_MANAGED_ENTITY, global_asset_id=asset,
+                                         semantic_id=_ref(HS + "Node/1/0")))
+            rels.append(model.RelationshipElement(f"HasPart_{short}", ref(entry_short, sec_short),
+                                                  ref(entry_short, sec_short, short), semantic_id=_ref(HS + "HasPart/1/0")))
+        sections.append(model.Entity(sec_short, model.EntityType.CO_MANAGED_ENTITY, statement=children + rels,
+                                     semantic_id=_ref(HS + "Node/1/0"),
+                                     description=model.MultiLanguageTextType({"en": f"Plant section {sec}"})))
+        top_rels.append(model.RelationshipElement(f"HasPart_{sec_short}", ref(entry_short), ref(entry_short, sec_short),
+                                                  semantic_id=_ref(HS + "HasPart/1/0")))
+    entry = model.Entity(entry_short, model.EntityType.SELF_MANAGED_ENTITY, global_asset_id=plant_asset,
+                         statement=sections + top_rels, semantic_id=_ref(HS + "EntryNode/1/0"))
+    return model.Submodel(
+        sm_id, id_short="HierarchicalStructures", semantic_id=_ref(HS + "1/1/Submodel"), kind=model.ModellingKind.INSTANCE,
+        submodel_element=[_prop("ArcheType", "Full", HS + "ArcheType/1/0"), entry],
+        description=model.MultiLanguageTextType({"en": f"{name}: its plant sections and their items (IDTA 02011-1-1)"}))
 
 
 _PARENT_TAGS: dict = {}

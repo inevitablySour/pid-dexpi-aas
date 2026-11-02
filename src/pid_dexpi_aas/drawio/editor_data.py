@@ -54,12 +54,17 @@ def editor_patch(review) -> dict:
             continue
         if len(tag_cell.get(s.id, [])) == 1:
             attrs["tag_cell"] = tag_cell[s.id][0]
+        if s.dexpi_class == OFF_PAGE:
+            # a stream's lines - often only drawn up to it, not attached, and joined to it here:
+            # [[line id, the end at the stream]], so the editor can set in / out on them
+            attrs["stream_lines"] = json.dumps([[e.id, "source" if e.source == s.id else "target"]
+                                                for e in diagram.edges if s.id in (e.source, e.target)
+                                                and not e.is_decorative and not e.is_dashed])
         out[s.id] = {"attrs": attrs}
     for c in review.connections:
         e = edges.get(c.id)
         auto = review.auto.get(c.id, {})
-        attrs = {"in_dexpi": "1" if c.include else "0", "notes": c.notes if c.notes != auto.get("notes") else "",
-                 "specs": _specs(c.attributes)}
+        attrs = _line_attrs(c, auto)
         if e is None:
             if c.id.startswith("net") or c.from_id not in drawn or c.to_id not in drawn or c.from_id == c.to_id:
                 continue  # pipe networks ("net..."): their member lines are the cells
@@ -86,7 +91,37 @@ def editor_patch(review) -> dict:
                                                   "startArrow": "none" if to_target else "classic"})
         out[c.id] = entry
     _absorbs(review, out)
+    _flags(review, out)
     return out
+
+
+def _flags(review, out: dict) -> None:
+    """What the editor shows beside each cell: why an item needs a look (look), how it and
+    each line were found (why), unknown flow on a pipe (flow_unknown), and - pictures - text
+    the OCR read near an item that no item claimed (ocr_near: often its missed tag)."""
+    import math
+    from pid_dexpi_aas.review import FLOW_KNOWN, item_why, line_why, look_reasons
+    loose = review.unattached_tags or []
+    for s in review.symbols:
+        a = out.get(s.id, {}).get("attrs")
+        if a is None:
+            continue
+        a["look"] = "; ".join(look_reasons(s))
+        a["why"] = item_why(s)
+        if loose and s.box:
+            size = max(s.box[2] - s.box[0], s.box[3] - s.box[1])
+            cx, cy = (s.box[0] + s.box[2]) / 2, (s.box[1] + s.box[3]) / 2
+            near = sorted((math.dist((cx, cy), ((t["box"][0] + t["box"][2]) / 2, (t["box"][1] + t["box"][3]) / 2)), t["tag"])
+                          for t in loose if t.get("box"))
+            a["ocr_near"] = json.dumps([t for d, t in near if d <= 2 * size][:4])
+    for c in review.connections:
+        a = out.get(c.id, {}).get("attrs")
+        if a is None:
+            continue
+        a["why"] = line_why(c)
+        a["flow_unknown"] = "1" if c.include and c.line_type == "process" and not c.flow else "0"
+        # the upstream end when the flow is known but not drawn (implied by arrows elsewhere)
+        a["upstream"] = c.from_id if c.flow in FLOW_KNOWN else ""
 
 
 def _absorbs(review, out: dict) -> None:
@@ -107,7 +142,22 @@ def _item_attrs(s, auto: dict) -> dict:
         "notes": s.notes if s.notes != auto.get("notes") else "",
         "specs": _specs(s.attributes),
         "section": s.section,
+        "checked": "1" if getattr(s, "checked", False) else "0",
     }
+
+
+def _line_attrs(c, auto: dict) -> dict:
+    """A line's details, and what the editor's guided check needs: checked, low confidence
+    (to go through one by one), the confidence shown, and a probability to order them by."""
+    from pid_dexpi_aas.review import low_confidence
+    try:
+        prob = float(c.confidence)
+    except (TypeError, ValueError):
+        prob = None
+    return {"in_dexpi": "1" if c.include else "0", "notes": c.notes if c.notes != auto.get("notes") else "",
+            "specs": _specs(c.attributes), "checked": "1" if c.checked else "0",
+            "low": "1" if low_confidence(c) else "0", "conf": c.confidence or "",
+            "prob": "" if prob is None else f"{prob:.2f}"}
 
 
 BOX_STYLE = ("rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeWidth=3;fontStyle=1;"
@@ -127,7 +177,9 @@ def _picture_patch(review) -> dict:
         boxes.add(s.id)
         colour = _COLOURS[_kind(s)]
         x1, y1, x2, y2 = s.box
-        out[s.id] = {"attrs": _item_attrs(s, review.auto.get(s.id, {})),
+        from pid_dexpi_aas.review import is_flow_arrow
+        # a flow arrow: hidden in the editor unless asked for (it only sets its pipe's flow)
+        out[s.id] = {"attrs": {**_item_attrs(s, review.auto.get(s.id, {})), "arrow": "1" if is_flow_arrow(s) else "0"},
                      "style": {"strokeColor": colour, "fontColor": colour, "strokeWidth": width,
                                "dashed": "1" if _kind(s) == "left out" else "0"},
                      "geometry": [x1, y1, x2 - x1, y2 - y1],
@@ -142,15 +194,12 @@ def _picture_patch(review) -> dict:
             # a branch drawn onto a line: the editor shows the branch as drawn (attached to the
             # line); its second row (the other side of the tee) has no line of its own there
             if c.id == tee.get("branch"):
-                out[c.id] = {"attrs": {"in_dexpi": "1" if c.include else "0",
-                                       "notes": c.notes if c.notes != auto.get("notes") else "",
-                                       "specs": _specs(c.attributes)},
+                out[c.id] = {"attrs": _line_attrs(c, auto),
                              "style": {"dashed": "1" if c.line_type == "signal" else "0", "strokeWidth": width,
                                        "strokeColor": "#c92a2a" if not c.include else "#2456c4"
                                        if c.line_type == "signal" else "#d9480f"}}
             continue
-        out[c.id] = {"attrs": {"in_dexpi": "1" if c.include else "0",
-                               "notes": c.notes if c.notes != auto.get("notes") else "", "specs": _specs(c.attributes)},
+        out[c.id] = {"attrs": _line_attrs(c, auto),
                      "style": {"dashed": "1" if c.line_type == "signal" else "0",
                                "endArrow": "classic" if c.flow in FLOW_KNOWN or c.flow == "both ways" else "none",
                                "startArrow": "classic" if c.flow == "both ways" else "none",
@@ -160,6 +209,7 @@ def _picture_patch(review) -> dict:
                      "create": {"edge": True, "source": c.from_id, "target": c.to_id, "parent": "items",
                                 "style": "edgeStyle=none;rounded=0;html=1;strokeWidth=3;"}}
     _absorbs(review, out)
+    _flags(review, out)
     return out
 
 

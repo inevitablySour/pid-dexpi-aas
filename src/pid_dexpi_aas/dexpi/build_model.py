@@ -330,6 +330,12 @@ _OFF_PAGE = (piping.FlowInPipeOffPageConnector, piping.FlowOutPipeOffPageConnect
 _PIPE_TWIN: dict[tuple[int, bool, str], object] = {}
 
 
+def pipe_twins(obj) -> list:
+    """The connectors made for obj on its pipes (_as_pipe_end: one per pipe) - what the DEXPI
+    file holds for a stream; its specifications belong on them too."""
+    return [t for (oid, _, _), t in _PIPE_TWIN.items() if oid == id(obj) and t is not obj]
+
+
 def _as_pipe_end(obj, as_source: bool, ctx: str = ""):
     """draw.io's offPageConnector shape maps to a SIGNAL off-page connector, but the team
     also uses it on process pipes (V102/V204 inlets). A pipe can only end on a PIPE
@@ -554,6 +560,21 @@ def _build_segments(build_result, links, system) -> None:
         for o in (ln.a, ln.b):
             adj.setdefault(id(o), []).append(i)
 
+    # An off-page connector's FlowIn/FlowOut class is decided here, from the flow. The class
+    # change makes a new object: make it ONCE per connector (a stream on two pipe pieces
+    # was exported twice) and let the drawing's item point at it (its specifications - a
+    # stream's pressure, temperature ... - were written to the old one and never exported).
+    swapped: dict[int, object] = {}
+
+    def as_class(o, cls):
+        new = swapped.get(id(o)) or _with_class(o, cls)
+        if new is not o:
+            swapped[id(o)] = new
+            for k, v in list(build_result.shape_objects.items()):
+                if v is o:
+                    build_result.shape_objects[k] = new
+        return new
+
     def is_component(o) -> bool:
         return isinstance(o, piping.PipingNetworkSegmentItem) and not isinstance(o, _OFF_PAGE)
 
@@ -607,9 +628,9 @@ def _build_segments(build_result, links, system) -> None:
         # An off-page connector's class follows the flow: where it enters the sheet it is a
         # FlowIn (the source), where it leaves a FlowOut (the target).
         if isinstance(end, _OFF_PAGE):
-            end = _with_class(end, piping.FlowOutPipeOffPageConnector)
+            end = as_class(end, piping.FlowOutPipeOffPageConnector)
         if isinstance(start, _OFF_PAGE):
-            start = _with_class(start, piping.FlowInPipeOffPageConnector)
+            start = as_class(start, piping.FlowInPipeOffPageConnector)
         bases = {links[i].basis for i in seg_links if links[i].dir}
         basis = "unknown - drawing order" if not score else "arrow" if bases == {"arrow"} else "implied from neighbouring arrows"
         plans.append([list(items), start, end, seg_links, basis])

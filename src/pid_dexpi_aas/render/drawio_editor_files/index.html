@@ -22,6 +22,13 @@
   #panel .hint { color: #5f6b7a; font-size: 12px; margin-top: 3px; }
   #panel details { margin-top: 14px; border-top: 1px solid #e3e6ea; padding-top: 8px; }
   #panel summary { cursor: pointer; font-weight: 600; }
+  #panel .guide { border: 1px solid #c8ced6; border-radius: 6px; padding: 8px 10px; margin-bottom: 14px; background: #fff; }
+  #panel .guide b { font-size: 13px; }
+  #panel .guide .prog { color: #5f6b7a; font-size: 12px; margin: 2px 0 6px; }
+  #panel .act { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 10px; }
+  #panel .act button { margin-top: 0 !important; }
+  #panel button.ok { background: #e6f4ea !important; border-color: #6cbf84 !important; font-weight: 600; }
+  #panel button.no { background: #fdecec !important; border-color: #e08b8b !important; }
   #panel .foot { margin-top: 18px; color: #5f6b7a; font-size: 12px; border-top: 1px solid #e3e6ea; padding-top: 10px; }
 </style>
 </head>
@@ -37,7 +44,58 @@ const ed = document.getElementById("ed");
 const panel = document.getElementById("panel");
 const toApp = (type, extra) => window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type }, extra || {}), "*");
 const toEditor = (msg) => ed.contentWindow && ed.contentWindow.postMessage(JSON.stringify(msg), "*");
-let args = null, ready = false, shown = null, saved = null;
+let args = null, ready = false, shown = null, saved = null, pendingSync = null;
+// every drawing this editor sent to the app (the last few): the app answers each save with a
+// rerun that hands one of them back - sometimes an older one (edits made meanwhile), or
+// wrapped in a file header (draw.io mode). Reloading it would reset the view and undo those
+// edits, so the editor's own drawings are never loaded back.
+const sentXml = [];
+function ours(xml) {
+  // (an empty save would be "in" every drawing: only real drawings count)
+  return !!xml && sentXml.some((x) => x && x.length > 200 && (xml === x || xml.includes(x)));
+}
+let keepView = null;  // the zoom and position to put back after a (real) reload
+// Saving on its own: a few seconds after a change (not while typing a label), so the app -
+// the checks, the DEXPI file, the exports - always has the drawing as it is. Changes the
+// app itself sends (patches) are not edits and never trigger it.
+let applying = false, dirty = false, autosaveTimer = null, autosave = true, lastFocus = "";
+function scheduleSave() {
+  if (applying || !autosave) return;
+  dirty = true;
+  if (autosaveTimer) clearTimeout(autosaveTimer);
+  autosaveTimer = setTimeout(function tick() {
+    if (!dirty) return;
+    if (graph.isEditing() || (ui.editor && ui.editor.graph.isMouseDown)) { autosaveTimer = setTimeout(tick, 1500); return; }
+    autosaveTimer = null;
+    ui.actions.get("save").funct();
+  }, 3000);
+}
+// the app asks for a cell to be shown (a problem found by its build check): select it, once
+function focusRequest() {
+  const f = args.focus || "";
+  if (!f || f === lastFocus) return;
+  lastFocus = f;
+  const cell = graph.getModel().getCell(f.split("|")[0]);
+  if (cell) { if (guide) { guide = null; graph.refresh(); } focusCell(cell); render(); }
+}
+// The spec sheet (uploaded in the app): Save, and the app puts its values on these items
+// Full screen: the whole editor - the drawing and this panel - fills the screen (Esc leaves)
+function fullScreen() {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen().catch(() => {});
+}
+document.addEventListener("fullscreenchange", () => {
+  if (graph) setTimeout(() => {
+    // draw.io reopens its styling panel when there is room for it: keep it closed (see trim)
+    if (ui.isFormatPanelVisible && ui.isFormatPanelVisible()) ui.toggleFormatPanel(false);
+    graph.sizeDidChange && graph.sizeDidChange();
+    render();
+  }, 150);
+});
+function syncSpecs(ids) {
+  pendingSync = ids;
+  ui.actions.get("save").funct();
+}
 let ui = null, graph = null, W = null, lastPatch = null, schema = null;
 
 fetch("schema.json").then((r) => r.json()).then((s) => { schema = s; render(); }).catch(() => { schema = {}; });
@@ -55,16 +113,30 @@ window.addEventListener("message", (e) => {
       toEditor({ action: "load", xml: shown, title: args.title || "" });
       hookEditor();
     } else if (m.event === "load") {
-      if (graph) { applyPatch(true); render(); }
+      if (graph && keepView) {
+        graph.view.scaleAndTranslate(keepView.scale, keepView.x, keepView.y);
+        keepView = null;
+      } else if (graph) {
+        // a new drawing: the whole of it in view (an editor opened fresh started on an empty corner)
+        setTimeout(() => { const fit = ui && ui.actions.get("fitWindow"); if (fit) fit.funct(); else graph.fit(); }, 150);
+      }
+      if (graph) { applying = true; try { applyPatch(true); } finally { applying = false; } render(); setTimeout(marks, 200); }
       setTimeout(closeLayers, 300);
     } else if (m.event === "save") {
       saved = m.xml;
+      sentXml.push(m.xml);
+      if (sentXml.length > 20) sentXml.shift();
       toEditor({ action: "status", message: "Sent to the app", modified: false });
       // ids: the rows this drawing was showing - only those can have been deleted here;
       // routes: every line as draw.io draws it (its right angles are worked out while drawing,
       // not stored in the file) - the app's map follows the same path
+      // sync: "all" or [ids] - the app then fills these items' specifications from the spec sheet
       toApp("streamlit:setComponentValue", { value: { xml: m.xml, t: Date.now(), ids: Object.keys(lastPatch || {}),
-                                                      routes: drawnRoutes() }, dataType: "json" });
+                                                      routes: drawnRoutes(), sync: pendingSync }, dataType: "json" });
+      pendingSync = null;
+      dirty = false;
+      if (autosaveTimer) { clearTimeout(autosaveTimer); autosaveTimer = null; }
+      render();
     }
     return;
   }
@@ -75,14 +147,17 @@ window.addEventListener("message", (e) => {
   if (first) {
     ed.src = "webapp/index.html?" + args.params;
     toApp("streamlit:setFrameHeight", { height: args.height });
-  } else if (ready && args.xml !== shown && args.xml !== saved) {
+  } else if (ready && args.xml !== shown && args.xml !== saved && !ours(args.xml)) {
     shown = args.xml || "";
     lastPatch = null;
+    if (graph) keepView = { scale: graph.view.scale, x: graph.view.translate.x, y: graph.view.translate.y };
     toEditor({ action: "load", xml: shown, title: args.title || "" });
   } else if (graph) {
-    applyPatch(false);
+    applying = true;
+    try { applyPatch(false); } finally { applying = false; }
     render();
   }
+  if (graph) focusRequest();
 });
 toApp("streamlit:componentReady", { apiVersion: 1 });
 
@@ -92,9 +167,23 @@ function hookEditor() {
   if (!w.Draw || !w.Draw.loadPlugin) { setTimeout(hookEditor, 200); return; }
   w.Draw.loadPlugin((u) => {
     ui = u; graph = u.editor.graph; W = w;
+    // draw.io remembers each browser's last library choice and ignores our default once one is
+    // saved (a browser that used the editor before General was added kept only P&ID): reset it
+    const libs = "general;pid";
+    if (w.mxSettings && w.mxSettings.getLibraries && w.mxSettings.getLibraries() !== libs) {
+      w.mxSettings.setLibraries(libs);
+      w.mxSettings.save();
+      u.sidebar.showEntries(libs);
+    }
     trim();
+    hookGroups();
+    hookTagLabels();
+    const fs = ui.actions.get("fullscreen");   // draw.io's own full-screen button: the whole editor
+    if (fs) fs.funct = fullScreen;
+    hookNewShapes();   // a library symbol dropped on a drawing or on a picture: typed at once
+    hookGuide();
     graph.getSelectionModel().addListener(W.mxEvent.CHANGE, () => render());
-    graph.getModel().addListener(W.mxEvent.CHANGE, () => render());
+    graph.getModel().addListener(W.mxEvent.CHANGE, () => { render(); scheduleSave(); setTimeout(marks, 0); });
     applyPatch(true);
     render();
     setTimeout(closeLayers, 300);
@@ -102,10 +191,11 @@ function hookEditor() {
 }
 
 // What a P&ID needs from draw.io, and nothing that would break the conversion: no other
-// files or pages, no raw XML / style / data editing, no groups, images or links.
+// files or pages, no raw XML / style / data editing, images or links. Groups (Ctrl+G) are
+// allowed: a group is one item (several shapes drawing one piece of equipment).
 function trim() {
   const doc = ed.contentDocument;
-  for (const name of ["editDiagram", "editStyle", "editData", "group", "ungroup", "insertImage", "insertLink",
+  for (const name of ["editDiagram", "editStyle", "editData", "insertImage", "insertLink",
        "editLink", "editTooltip", "pageSetup", "print", "plugins", "tags", "insertTemplate", "fromText",
        "formatSql", "import", "editConnectionPoints", "insertPage", "duplicatePage", "removePage",
        "fromTemplate", "insertMermaid", "insertPlantUml", "insertLayout", "outline", "editShape",
@@ -152,10 +242,11 @@ function trim() {
     sb.createEdgeTemplateEntry(signal, 120, 0, "", "Signal line (dashed)"),
   ]);
   const pal = sb.palettes && sb.palettes["dexpi"];
-  // no scratchpad (a personal shape store) and no other libraries ("More Shapes")
+  // no scratchpad (a personal shape store) and no other libraries ("More Shapes"); of draw.io's
+  // general shapes only "General" (Misc and Advanced: images, links, containers, ...)
   const strip = () => {
     sb.container.querySelectorAll(".geTitle").forEach((t) => {
-      if (t.textContent.trim() === "Scratchpad") {
+      if (["Scratchpad", "Misc", "Advanced"].includes(t.textContent.trim())) {
         t.style.display = "none";
         if (t.nextElementSibling) t.nextElementSibling.style.display = "none";
       }
@@ -165,6 +256,7 @@ function trim() {
     });
   };
   strip(); setTimeout(strip, 500);
+  new W.MutationObserver(strip).observe(sb.container, { childList: true, subtree: true });  // draw.io re-adds the scratchpad
   if (pal && pal[0] && pal[0].parentNode) {
     const parent = pal[0].parentNode;
     const firstPalette = [...parent.children].find((n) => n.classList.contains("geTitle"));
@@ -207,7 +299,9 @@ const val = (cell, name) => (cell && cell.value && typeof cell.value === "object
 const labelOf = (cell) => {
   if (!cell) return "";
   const v = cell.value && typeof cell.value === "object" ? cell.value.getAttribute("label") : cell.value;
-  const t = document.createElement("div"); t.innerHTML = v || ""; return t.textContent.trim();
+  // a library instrument's label is a table - "TI" over "101": read as "TI 101"
+  const t = document.createElement("div"); t.innerHTML = (v || "").replace(/</g, " <");
+  return t.textContent.replace(/\s+/g, " ").trim();
 };
 // read from the cell's own style (the view's computed style lags behind a change)
 const styleOf = (cell, key) => {
@@ -224,6 +318,198 @@ function setData(cell, fields) {
     }
   } finally { m.endUpdate(); }
 }
+// The tag shown on the drawing, wherever that kind of item shows it:
+//  - the P&ID library's instruments label themselves with a table, the letters over the
+//    number (TI over ##): a new tag fills those cells (TI over 101), the layout stays;
+//  - a box, a text, or a symbol whose label is drawn outside it: its label is the tag;
+//  - any other library symbol: its label sits ON the symbol (empty, or part of the symbol -
+//    the M of a motor, HEPA of a filter): the tag goes in a text of its own just above it,
+//    the way tags are read (a text next to its item), and the symbol is left as drawn.
+const TABLE = /<td[^>]*>[\s\S]*?<\/td>[\s\S]*?<td[^>]*>[\s\S]*?<\/td>/i;
+const rawLabel = (cell) => cell.value && typeof cell.value === "object" ? cell.value.getAttribute("label") : cell.value;
+const labelIsTag = (cell) => {
+  const st = graph.getModel().getStyle(cell) || "";
+  return !/(?:^|;)shape=mxgraph\./.test(st) || /verticalLabelPosition=(?:top|bottom)|labelPosition=(?:left|right)/.test(st);
+};
+// where an item's tag is shown: its tag text, its own label, its group's main shape - or null
+function tagShownOn(cell) {
+  const m = graph.getModel();
+  const tc = val(cell, "tag_cell") && m.getCell(val(cell, "tag_cell"));
+  if (tc) return tc;
+  const shape = isGroup(cell) ? mainPart(cell) : cell;
+  if (shape && TABLE.test(rawLabel(shape) || "")) return shape;
+  if (shape && shape !== cell && labelIsTag(shape) && labelOf(shape)) return shape;
+  return !isGroup(cell) && labelIsTag(cell) ? cell : null;  // a group's own label would sit over its parts
+}
+function showTag(cell, text) {
+  const m = graph.getModel();
+  const on = tagShownOn(cell);
+  if (on && TABLE.test(rawLabel(on) || "")) {
+    const esc = (x) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const t = /^([A-Za-z]+)[\s\-_/]*(.*)$/.exec(text.trim());
+    const parts = t ? [t[1], t[2]] : [text.trim(), ""];
+    let k = 0;
+    setLabel(on, rawLabel(on).replace(/(<td[^>]*>)([\s\S]*?)(<\/td>)/gi, (all, a, b, c) => k < 2 ? a + esc(parts[k++]) + c : all));
+  } else if (on) {
+    setLabel(on, text);
+  } else if (text && cell.geometry) {  // a tag text of its own, just above the symbol
+    const g = cell.geometry, w = Math.max(60, text.length * 8);
+    const t = graph.insertVertex(m.getParent(cell), null, text, g.x + g.width / 2 - w / 2, g.y - 22, w, 20,
+      "text;html=1;align=center;verticalAlign=middle;");
+    setData(cell, { tag_cell: t.id });
+  }
+}
+// A group (Ctrl+G, or "Group into one item"): one item drawn with several shapes. Its DEXPI
+// details live on the group; its main shape - the biggest symbol in it - says what it is
+// and shows its tag.
+const isGroup = (cell) => /(?:^|;)group(?:;|$)/.test(graph.getModel().getStyle(cell) || "");
+function mainPart(group) {
+  const m = graph.getModel();
+  const parts = [];
+  const walk = (c) => { for (let i = 0; i < m.getChildCount(c); i++) { const k = m.getChildAt(c, i); if (m.isVertex(k)) { if (isGroup(k)) walk(k); else parts.push(k); } } };
+  walk(group);
+  const area = (c) => c.geometry ? c.geometry.width * c.geometry.height : 0;
+  const shapes = parts.filter((c) => !/^text(;|$)/.test(m.getStyle(c) || ""));
+  // the part that IS the item - not the biggest: a plain circle drawn round an instrument is
+  // decoration. First one with details set by a person, then a P&ID library symbol or an
+  // instrument's tag table, then size.
+  const rank = (c) => [
+    val(c, "dexpi_auto") === "0" || val(c, "tag_auto") === "0" ? 1 : 0,
+    classOf(m.getStyle(c)) ? 1 : 0,
+    TABLE.test(rawLabel(c) || "") ? 1 : 0,
+    area(c)];
+  const better = (a, b) => { const p = rank(a), q = rank(b); for (let i = 0; i < p.length; i++) if (p[i] !== q[i]) return q[i] - p[i]; return 0; };
+  return (shapes.length ? shapes : parts).sort(better)[0] || null;
+}
+const DETAILS = ["dexpi_class", "dexpi_auto", "auto_class", "tag", "tag_auto", "tag_cell", "in_dexpi", "notes", "specs", "section"];
+const moveDetails = (from, to) => {
+  const f = {};
+  for (const k of DETAILS) if (val(from, k) != null && val(to, k) == null) f[k] = val(from, k);
+  if (Object.keys(f).length) setData(to, f);
+};
+// A shape dragged in from draw.io's libraries (or pasted) is typed the moment it lands: its
+// DEXPI class from the shape, by the converter's own rules (mapping.shape_rules, mirrored
+// here as map_shape(token, "", style)). Save refines it from the tag (a PSV tag: a safety
+// valve; TIC: a controller). undefined: not a library shape - worked out on Save.
+function classOf(style) {
+  const R = schema && schema.shapes;
+  const m = /(?:^|;)shape=([^;]+)/.exec(style || "");
+  if (!R || !m) return undefined;
+  const tok = m[1];
+  if (tok in R.exact) return R.exact[tok];
+  const body = () => {
+    const vt = /(?:^|;)valveType=([A-Za-z]+)/.exec(style || "");
+    return (vt && R.valve_types[vt[1]]) || R.valve_default;
+  };
+  if (tok === R.generic_valve) return body();
+  const low = tok.toLowerCase();
+  const rest = low.startsWith("mxgraph.pid2") ? low.slice(12) : low.startsWith("mxgraph.pid.") ? low.slice(12) : null;
+  if (rest == null) return undefined;
+  const dot = rest.indexOf("."), fam = dot < 0 ? rest : rest.slice(0, dot), name = dot < 0 ? "" : rest.slice(dot + 1);
+  const word = (words) => { const w = words.find(([k]) => name.includes(k)); return w ? w[1] : null; };
+  if (fam.startsWith("valves") || fam.startsWith("valve")) return word(R.valve_words) || body();
+  if (R.instrument_families.some((f) => fam.startsWith(f))) return R.instrument_class;
+  if (R.piping_families.includes(fam)) return word(R.piping_words) || R.piping_default;
+  if (fam === "apparatus_elements") return null;
+  for (const [fams, def, words] of R.equipment_families) {
+    if (fams.includes(fam) || fams.some((f) => fam.startsWith(f))) return word(words) || def;
+  }
+  if (name.includes("column")) return "ProcessColumn";
+  return undefined;
+}
+function typeNew(cell) {
+  const m = graph.getModel();
+  if (!m.isVertex(cell) || val(cell, "dexpi_class") != null || isGroup(cell)) return;
+  const cls = classOf(m.getStyle(cell));
+  if (cls === undefined) return;
+  setData(cell, { dexpi_class: cls || schema.skip, auto_class: cls || schema.skip, dexpi_auto: "1",
+                  in_dexpi: cls ? "1" : "0" });
+}
+function hookNewShapes() {
+  graph.addListener(W.mxEvent.CELLS_ADDED, (sender, evt) => {
+    const m = graph.getModel();
+    const walk = (c) => { typeNew(c); for (let i = 0; i < m.getChildCount(c); i++) walk(m.getChildAt(c, i)); };
+    for (const c of evt.getProperty("cells") || []) walk(c);
+  });
+}
+window.classOf = classOf;  // checked against map_shape by the tests
+
+// A tag label: a text of its own next to an item, linked to its tag (the item's tag_cell).
+// The tag typed in the panel shows in it; editing the text on the drawing changes the tag;
+// it moves with its item (and on its own), and goes when the item is deleted.
+function tagLabelOf(cell) {
+  const tc = val(cell, "tag_cell") && graph.getModel().getCell(val(cell, "tag_cell"));
+  return tc && tc !== cell ? tc : null;
+}
+function itemsWithLabel(text) {
+  const m = graph.getModel();
+  return Object.values(m.cells).filter((c) => m.isVertex(c) && val(c, "tag_cell") === text.id && c !== text);
+}
+function addTagLabel(cell) {
+  const m = graph.getModel(), g = cell.geometry;
+  if (!g || tagLabelOf(cell)) return;
+  const text = val(cell, "tag") || labelOf(tagShownOn(cell)) || "TAG";
+  m.beginUpdate();
+  try {
+    const w = Math.max(60, text.length * 8);
+    const t = graph.insertVertex(m.getParent(cell), null, text, g.x + g.width + 6, g.y + g.height / 2 - 10, w, 20,
+      "text;html=1;align=left;verticalAlign=middle;");
+    // the tag now lives in the label: a box's or an outside label would show it twice
+    const own = tagShownOn(cell);
+    if (own === cell && !TABLE.test(rawLabel(cell) || "")) setLabel(cell, "");
+    setData(cell, { tag_cell: t.id, tag: text, tag_auto: "0" });
+    graph.setSelectionCell(t);
+  } finally { m.endUpdate(); }
+}
+function hookTagLabels() {
+  const m = graph.getModel();
+  m.addListener(W.mxEvent.CHANGE, (sender, evt) => {   // the text edited on the drawing: the tag
+    for (const ch of evt.getProperty("edit").changes || []) {
+      if (!(ch instanceof W.mxValueChange) || !ch.cell) continue;
+      const text = labelOf(ch.cell);
+      for (const item of itemsWithLabel(ch.cell)) {
+        if (text && val(item, "tag") !== text) setData(item, { tag: text, tag_auto: "0" });
+      }
+    }
+  });
+  graph.addListener(W.mxEvent.CELLS_MOVED, (sender, evt) => {   // moved with its item
+    const cells = evt.getProperty("cells") || [], dx = evt.getProperty("dx"), dy = evt.getProperty("dy");
+    const labels = cells.map(tagLabelOf).filter((t) => t && !cells.includes(t));
+    if (labels.length && (dx || dy)) graph.moveCells(labels, dx, dy);
+  });
+  const remove = graph.removeCells;
+  graph.removeCells = function (cells, includeEdges) {   // and deleted with it
+    cells = cells || this.getDeletableCells(this.getSelectionCells());
+    const labels = cells.map(tagLabelOf).filter((t) => t && !cells.includes(t));
+    return remove.call(this, labels.length ? cells.concat(labels) : cells, includeEdges);
+  };
+}
+
+function hookGroups() {
+  const group = graph.groupCells, ungroup = graph.ungroupCells;
+  graph.groupCells = function (g, border, cells) {
+    const m = this.getModel();
+    m.beginUpdate();
+    try {
+      const made = group.apply(this, arguments);
+      const main = made && mainPart(made);
+      if (main) moveDetails(main, made);
+      return made;
+    } finally { m.endUpdate(); }
+  };
+  graph.ungroupCells = function (cells) {
+    const m = this.getModel();
+    m.beginUpdate();
+    try {
+      for (const g of cells || this.getSelectionCells()) {
+        const main = isGroup(g) && mainPart(g);
+        if (main) moveDetails(g, main);
+      }
+      return ungroup.apply(this, arguments);
+    } finally { m.endUpdate(); }
+  };
+}
+
 function setLabel(cell, text) {
   if (cell.value && typeof cell.value === "object") graph.setAttributeForCell(cell, "label", text);
   else graph.getModel().setValue(cell, text);
@@ -293,7 +579,8 @@ function applyPatch(full) {
           if (keep && o && !(goneId in patch)) absorb(keep, o);
         }
       }
-      const gone = Object.keys(prev).filter((id) => !(id in patch)).map((id) => m.getCell(id)).filter(Boolean);
+      const gone = Object.keys(prev).filter((id) => !(id in patch)).map((id) => m.getCell(id))
+        .filter((c) => c && !m.isVertex(m.getParent(c)));  // a shape now inside a group: part of that item
       const lines = gone.filter((c) => m.isEdge(c)), items = gone.filter((c) => !m.isEdge(c));
       if (lines.length) graph.removeCells(lines, false);
       if (items.length) graph.removeCells(items, false);
@@ -301,6 +588,331 @@ function applyPatch(full) {
   } finally { m.endUpdate(); }
   if (full && ui.editor.undoManager) ui.editor.undoManager.clear();
   lastPatch = patch;
+}
+
+// ------------------------------------------------------------- guided check ---
+// For whoever checks a drawing or a picture's result: step 1 goes through every item one by
+// one with the lines hidden (confirm, retype, retag, remove; add missed ones); step 2 goes
+// through the connections - first deciding how to start (check the model's, keep only the
+// sure ones, or none and draw them), then each low-confidence line one by one. A confirmed
+// item or line is "checked" (saved with the review); one a person adds is checked already.
+let guide = null;   // { step: 1 | 2, start: null | "check" }
+// The picture model's flow arrows are not items: they only tell which way their pipe flows
+// (review.is_flow_arrow). Hidden - with the lines to them - unless asked for, to give one
+// read wrongly (a valve taken for an arrow) its real type.
+let showArrows = false;
+const isArrow = (c) => val(c, "arrow") === "1";
+function arrowHidden(c) {
+  if (showArrows || !c) return false;
+  const m = graph.getModel();
+  if (m.isEdge(c)) return isArrow(m.getTerminal(c, true)) || isArrow(m.getTerminal(c, false));
+  return isArrow(c);
+}
+function arrowSwitch() {
+  const n = Object.values(graph.getModel().cells).filter(isArrow).length;
+  if (!n) return null;
+  const box = el("input", { type: "checkbox", checked: showArrows, onchange: (e) => {
+    showArrows = e.target.checked; graph.clearSelection(); graph.refresh(); marks(); render(); } });
+  return el("div", {}, el("label", { cls: "check" }, box, `Show the model's flow arrows (${n})`),
+    el("div", { cls: "hint" }, "They are not items: each only tells which way its pipe flows (check that on the " +
+      "lines). Show them to fix one read wrongly - give it its real type."));
+}
+let armed = null;   // a bulk button waiting for its second click
+const isChecked = (c) => val(c, "checked") === "1";
+const SVG = (body, col) => "data:image/svg+xml;utf8," + encodeURIComponent(
+  `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><circle cx="8" cy="8" r="7.5" fill="${col}"/>${body}</svg>`);
+const MARK_OK = SVG('<path d="M4 8.5l2.5 2.5L12 5.5" stroke="#fff" stroke-width="2" fill="none"/>', "#2f9e44");
+const MARK_ASK = SVG('<text x="8" y="12" font-size="11" font-family="sans-serif" font-weight="bold" fill="#fff" text-anchor="middle">?</text>', "#e8590c");
+
+function checkItems() {
+  const m = graph.getModel(), out = [];
+  const walk = (c) => {
+    for (let i = 0; i < m.getChildCount(c); i++) {
+      const k = m.getChildAt(c, i);
+      if (m.isVertex(k) && val(k, "dexpi_class") != null && !arrowHidden(k)) out.push(k);
+      else if (!m.isVertex(k) && !m.isEdge(k)) walk(k);   // a layer
+    }
+  };
+  walk(m.getRoot());
+  // reading order: rows (about an item's height) top to bottom, left to right in a row
+  const g = (c) => c.geometry || { x: 0, y: 0, width: 0, height: 0 };
+  const hs = out.map((c) => g(c).height).sort((a, b) => a - b);
+  const band = Math.max(20, (hs[hs.length >> 1] || 40) * 1.5);
+  // the ones needing a look first (val "look": low confidence, no tag, ...), then reading order
+  const key = (c) => [val(c, "look") ? 0 : 1, Math.floor((g(c).y + g(c).height / 2) / band), g(c).x + g(c).width / 2];
+  return out.sort((a, b) => { const p = key(a), q = key(b); return p[0] - q[0] || p[1] - q[1] || p[2] - q[2]; });
+}
+function checkLines() {
+  const m = graph.getModel();
+  const all = Object.values(m.cells).filter((c) => m.isEdge(c) && m.getParent(c) && !m.isVertex(m.getParent(c)) && !arrowHidden(c));
+  const prob = (c) => { const p = parseFloat(val(c, "prob")); return isNaN(p) ? 0.5 : p; };
+  const low = all.filter((c) => val(c, "low") === "1").sort((a, b) => prob(a) - prob(b));
+  const sure = all.filter((c) => val(c, "low") !== "1");
+  return { all, low, sure };
+}
+function focusCell(cell) {
+  if (!cell) return;
+  const g = cell.geometry, view = graph.view;
+  if (g && graph.getModel().isVertex(cell)) {  // big enough to read: ~120 px on screen
+    const want = Math.max(0.4, Math.min(2.5, 120 / Math.max(g.width, g.height, 1)));
+    if (Math.abs(view.scale - want) / want > 0.35) graph.zoomTo(want);
+  }
+  graph.setSelectionCell(cell);
+  graph.scrollCellToVisible(cell, true);
+}
+function guideNext(list, from) {
+  const open = list.filter((c) => !isChecked(c));
+  if (!open.length) return null;
+  const i = from ? list.indexOf(from) : -1;
+  return list.slice(i + 1).find((c) => !isChecked(c)) || open[0];
+}
+function setStep(step) {
+  guide = { step, start: guide ? guide.start : null };
+  armed = null;
+  graph.clearSelection();
+  graph.refresh();
+  marks();
+  render();
+}
+function confirmCurrent() {
+  const cur = graph.getSelectionCell();
+  if (!guide || !cur) return;
+  const list = guide.step === 1 ? checkItems() : queue();
+  setData(cur, { checked: "1" });
+  const nx = guideNext(list, cur);
+  if (nx) focusCell(nx); else { graph.clearSelection(); render(); }
+}
+function removeCurrent() {
+  const cur = graph.getSelectionCell();
+  if (!guide || !cur) return;
+  const list = guide.step === 1 ? checkItems() : queue();
+  const nx = guideNext(list.filter((c) => c !== cur), list[list.indexOf(cur) - 1] || null);
+  graph.removeCells([cur], true);
+  if (nx) focusCell(nx); else render();
+}
+function stepBy(d) {
+  const list = guide.step === 1 ? checkItems() : queue();
+  const i = list.indexOf(graph.getSelectionCell());
+  const nx = list[(i + d + list.length) % list.length];
+  if (nx) focusCell(nx);
+}
+// step 2's queue: the low-confidence lines not checked yet, least likely first; after them,
+// the sure ones if the checker asked to go through those too
+function queue() {
+  const { low, sure } = checkLines();
+  return guide && guide.sure ? [...low, ...sure] : low;
+}
+
+// view only (never saved): step 1 hides the lines; step 2 fades all but the current line;
+// marks: a green tick on what is checked, an orange ? on the lines still to check
+function hookGuide() {
+  const vis = graph.isCellVisible;
+  graph.isCellVisible = function (c) {
+    return !(guide && guide.step === 1 && this.getModel().isEdge(c)) && !arrowHidden(c) && vis.apply(this, arguments);
+  };
+  graph.addListener(W.mxEvent.CELLS_ADDED, (sender, evt) => {   // added by a person: checked
+    for (const c of evt.getProperty("cells") || []) {
+      if ((graph.getModel().isEdge(c) || val(c, "dexpi_class") != null || !/^text(;|$)/.test(graph.getModel().getStyle(c) || ""))
+          && val(c, "checked") == null) setData(c, { checked: "1" });
+    }
+  });
+  graph.getModel().addListener(W.mxEvent.CHANGE, () => { if (guide) setTimeout(marks, 0); });
+  graph.getSelectionModel().addListener(W.mxEvent.CHANGE, () => { if (guide) setTimeout(dim, 0); });
+  const keys = (e) => {
+    if (!guide || graph.isEditing()) return;
+    // typing in a field - not draw.io's hidden keyboard catcher (mxTypingShim), which has the focus
+    const t = e.target, typing = t && /^(INPUT|SELECT|TEXTAREA)$/.test(t.tagName) && !/mxTypingShim/.test(t.className || "");
+    if (e.key === "Enter" && !typing && !e.shiftKey && graph.getSelectionCount() === 1) {
+      e.preventDefault(); e.stopImmediatePropagation(); confirmCurrent();
+    } else if ((e.key === "Delete" || e.key === "Backspace") && !typing && t && t.ownerDocument === document) {
+      e.preventDefault(); removeCurrent();   // in the panel; in draw.io its own Delete does it
+    }
+  };
+  ed.contentWindow.addEventListener("keydown", keys, true);   // before draw.io (Enter: edit the label)
+  document.addEventListener("keydown", keys, true);
+}
+let marked = [];
+let showFlags = true;
+const MARK_LOOK = SVG('<text x="8" y="12.5" font-size="12" font-family="sans-serif" font-weight="bold" fill="#fff" text-anchor="middle">!</text>', "#f08c00");
+const MARK_FLOW = SVG('<path d="M3 8h8M8 5l3 3-3 3" stroke="#fff" stroke-width="1.6" fill="none"/>', "#868e96");
+function marks() {
+  for (const c of marked) graph.removeCellOverlays(c);
+  marked = [];
+  if (!guide) {   // the flags: what still needs a look
+    if (!showFlags || !graph) return;
+    const m = graph.getModel();
+    for (const c of Object.values(m.cells)) {
+      if (arrowHidden(c)) continue;
+      if (m.isVertex(c) && val(c, "look") && !isChecked(c)) {
+        const o = new W.mxCellOverlay(new W.mxImage(MARK_LOOK, 16, 16), "Needs a look: " + val(c, "look"),
+          W.mxConstants.ALIGN_RIGHT, W.mxConstants.ALIGN_TOP);
+        graph.addCellOverlay(c, o); marked.push(c);
+      } else if (findWhat === "Unknown flow" && m.isEdge(c) && val(c, "flow_unknown") === "1" && styleOf(c, "endArrow") === "none" &&
+                 (styleOf(c, "startArrow") == null || styleOf(c, "startArrow") === "none")) {
+        graph.addCellOverlay(c, new W.mxCellOverlay(new W.mxImage(MARK_FLOW, 16, 16), "Flow direction unknown - set it",
+          W.mxConstants.ALIGN_CENTER, W.mxConstants.ALIGN_MIDDLE));
+        marked.push(c);
+      }
+    }
+    return;
+  }
+  const put = (c, img, tip, right) => {
+    const o = new W.mxCellOverlay(new W.mxImage(img, 16, 16), tip,
+      right ? W.mxConstants.ALIGN_RIGHT : W.mxConstants.ALIGN_CENTER, right ? W.mxConstants.ALIGN_TOP : W.mxConstants.ALIGN_MIDDLE);
+    graph.addCellOverlay(c, o);
+    marked.push(c);
+  };
+  if (guide.step === 1) for (const c of checkItems()) { if (isChecked(c)) put(c, MARK_OK, "Checked", true); }
+  else for (const c of checkLines().all) {
+    if (isChecked(c)) put(c, MARK_OK, "Checked");
+    else if (val(c, "low") === "1") put(c, MARK_ASK, "To check");
+  }
+  dim();
+}
+// the current item or line stands out: a thick blue outline (it follows zoom and scrolling),
+// the rest faded - in step 2 the line's two ends outlined too, so it is clear what it joins
+let lit = [];
+function dim() {
+  for (const h of lit) h.destroy();
+  lit = [];
+  const m = graph.getModel(), cur = guide ? graph.getSelectionCell() : null;
+  const step2 = guide && guide.step === 2, onLine = cur && m.isEdge(cur);
+  const ends = onLine ? [m.getTerminal(cur, true), m.getTerminal(cur, false)].filter(Boolean) : [];
+  const fade = (c, keep) => {
+    const st = graph.view.getState(c);
+    if (!st) return;
+    const o = !guide || !cur || keep ? "" : m.isEdge(c) ? "0.15" : "0.35";
+    for (const n of [st.shape && st.shape.node, st.text && st.text.node]) if (n) n.style.opacity = o;
+  };
+  for (const c of checkItems()) fade(c, c === cur || ends.includes(c) || (step2 && !onLine));
+  for (const c of checkLines().all) fade(c, c === cur || !step2);
+  if (!guide || !cur) return;
+  const light = (c, colour, width, gap) => {
+    const st = graph.view.getState(c);
+    if (!st) return;
+    const h = new W.mxCellHighlight(graph, colour, width);
+    h.spacing = gap;
+    h.highlight(st);
+    lit.push(h);
+  };
+  light(cur, "#1c7ed6", onLine ? 7 : 5, 6);
+  for (const c of ends) light(c, "#74c0fc", 3, 4);
+}
+function twice(text, n, act) {   // a bulk action: the first click arms it, the second does it
+  const b = button(armed === text ? `Click again: ${text.toLowerCase()} (${n})` : `${text} (${n})`, () => {
+    if (armed !== text) { armed = text; render(); return; }
+    armed = null; act();
+  });
+  if (armed === text) b.className = "no";
+  return b;
+}
+
+function guideBar() {
+  const items = checkItems(), lines = checkLines();
+  const nItems = items.filter(isChecked).length, nLow = lines.low.filter(isChecked).length;
+  const box = el("div", { cls: "guide" });
+  if (!guide) {
+    box.append(el("b", {}, "Guided check"),
+      el("div", { cls: "prog" }, `Items checked ${nItems}/${items.length} · connections to check ` +
+        `${lines.low.length - nLow} of ${lines.all.length}`),
+      button("Start the guided check", () => setStep(items.some((c) => !isChecked(c)) ? 1 : 2),
+        "Go through every item, then every uncertain connection, one by one"));
+    return box;
+  }
+  const tab = (n, text) => el("button", { cls: guide.step === n ? "on" : "", textContent: text, onclick: () => setStep(n) });
+  const seg = el("div", { cls: "seg" });
+  seg.append(tab(1, `1 · Items ${nItems}/${items.length}`), tab(2, `2 · Connections ${lines.all.filter(isChecked).length}/${lines.all.length}`));
+  box.append(el("b", {}, "Guided check"), seg,
+    el("div", { cls: "prog" }, guide.step === 1
+      ? "Lines are hidden. Check each item: its box, type and tag. Enter: correct, next. Delete: not an item. " +
+        "A missed one: drop a symbol (or an item box) on it."
+      : "Each uncertain connection, least likely first. Enter: keep, next. Delete: remove. A missing one: draw it."),
+    button("Stop the guided check", () => { guide = null; graph.refresh(); marks(); dim(); render(); }));
+  return box;
+}
+
+function renderGuide() {
+  const m = graph.getModel();
+  const sel = graph.getSelectionCells();
+  if (guide.step === 1) {
+    const items = checkItems(), open = items.filter((c) => !isChecked(c));
+    if (sel.filter((c) => m.isVertex(c)).length >= 2) { renderMerge(sel.filter((c) => m.isVertex(c))); return; }
+    const cur = sel.length === 1 && items.includes(sel[0]) ? sel[0] : null;
+    if (!cur) {
+      if (!open.length) {
+        panel.append(el("h3", {}, `All ${items.length} items checked`),
+          el("div", { cls: "sub" }, "Next, the connections between them."), button("Go to 2 · Connections", () => setStep(2)));
+      } else {
+        panel.append(el("div", { cls: "sub" }, `${open.length} items to check.`),
+          button("Next item to check", () => focusCell(guideNext(items, null))));
+      }
+      return;
+    }
+    panel.append(el("div", { cls: "prog" }, `Item ${items.indexOf(cur) + 1} of ${items.length} · ${open.length} still to check` +
+      (isChecked(cur) ? " · this one is checked" : "")));
+    const act = el("div", { cls: "act" });
+    const ok = button(isChecked(cur) ? "✓ Checked - next" : "✓ Correct - next", confirmCurrent, "Enter");
+    ok.className = "ok";
+    const no = button("Not an item - remove", removeCurrent, "Delete");
+    no.className = "no";
+    act.append(ok, no, button("◂ Back", () => stepBy(-1)), button("Skip ▸", () => stepBy(1)));
+    panel.append(act);
+    renderItem(cur);
+    if (isChecked(cur)) panel.append(button("Mark as not checked", () => setData(cur, { checked: "0" })));
+    return;
+  }
+  // step 2
+  const { all, low, sure } = checkLines();
+  const openLow = low.filter((c) => !isChecked(c)), openSure = sure.filter((c) => !isChecked(c));
+  if (guide.start == null && openLow.length && !low.some(isChecked)) {
+    const pic = args.mode === "picture";
+    panel.append(el("h3", {}, `${all.length} connections, ${low.length} uncertain`),
+      el("div", { cls: "sub" }, (pic ? `${low.length} were only predicted by the model - it suggests more connections ` +
+        `than a drawing has. ${sure.length} were traced along a drawn line.`
+        : `${low.length} have an end guessed (a loose line end put on the nearest item). ${sure.length} are ` +
+          "attached in the file.") + " How do you want to start? (Ctrl+Z undoes it.)"),
+      button(`Check the ${low.length} uncertain ones one by one`, () => { guide.start = "check"; render(); }),
+      twice(pic ? "Keep only the traced lines" : "Remove the guessed lines", low.length,
+        () => { guide.start = "check"; graph.removeCells(low, false); render(); }),
+      twice("Start with no lines and draw them myself", all.length,
+        () => { guide.start = "check"; graph.removeCells(all, false); render(); }));
+    return;
+  }
+  const q = queue();
+  const cur = sel.length === 1 && m.isEdge(sel[0]) ? sel[0] : null;
+  if (!cur) {
+    if (openLow.length) {
+      panel.append(el("div", { cls: "sub" }, `${openLow.length} uncertain connections to check.`),
+        button("Next connection to check", () => focusCell(guideNext(q, null))));
+    } else {
+      panel.append(el("h3", {}, "Uncertain connections checked"),
+        el("div", { cls: "sub" }, openSure.length ? `${openSure.length} sure ones (traced or attached) are left - usually right.`
+          : "Every connection is checked. Save (Ctrl+S) to load it into the app."));
+      if (openSure.length) panel.append(
+        twice("Mark the sure ones checked", openSure.length, () => { for (const c of openSure) setData(c, { checked: "1" }); render(); }),
+        button("Check them one by one too", () => { guide.sure = true; focusCell(guideNext(queue(), null)); }));
+    }
+    return;
+  }
+  const prob = val(cur, "prob"), conf = val(cur, "conf");
+  panel.append(el("div", { cls: "prog" }, (q.includes(cur) ? `Connection ${q.indexOf(cur) + 1} of ${q.length} · ` : "") +
+    `${q.filter((c) => !isChecked(c)).length} still to check` +
+    (prob ? ` · model ${Math.round(parseFloat(prob) * 100)}% sure` : conf ? ` · ${conf}` : "") +
+    (isChecked(cur) ? " · this one is checked" : "")));
+  const act = el("div", { cls: "act" });
+  const ok = button(isChecked(cur) ? "✓ Checked - next" : "✓ Keep - next", confirmCurrent, "Enter");
+  ok.className = "ok";
+  const no = button("✗ Remove", removeCurrent, "Delete");
+  no.className = "no";
+  act.append(ok, no, button("◂ Back", () => stepBy(-1)), button("Skip ▸", () => stepBy(1)));
+  panel.append(act);
+  renderLine(cur);
+  const rest = q.filter((c) => !isChecked(c) && c !== cur);
+  if (rest.length) {
+    panel.append(el("details", {}, el("summary", {}, `All ${rest.length + 1} still to check at once`),
+      twice("Keep all", rest.length + 1, () => { for (const c of [cur, ...rest]) setData(c, { checked: "1" }); graph.clearSelection(); render(); }),
+      twice("Remove all", rest.length + 1, () => { graph.removeCells([cur, ...rest], false); render(); })));
+  }
 }
 
 // ---------------------------------------------------------------------- panel ---
@@ -319,6 +931,12 @@ function render() {
   if (!panel) return;
   panel.innerHTML = "";
   if (!graph || !args) { panel.append(el("div", { cls: "sub" }, "Loading the editor...")); return; }
+  panel.append(el("button", { textContent: document.fullscreenElement ? "⤡ Exit full screen (Esc)" : "⤢ Full screen",
+    onclick: fullScreen, title: "The editor and this panel fill the screen",
+    style: "float:right;margin:-6px -6px 6px 6px;padding:3px 8px;border:1px solid #c8ced6;border-radius:4px;background:#fff;cursor:pointer;font:inherit;font-size:12px" }));
+  panel.append(guideBar());
+  if (args.mode === "picture") { const sw = arrowSwitch(); if (sw) panel.append(sw); }
+  if (guide) { renderGuide(); panel.append(foot()); setTimeout(dim, 0); return; }
   const sel = graph.getSelectionCells();
   const items = sel.filter((c) => graph.getModel().isVertex(c));
   if (items.length >= 2) { renderMerge(items); panel.append(foot()); return; }
@@ -332,23 +950,84 @@ function render() {
         : "Add items from the P&ID libraries on the left. ") + "Draw a line by dragging from a " +
         "shape's blue arrows onto another shape. A tag is a text next to its item; a pipe ending on a text " +
         "(\"Product\", \"N2\") is a stream entering or leaving the drawing."),
-      foot());
+      args.sheet ? button("Sync all items from the spec sheet", () => syncSpecs("all"),
+        `Saves, then puts ${args.sheet}'s values over the specifications of every item whose tag is in it`)
+        : el("div", { cls: "hint" }, "Upload a spec sheet in the app's sidebar to fill specifications from it."));
+    if (!sel.length) renderFinder();
+    panel.append(foot());
     return;
   }
   const cell = sel[0];
   if (graph.getModel().isEdge(cell)) renderLine(cell); else renderItem(cell);
   panel.append(foot());
 }
-const foot = () => el("div", { cls: "foot" }, "Save (Ctrl+S) to load the drawing into the check below.");
+const foot = () => el("div", { cls: "foot" }, autosave
+  ? (dirty ? "Changes not saved yet - saving in a moment ..." : "Saved: the app below has the drawing as it is.")
+  : "Save (Ctrl+S) to load the drawing into the app below.");
+
+// Find an item or a line: by tag or type, or by what still needs doing; a click shows it.
+let findText = "", findWhat = "All";
+function renderFinder() {
+  const m = graph.getModel();
+  const items = Object.values(m.cells).filter((c) => m.isVertex(c) && val(c, "dexpi_class") != null && !arrowHidden(c));
+  const lines = Object.values(m.cells).filter((c) => m.isEdge(c) && !arrowHidden(c));
+  const kinds = {
+    "All": () => items,
+    "Needs a look": () => items.filter((c) => val(c, "look") && !isChecked(c)),
+    "Left out": () => items.filter((c) => val(c, "in_dexpi") === "0" || effClass(c) === (schema && schema.skip)),
+    "Unknown flow": () => lines.filter((c) => val(c, "flow_unknown") === "1" && styleOf(c, "endArrow") === "none"
+                                       && (styleOf(c, "startArrow") == null || styleOf(c, "startArrow") === "none")),
+  };
+  const box = el("details", { open: true }, el("summary", {}, "Find"));
+  const seg = el("div", { cls: "seg", style: "margin:6px 0" });
+  for (const k of Object.keys(kinds)) {
+    seg.append(el("button", { cls: findWhat === k ? "on" : "", textContent: `${k} (${kinds[k]().length})`,
+      style: "font-size:11px", onclick: () => { findWhat = k; render(); marks(); } }));
+  }
+  const q = el("input", { type: "text", placeholder: "Tag or type, e.g. PSV, V201, Pump", value: findText,
+    oninput: (e) => { findText = e.target.value; list(); } });
+  const out = el("div", { style: "max-height:260px;overflow-y:auto;margin-top:6px" });
+  const name = (c) => m.isEdge(c) ? `${itemName(m.getTerminal(c, true))} – ${itemName(m.getTerminal(c, false))}` : itemName(c);
+  function list() {
+    out.innerHTML = "";
+    const t = findText.trim().toLowerCase();
+    const hits = kinds[findWhat]().filter((c) => !t || `${name(c)} ${effClass(c) || ""}`.toLowerCase().includes(t));
+    for (const c of hits.slice(0, 60)) {
+      out.append(el("div", { style: "padding:3px 4px;border-bottom:1px solid #eef0f3;cursor:pointer",
+        onclick: () => focusCell(c), title: val(c, "look") || val(c, "why") || "" },
+        el("b", {}, name(c)), el("span", { cls: "hint", style: "margin-left:6px" },
+          m.isEdge(c) ? "line" : (effClass(c) || "") + (val(c, "look") && !isChecked(c) ? " · needs a look" : ""))));
+    }
+    if (hits.length > 60) out.append(el("div", { cls: "hint" }, `... ${hits.length - 60} more - type to narrow`));
+    if (!hits.length) out.append(el("div", { cls: "hint" }, "Nothing."));
+  }
+  list();
+  const opts = el("div", { style: "margin-top:8px" },
+    el("label", { cls: "check" }, el("input", { type: "checkbox", checked: showFlags,
+      onchange: (e) => { showFlags = e.target.checked; marks(); } }),
+      "Flags: ! needs a look (with 'Unknown flow' picked: a grey arrow on those pipes)"),
+    el("label", { cls: "check" }, el("input", { type: "checkbox", checked: autosave,
+      onchange: (e) => { autosave = e.target.checked; render(); } }), "Save automatically"));
+  box.append(seg, q, out, opts);
+  panel.append(box);
+}
 
 function itemName(cell) {
   if (!cell) return "(loose end)";
-  return val(cell, "tag") || labelOf(cell) || "(no tag)";
+  return val(cell, "tag") || labelOf(tagShownOn(cell)) || "(no tag)";
 }
 
 function renderItem(cell) {
   const isText = /^text(;|$)/.test(graph.getModel().getStyle(cell) || "");
   const known = val(cell, "dexpi_class") != null;
+  const owners = isText ? itemsWithLabel(cell) : [];
+  if (owners.length) {
+    panel.append(el("h3", {}, labelOf(cell) || "Tag label"),
+      el("div", { cls: "sub" }, `The tag label of ${itemName(owners[0])} (${effClass(owners[0]) || "item"}). ` +
+        "Edit the text (double-click) to change its tag; move or resize it freely."),
+      button("Select its item", () => graph.setSelectionCell(owners[0])));
+    return;
+  }
   if (isText && !known) {
     panel.append(el("h3", {}, labelOf(cell) || "Text"),
       el("div", { cls: "sub" }, "A text. Next to an item it is read as the item's tag. At the end of a line it is " +
@@ -361,35 +1040,138 @@ function renderItem(cell) {
     el("div", { cls: "sub" }, known ? (isAuto ? `${auto} (${args.mode === "picture" ? "found by the model" : "from the shape"})`
                                              : `${val(cell, "dexpi_class")} (set by you)`)
                                     : "New - its DEXPI type is worked out when you Save"));
+  if (val(cell, "look") && !isChecked(cell)) {
+    panel.append(el("div", { cls: "hint", style: "color:#b35c00;margin-bottom:6px" }, "Needs a look: " + val(cell, "look")));
+  }
+  if (val(cell, "why")) panel.append(el("div", { cls: "hint" }, "Found: " + val(cell, "why")));
 
-  const tag = el("input", { type: "text", value: val(cell, "tag") || labelOf(cell) || "", onchange: (e) => {
+  const tag = el("input", { type: "text", value: val(cell, "tag") || labelOf(tagShownOn(cell)) || "", onchange: (e) => {
     const text = e.target.value.trim();
     const m = graph.getModel();
     m.beginUpdate();
     try {
       setData(cell, { tag: text, tag_auto: "0" });
-      const tc = val(cell, "tag_cell") && m.getCell(val(cell, "tag_cell"));
-      setLabel(tc || cell, text);   // the tag shown on the drawing: its own text, or the item's label
+      showTag(cell, text);
     } finally { m.endUpdate(); }
   } });
   panel.append(...field("Tag", tag, "Also changes the tag shown on the drawing."));
+  let near = [];
+  try { near = JSON.parse(val(cell, "ocr_near") || "[]"); } catch (err) { near = []; }
+  if (near.length) {   // text the OCR read nearby that no item claimed - often this one's tag
+    const row = el("div", { style: "display:flex;flex-wrap:wrap;gap:4px;margin-top:4px" },
+      el("span", { cls: "hint", style: "margin:0 4px 0 0" }, "Read nearby:"));
+    for (const t of near) row.append(el("button", { textContent: t, title: "Use as its tag",
+      style: "padding:1px 6px;border:1px solid #c8ced6;border-radius:10px;background:#fff;cursor:pointer;font-size:12px",
+      onclick: () => { setData(cell, { tag: t, tag_auto: "0" }); showTag(cell, t); render(); } }));
+    panel.append(row);
+  }
+  if (!tagLabelOf(cell) && cell.geometry) {
+    panel.append(button("Add a tag label", () => addTagLabel(cell),
+      "A text next to the item showing its tag - move and resize it on its own; edit it there or here"));
+  } else if (tagLabelOf(cell)) {
+    panel.append(el("div", { cls: "hint" }, "Its tag label moves with it; drag the label alone to place it."));
+  }
 
   const choices = (schema && schema.choices) || [];
   const type = el("select", { onchange: (e) => {
     if (e.target.value === "") setData(cell, { dexpi_auto: "1" });
-    else setData(cell, { dexpi_class: e.target.value, dexpi_auto: "0", in_dexpi: e.target.value === schema.skip ? "0" : "1" });
+    else setData(cell, Object.assign({ dexpi_class: e.target.value, dexpi_auto: "0", in_dexpi: e.target.value === schema.skip ? "0" : "1" },
+                                     isArrow(cell) && e.target.value !== schema.skip ? { arrow: "0" } : {}));
   } });
-  type.append(el("option", { value: "", textContent: `Automatic${auto ? ` (${auto})` : ""}` }));
+  // the type worked out for it (from its shape, or the model's), named - not just "automatic"
+  const from = args.mode === "picture" && classOf(graph.getModel().getStyle(cell)) === undefined
+    ? "found by the model" : "from the shape";
+  type.append(el("option", { value: "", textContent: auto ? `${auto} (${from})` : "Worked out when you Save" }));
   for (const c of choices) type.append(el("option", { value: c, textContent: c }));
   type.value = isAuto ? "" : (val(cell, "dexpi_class") || "");
   panel.append(...field("DEXPI type", type));
 
+  // a stream (off-page connector): in or out is the flow on its pipe - set it here
+  if (effClass(cell) === (schema && schema.off_page)) {
+    const m = graph.getModel();
+    // its pipes: lines attached to it, and lines only drawn up to it (joined by the app: stream_lines)
+    const side = new Map(m.getEdges(cell).filter((e) => styleOf(e, "dashed") != 1)
+      .map((e) => [e, m.getTerminal(e, true) === cell ? "source" : "target"]));
+    try {
+      for (const [id, end] of JSON.parse(val(cell, "stream_lines") || "[]")) {
+        const e = m.getCell(id);
+        if (e && !side.has(e)) side.set(e, end);
+      }
+    } catch (err) { /* none */ }
+    const pipes = [...side.keys()];
+    const away = (e) => {   // does the arrowhead point away from the stream?
+      const toB = styleOf(e, "endArrow") !== "none", toA = styleOf(e, "startArrow") != null && styleOf(e, "startArrow") !== "none";
+      const fromHere = side.get(e) === "source";
+      return toB === toA ? null : fromHere ? toB : toA;
+    };
+    const set = (out) => { m.beginUpdate(); try { for (const e of pipes) {
+      const fromHere = side.get(e) === "source";
+      setStyle(e, fromHere !== out ? { endArrow: "classic", startArrow: "none" } : { endArrow: "none", startArrow: "classic" });
+    } } finally { m.endUpdate(); } render(); };
+    if (pipes.length) {
+      const ways = pipes.map(away), isIn = ways.every((w) => w === true), isOut = ways.every((w) => w === false);
+      const seg = el("div", { cls: "seg" });
+      for (const [text, on, out] of [["In (feed)", isIn, false], ["Out (product)", isOut, true]]) {
+        seg.append(el("button", { cls: on ? "on" : "", textContent: text, onclick: () => set(out) }));
+      }
+      panel.append(...field("Stream", seg, (isIn || isOut ? "" : "Not known yet - pick one. ") +
+        "Sets the arrow on its pipe: away from it (in) or towards it (out); DEXPI FlowIn/FlowOut connector."));
+    } else {
+      panel.append(el("div", { cls: "hint" }, "A stream needs its pipe: draw a line from it to an item."));
+    }
+  }
+  connections(cell);
   inDexpi(cell);
   notes(cell);
   if (val(cell, "section")) panel.append(...field("Plant section", el("div", {}, val(cell, "section"))));
   const cls = isAuto ? auto : val(cell, "dexpi_class");
   specs(cell, cls && schema && schema.classes[cls] ? cls : null);
+  if (args.sheet) panel.append(button("Fill from the spec sheet", () => syncSpecs([cell.id]),
+    `Saves, then puts ${args.sheet}'s values for this tag over its specifications`));
   tools(cell);
+}
+
+// What flows into and out of an item: its lines (on it or on its parts), by the arrowheads
+// drawn on them - in, out, both ways, or not known yet. A click selects the line.
+function connections(cell) {
+  const m = graph.getModel();
+  const own = new Set();
+  const walk = (c) => { own.add(c); for (let i = 0; i < m.getChildCount(c); i++) walk(m.getChildAt(c, i)); };
+  walk(cell);
+  const lines = new Set();
+  for (const c of own) for (const e of m.getEdges(c)) lines.add(e);
+  const groups = { "Inbound": [], "Outbound": [], "Both ways": [], "Direction not known": [], "Signal lines": [] };
+  for (const e of lines) {
+    const src = m.getTerminal(e, true), dst = m.getTerminal(e, false);
+    const here = own.has(src), there = here ? dst : src;
+    if (here && own.has(dst)) continue;   // a line inside the item itself
+    const toEnd = styleOf(e, "endArrow") !== "none";   // draw.io's default is an arrowhead at the end
+    const toStart = styleOf(e, "startArrow") != null && styleOf(e, "startArrow") !== "none";
+    const up = val(e, "upstream");   // the app's direction when none is drawn (implied by other arrows)
+    const g = toEnd && toStart ? "Both ways"
+      : toEnd || toStart ? (toEnd === here ? "Outbound" : "Inbound")
+      : up && [...own].some((c) => c.id === up) ? "Outbound" : up && there && there.id === up ? "Inbound"
+      : styleOf(e, "dashed") == 1 ? "Signal lines" : "Direction not known";
+    groups[g].push([e, there]);
+  }
+  const n = Object.values(groups).reduce((a, l) => a + l.length, 0);
+  const box = el("details", n ? { open: true } : {}, el("summary", {}, `Connections (${n})`));
+  if (!n) box.append(el("div", { cls: "hint" }, "No lines on it yet: draw one from it to another item."));
+  for (const [title, list] of Object.entries(groups)) {
+    if (!list.length) continue;
+    box.append(el("label", { cls: "f" }, `${title} (${list.length})`));
+    for (const [e, other] of list) {
+      const signal = styleOf(e, "dashed") == 1;
+      const what = other ? `${itemName(other)}${effClass(other) ? " · " + effClass(other) : ""}` : "(loose end)";
+      box.append(el("div", { style: "display:flex;justify-content:space-between;gap:6px;padding:2px 0;cursor:pointer",
+        title: "Select this line", onclick: () => graph.setSelectionCell(e) },
+        el("span", {}, (title === "Inbound" ? "← " : title === "Outbound" ? "→ " : title === "Signal lines" ? "┄ " : "↔ ") + what),
+        el("span", { cls: "hint", style: "margin:0" }, (signal ? "signal" : "pipe") + (val(e, "in_dexpi") === "0" ? ", left out" : ""))));
+    }
+  }
+  if (groups["Direction not known"].length) box.append(el("div", { cls: "hint" },
+    "Select a line and set its flow to sort it into inbound or outbound."));
+  panel.append(box);
 }
 
 // ---------------------------------------------------------------- item tools ---
@@ -493,6 +1275,12 @@ function renderMerge(items) {
     const k = items[Number(keep.value)];
     mergeItems(k, items.filter((c) => c !== k), cover.checked);
   }));
+  {
+    panel.append(el("div", { cls: "sub" }, "Or several shapes drawing ONE piece of equipment (a symbol with extra " +
+      "shapes added)? Group them: they stay as drawn and are one DEXPI item - the biggest symbol says what it is. " +
+      "Ungroup (Ctrl+Shift+U) splits them again."),
+      button("Group into one item", () => graph.setSelectionCell(graph.groupCells(null, 0, items))));
+  }
 }
 
 function mergeItems(keep, others, cover) {
@@ -501,7 +1289,7 @@ function mergeItems(keep, others, cover) {
   try {
     for (const o of others) {
       const otherTag = val(o, "tag") || labelOf(o);
-      if (!(val(keep, "tag") || labelOf(keep)) && otherTag) { setData(keep, { tag: otherTag, tag_auto: "0" }); setLabel(keep, otherTag); }
+      if (!(val(keep, "tag") || labelOf(tagShownOn(keep))) && otherTag) { setData(keep, { tag: otherTag, tag_auto: "0" }); showTag(keep, otherTag); }
       const kc = effClass(keep), oc = effClass(o);
       if ((!kc || kc === schema.skip) && oc && oc !== schema.skip) setData(keep, { dexpi_class: oc, dexpi_auto: "0" });
       let ks = {}, os = {};
@@ -547,6 +1335,7 @@ function renderLine(cell) {
   const a = m.getTerminal(cell, true), b = m.getTerminal(cell, false);
   const [kind, cls] = schema && schema.instruments ? lineKind(cell) : ["Line", null];
   panel.append(el("h3", {}, `${itemName(a)} – ${itemName(b)}`), el("div", { cls: "sub" }, `${kind} in DEXPI`));
+  if (val(cell, "why")) panel.append(el("div", { cls: "hint" }, "Found: " + val(cell, "why")));
   if (!a || !b) panel.append(el("div", { cls: "hint" }, "A loose end is joined to the nearest item when you Save - " +
     "drag the end onto the item to be sure."));
 

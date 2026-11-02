@@ -211,6 +211,199 @@ def _arrow_labels(diagram: ParsedDiagram, symbols: list, edges: list, id_map: di
                     edges.append((near, sid, line, g))
 
 
+POINT_BOX = 8.0  # the waypoint box PID2Graph gives its connector/crossing nodes (drawing units)
+JOIN_TOL = 8.0  # line ends this close meet (find_junctions' tolerance)
+JUMP_GAP = 30.0  # a pipe drawn with a gap across another line (find_junctions' line jump)
+
+
+def line_points(diagram: ParsedDiagram, symbols: list) -> tuple[list, list]:
+    """The drawn lines as PID2Graph routes them: symbols linked through waypoint nodes -
+    "connector" at each corner of a route, "crossing" where lines meet (a tee) - so a model
+    can learn the bends and tees of a pipe (the dataset's DATA.LINE_POINTS mode).
+
+    symbols: labelled_symbols' symbols (arrows included). Returns (points, edges): points
+    [(node_id, "connector" | "crossing", box, None)], edges [(a, b, line)] for every leg of
+    every line. A line end on a labelled symbol joins that symbol; an end on another line
+    (a tee) or on another line's end joins a shared point; any other end is left out (a
+    stream label, a loose end), as labelled_symbols leaves those connections out.
+    Folding the points away again (_collapse_graph) gives labelled_symbols' connections,
+    up to its nearest-shape guesses and the arrows at tees (measured in make_team_data)."""
+    import math
+
+    routes = diagram.routes or {}
+    by_shape = {orig: sid for sid, label, _, orig in symbols if label != "arrow"}
+    arrows = {orig: sid for sid, label, _, orig in symbols if label == "arrow"}
+    lines = {e.id: e for e in diagram.edges if not e.is_decorative and len(routes.get(e.id) or ()) >= 2}
+    where: dict[str, tuple[float, float]] = {}  # point node -> position
+    parent: dict[str, str] = {}
+
+    def find(n):
+        while parent.get(n, n) != n:
+            n = parent[n]
+        return n
+
+    def end_of(e, k):
+        r = routes[e.id]
+        return (e.source_point if k == 0 else e.target_point) or (r[0] if k == 0 else r[-1])
+
+    def junction(e, k):
+        return e.source_junction if k == 0 else e.target_junction
+
+    def along(r, p):
+        """(distance along route r of p's nearest point, that point, distance off the route)."""
+        best, run = None, 0.0
+        for (ax, ay), (bx, by) in zip(r, r[1:]):
+            seg = math.hypot(bx - ax, by - ay)
+            t = 0.0 if seg == 0 else max(0.0, min(1.0, ((p[0] - ax) * (bx - ax) + (p[1] - ay) * (by - ay)) / seg ** 2))
+            q = (ax + t * (bx - ax), ay + t * (by - ay))
+            d = math.dist(p, q)
+            if best is None or d < best[2]:
+                best = (run + t * seg, q, d)
+            run += seg
+        return best
+
+    # 1. line ends on lines: a shared point with the other line's end, or a tee on its route
+    tees: dict[str, list] = {}  # line id -> [(distance along it, point node)]
+    for e in lines.values():
+        for k in (0, 1):
+            other = lines.get(junction(e, k))
+            if other is None:
+                continue
+            node = f"p_{_sanitize_id(e.id)}_{k}"
+            p = end_of(e, k)
+            where.setdefault(node, p)
+            r = routes[other.id]
+            near_end = [j for j in (0, 1) if junction(other, j) is not None
+                        and math.dist(p, end_of(other, j)) <= (JUMP_GAP if junction(other, j) == e.id else JOIN_TOL)]
+            if near_end:
+                j = min(near_end, key=lambda j: math.dist(p, end_of(other, j)))
+                mine = f"p_{_sanitize_id(other.id)}_{j}"
+                where.setdefault(mine, end_of(other, j))
+                parent[find(node)] = find(mine)
+            else:
+                run, q, _ = along(r, p)
+                where[node] = q
+                tees.setdefault(other.id, []).append((run, node))
+
+    # 2. each line: its stations in order along the route, linked one to the next
+    # corners under a symbol are covered by it; not under a container (an autoclave frame
+    # holding other items): pipes drawn inside one still show their corners
+    sizes = sorted(max(b[2] - b[0], b[3] - b[1]) for _, label, b, _ in symbols if label != "arrow")
+    typical = 3 * sizes[len(sizes) // 2] if sizes else 0
+    hidden = [b for _, label, b, _ in symbols if label != "arrow" and max(b[2] - b[0], b[3] - b[1]) <= typical]
+    edges: list[tuple[str, str, str]] = []
+    legs: list[tuple[list, str]] = []
+    corners: set[str] = set()
+    for e in lines.values():
+        r = routes[e.id]
+        total = sum(math.dist(a, b) for a, b in zip(r, r[1:]))
+        stations = []
+        for k, run in ((0, -1.0), (1, total + 1.0)):
+            shape = e.source if k == 0 else e.target
+            if shape in by_shape:
+                stations.append((run, by_shape[shape]))
+            elif junction(e, k) in lines:
+                stations.append((run, f"p_{_sanitize_id(e.id)}_{k}"))
+            if f"{e.id}:arrow{k}" in arrows:  # an arrowhead sits between the line's end and its symbol
+                stations.append((run + (0.5 if k == 0 else -0.5), arrows[f"{e.id}:arrow{k}"]))
+        for (bx, by), turn in _corners(r, hidden):
+            node = f"p_{_sanitize_id(e.id)}_b{turn}"
+            where[node] = (bx, by)
+            corners.add(node)
+            stations.append((along(r, (bx, by))[0], node))
+        stations += tees.get(e.id, [])
+        stations.sort(key=lambda st: st[0])
+        for (_, a), (_, b) in zip(stations, stations[1:]):  # a tee on a corner: one point
+            if a in where and b in where and math.dist(where[a], where[b]) <= JOIN_TOL:
+                keep, gone = (a, b) if b in corners else (b, a)
+                parent[find(gone)] = find(keep)
+        legs.append((stations, "non-solid" if e.is_dashed else "solid"))
+    for stations, line in legs:
+        nodes = [n if n not in where else find(n) for _, n in stations]
+        for a, b in zip(nodes, nodes[1:]):
+            if a != b:
+                edges.append((a, b, line))
+    for e in diagram.edges:  # links without a drawn line (two items drawn touching): direct
+        if e.id.startswith("adjacent:") and e.source in by_shape and e.target in by_shape:
+            edges.append((by_shape[e.source], by_shape[e.target], "non-solid" if e.is_dashed else "solid"))
+
+    used = {n for a, b, _ in edges for n in (a, b)}
+    degree: dict[str, int] = {}
+    for a, b, _ in {(min(a, b), max(a, b), l) for a, b, l in edges}:
+        degree[a], degree[b] = degree.get(a, 0) + 1, degree.get(b, 0) + 1
+    # labelled as PID2Graph does (its author, 2026-10): "crossing" for a corner (an "ankle")
+    # and for where lines join; "connector" - never taught - for two line pieces joined
+    # straight on (a pipe drawn in pieces: nothing to see there)
+    pos = {sid: ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2) for sid, _, b, _ in symbols}
+    pos.update(where)
+    nbrs: dict[str, set] = {}
+    for a_, b_, _ in edges:
+        nbrs.setdefault(a_, set()).add(b_)
+        nbrs.setdefault(b_, set()).add(a_)
+
+    def straight(n):
+        ps = [pos.get(m) for m in nbrs.get(n, ())]
+        if len(ps) != 2 or None in ps or n not in pos:
+            return False
+        (px, py), (ax, ay), (bx, by) = pos[n], ps[0], ps[1]
+        u, v = (ax - px, ay - py), (bx - px, by - py)
+        nu, nv = math.hypot(*u), math.hypot(*v)
+        return nu > 0 and nv > 0 and (u[0] * v[0] + u[1] * v[1]) / (nu * nv) < -0.94
+
+    h = POINT_BOX / 2
+    points = []
+    for n in sorted(used):
+        if n in where and find(n) == n:
+            x, y = where[n]
+            label = "connector" if n not in corners and degree.get(n, 0) == 2 and straight(n) else "crossing"
+            points.append((n, label, (x - h, y - h, x + h, y + h), None))
+    return points, edges
+
+
+JOG = 6.0  # route steps shorter than this are not drawn corners (a 2-5 unit kink in draw.io)
+
+
+def _corners(route: list, hidden: list) -> list:
+    """[(point, index)] of the corners a route visibly turns at: tiny kinks smoothed out
+    first, corners inside a symbol's box (covered by it) left out."""
+    import math
+    pts = [route[0]]
+    for i, p in enumerate(route[1:-1], 1):
+        if math.dist(p, pts[-1]) >= JOG and math.dist(p, route[-1]) >= JOG:
+            pts.append(p)
+    pts.append(route[-1])
+    out = []
+    for i in range(1, len(pts) - 1):
+        (ax, ay), (bx, by), (cx, cy) = pts[i - 1], pts[i], pts[i + 1]
+        u, v = (bx - ax, by - ay), (cx - bx, cy - by)
+        if abs(u[0] * v[1] - u[1] * v[0]) / (math.hypot(*u) * math.hypot(*v)) <= 0.17:  # turns < ~10 deg
+            continue
+        out.append(((bx, by), i))
+    # a rounded corner is drawn as two turns ~14 units apart (the corner cut at 10 units
+    # each side): one corner, where the straight runs either side of it meet
+    merged = []
+    for (p, i) in out:
+        if merged and merged[-1][1] == i - 1 and math.dist(merged[-1][0], p) <= ROUNDED:
+            a, b, c, d = pts[i - 2], pts[i - 1], pts[i], pts[i + 1]
+            merged[-1] = (_meet(a, b, c, d) or ((b[0] + c[0]) / 2, (b[1] + c[1]) / 2), i)
+        else:
+            merged.append((p, i))
+    return [(p, i) for p, i in merged
+            if not any(b[0] + 2 < p[0] < b[2] - 2 and b[1] + 2 < p[1] < b[3] - 2 for b in hidden)]
+
+
+ROUNDED = 20.0
+
+
+def _meet(a, b, c, d):
+    """Where the line through a-b meets the line through c-d (None: parallel)."""
+    den = (a[0] - b[0]) * (c[1] - d[1]) - (a[1] - b[1]) * (c[0] - d[0])
+    if abs(den) < 1e-9:
+        return None
+    t = ((a[0] - c[0]) * (c[1] - d[1]) - (a[1] - c[1]) * (c[0] - d[0])) / den
+    return (a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]))
+
+
 def _sanitize_id(shape_id: str) -> str:
     """GraphML node/edge ids must be valid XML names; drawio ids are already alnum/-/_
     but are prefixed here to guarantee a non-numeric first character regardless."""

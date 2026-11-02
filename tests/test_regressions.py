@@ -480,9 +480,14 @@ def _tracer():
     pytest.importorskip("skimage")
     import sys
 
+    import os
+
     sys.path.insert(0, str(ROOT / "ml" / "pid2graph" / "pipeline"))
-    from trace_pipes import trace_connections
-    return trace_connections
+    if os.environ.get("PID_TRACER") == "pixels":  # the skeleton tracer (trace_pipes.py) - PID_TRACER=pixels
+        from trace_pipes import trace_connections
+        return trace_connections
+    from trace_lines import trace_lines  # the one infer_sheet.py uses
+    return trace_lines
 
 
 def test_tracer_joins_symbols_with_a_short_line_between_them():
@@ -714,7 +719,7 @@ def test_image_connections_through_a_flow_arrow_are_kept():
     from pid_dexpi_aas.review import from_image
     sym = lambda i, cls, x: {"id": i, "class": cls, "box": [x, 0, x + 50, 50], "score": 0.9}
     infer = {"symbols": [sym("p", "pump", 0), sym("a", "arrow", 100), sym("t", "tank", 200)],
-             "connections": [{"from": "p", "to": "a", "prob": 0.9}, {"from": "a", "to": "t", "prob": 0.8}],
+             "connections": [{"from": "p", "to": "a", "prob": 0.97}, {"from": "a", "to": "t", "prob": 0.95}],
              "image_size": [300, 50]}
     review = from_image(infer, "x.png")
     kept = {frozenset((c.from_id, c.to_id)) for c in review.connections if c.include}
@@ -741,7 +746,10 @@ def test_drawio_pid_library_shapes_map_by_family():
              ("mxgraph.pid.vessels.gas_bottle", ""): "CustomVessel"}  # the exact table still wins
     for (token, tag), cls in cases.items():
         assert map_shape(token, tag).dexpi_class_name == cls, token
-    assert map_shape("mxgraph.pid.misc.unknown", "").dexpi_class_name is None
+    # anything else in the Misc library is still an item (typed by the reviewer if needed)...
+    assert map_shape("mxgraph.pid.misc.unknown", "").dexpi_class_name == "CustomEquipment"
+    # ...but a library family the converter does not know is not guessed at
+    assert map_shape("mxgraph.pid.nosuchfamily.unknown", "").dexpi_class_name is None
 
 
 def test_editor_details_travel_in_the_drawing():
@@ -1008,3 +1016,177 @@ def test_picture_tee_becomes_a_dexpi_tee():
     assert len(tees) == 1
     touching = [s for s in segs if any(i is tees[0] for i in s.items) or s.sourceItem is tees[0] or s.targetItem is tees[0]]
     assert len(touching) == 2 and len(segs) == 2  # the run through the tee, and the branch from it
+
+
+def test_ocr_reads_put_right_by_tag_grammar_and_known_tags():
+    """Look-alike characters on the wrong side of a tag are swapped back (5->S in the letters,
+    O->0 in the number); a read only look-alikes off a known tag becomes it, but a read that
+    really differs (XV208 vs XV203 - both can be real) is left alone."""
+    from pid_dexpi_aas.image.ocr_tags import assemble_tags, repair_tag, snap_to_known
+    assert repair_tag("P5V201") == "PSV201" and repair_tag("8PR 401") == "BPR 401" and repair_tag("XV2O3") == "XV203"
+    assert repair_tag("GV204") == "GV204" and repair_tag("N2") == "N2"
+    known = ["PSV201", "XV203", "TIC 301", "V201", "V203"]
+    assert snap_to_known("PSV2O1", known) == "PSV201" and snap_to_known("TIC 3O1", known) == "TIC 301"
+    assert snap_to_known("XV2O3", ["V203", "XV203"]) == "XV203" and snap_to_known("V2O3", ["V203", "XV203"]) == "V203"
+    assert snap_to_known("XV208", known) == "XV208" and snap_to_known("V202", known) == "V202"
+    tags = assemble_tags([{"text": "P5V2O1", "conf": 0.8, "box": [0, 0, 50, 12]}], known=known)
+    assert [t.text for t in tags] == ["PSV201"]
+
+
+def test_tracer_joins_stacked_instruments_with_a_dashed_line():
+    """Instrument chains (TT over TIC): a short dashed signal line between the bubbles, all of
+    it inside the erased margins - a signal link, even with a frame box drawn around both."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    trace = _tracer()
+    im = Image.new("L", (600, 400), 255)
+    d = ImageDraw.Draw(im)
+    a, b = (150, 60, 236, 146), (150, 165, 236, 251)
+    d.ellipse(a, outline=0, width=2)
+    d.ellipse(b, outline=0, width=2)
+    for y in range(148, 164, 6):
+        d.line((193, y, 193, y + 2), fill=0, width=1)
+    frame = (100, 20, 560, 300)  # a (false) container box around both
+    out = trace(np.asarray(im), [a, b, frame])
+    link = [c for c in out if {c["a"], c["b"]} == {0, 1}]
+    assert link and link[0]["line_type"] == "signal"
+
+
+def test_tracer_follows_a_bent_dashed_signal_line():
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    trace = _tracer()
+    im = Image.new("L", (600, 400), 255)
+    d = ImageDraw.Draw(im)
+    a, b = (40, 40, 120, 120), (400, 260, 480, 340)
+    d.ellipse(a, outline=0, width=2)
+    d.rectangle(b, outline=0, width=2)
+    for y in range(122, 300, 6):   # down from a, then right into b, in 3 px dashes
+        d.line((80, y, 80, y + 2), fill=0, width=1)
+    for x in range(80, 398, 6):
+        d.line((x, 300, x + 2, 300), fill=0, width=1)
+    out = trace(np.asarray(im), [a, b])
+    assert [(c["a"], c["b"], c["line_type"]) for c in out] == [(0, 1, "signal")]
+
+
+def test_tracer_flags_a_symbol_on_the_pipe_with_no_box():
+    """A check valve drawn on a pipe that the model gave no box: the pipe is traced through
+    its outline - reported as a possible missed item on that connection; a plain tee is not."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    trace = _tracer()
+    im = Image.new("L", (700, 300), 255)
+    d = ImageDraw.Draw(im)
+    a, b = (40, 110, 120, 190), (560, 110, 640, 190)
+    d.rectangle(a, outline=0, width=2)
+    d.rectangle(b, outline=0, width=2)
+    d.line((120, 150, 560, 150), fill=0, width=2)
+    d.line((300, 128, 300, 172), fill=0, width=2)   # check valve: a bar across the pipe...
+    d.line((300, 128, 344, 172), fill=0, width=2)   # ...a diagonal...
+    d.line((344, 128, 344, 172), fill=0, width=2)   # ...and a bar at its far end
+    d.line((450, 150, 450, 260), fill=0, width=2)   # a tee down to nowhere
+    missed = []
+    out = trace(np.asarray(im), [a, b], missed=missed)
+    assert {(c["a"], c["b"]) for c in out} == {(0, 1)}
+    assert len(missed) == 1 and missed[0]["box"][0] < 300 < 344 < missed[0]["box"][2]
+
+
+def test_tracer_follows_a_line_that_changes_colour():
+    """A black pipe with a light gray or yellow stretch (brightness above the ink threshold) is
+    one pipe; a light-coloured filled frame next to it is no line."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    trace = _tracer()
+    for colour in ((228, 228, 228), (255, 230, 0)):
+        im = Image.new("RGB", (600, 300), "white")
+        d = ImageDraw.Draw(im)
+        a, b = (40, 110, 120, 190), (480, 110, 560, 190)
+        d.rectangle(a, outline="black", width=2)
+        d.rectangle(b, outline="black", width=2)
+        d.line((120, 150, 250, 150), fill="black", width=2)
+        d.line((250, 150, 380, 150), fill=colour, width=2)
+        d.line((380, 150, 480, 150), fill="black", width=2)
+        d.rectangle((200, 210, 420, 290), fill=(200, 220, 255))
+        assert [(c["a"], c["b"]) for c in trace(np.asarray(im), [a, b])] == [(0, 1)]
+
+
+def test_tracer_line_hopping_over_another_is_no_connection():
+    """A jump-over arc where one pipe crosses another: two pipes, not a tee."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    trace = _tracer()
+    im = Image.new("L", (600, 400), 255)
+    d = ImageDraw.Draw(im)
+    A, B, C, D = (20, 160, 80, 220), (520, 160, 580, 220), (270, 20, 330, 80), (270, 320, 330, 380)
+    for b in (A, B, C, D):
+        d.rectangle(b, outline=0, width=2)
+    d.line((80, 190, 290, 190), fill=0, width=2)
+    d.line((310, 190, 520, 190), fill=0, width=2)
+    d.arc((290, 180, 310, 200), 180, 360, fill=0, width=2)   # the hop
+    d.line((300, 80, 300, 320), fill=0, width=2)
+    assert sorted((c["a"], c["b"]) for c in trace(np.asarray(im), [A, B, C, D])) == [(0, 1), (2, 3)]
+
+
+def test_tracer_tee_right_beside_a_symbol_is_a_tee():
+    """A pipe running down past a symbol, with a branch joining it a few px from the symbol's
+    box: the branch meets the pipe (both ends), the symbol beside it is not on either."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    trace = _tracer()
+    im = Image.new("L", (600, 500), 255)
+    d = ImageDraw.Draw(im)
+    top, bottom, side, beside = (200, 20, 260, 80), (200, 400, 260, 460), (480, 220, 540, 280), (150, 220, 218, 280)
+    for b in (top, bottom, side, beside):
+        d.rectangle(b, outline=0, width=2)
+    d.line((230, 80, 230, 400), fill=0, width=2)    # passes 12 px from `beside`'s right side
+    d.line((230, 225, 480, 225), fill=0, width=2)   # the branch, joining right next to it
+    found = {(c["a"], c["b"]) for c in trace(np.asarray(im), [top, bottom, side, beside])}
+    assert {(0, 2), (1, 2), (0, 1)} <= found and not any(3 in p for p in found)
+
+
+def test_tracer_follows_diagonal_and_curved_pipes():
+    """Pipes that are neither horizontal nor vertical: a diagonal, a curve, a diagonal teeing
+    into a straight pipe - followed, the path along the drawn shape."""
+    import math
+
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    trace = _tracer()
+    # a diagonal
+    im = Image.new("L", (600, 500), 255)
+    d = ImageDraw.Draw(im)
+    a, b = (40, 40, 110, 110), (450, 360, 520, 430)
+    d.rectangle(a, outline=0, width=2)
+    d.rectangle(b, outline=0, width=2)
+    d.line((110, 110, 450, 360), fill=0, width=2)
+    out = trace(np.asarray(im), [a, b])
+    assert [(c["a"], c["b"]) for c in out] == [(0, 1)]
+    # a curve (a quarter circle)
+    im = Image.new("L", (600, 500), 255)
+    d = ImageDraw.Draw(im)
+    a, b = (30, 60, 100, 130), (380, 400, 450, 470)
+    d.rectangle(a, outline=0, width=2)
+    d.rectangle(b, outline=0, width=2)
+    d.arc((-250, 95, 415, 760), 270, 360, fill=0, width=2)   # from (100, 95) round to (415, 400)
+    out = trace(np.asarray(im), [a, b])
+    assert [(c["a"], c["b"]) for c in out] == [(0, 1)]
+    path = out[0]["path"]
+    mid = path[len(path) // 2]
+    assert math.dist(mid, (82.5, 427.5)) > 60   # along the curve, not the straight chord between the ends
+    # a diagonal pipe teeing into a straight one
+    im = Image.new("L", (700, 500), 255)
+    d = ImageDraw.Draw(im)
+    a, b, c = (30, 60, 100, 130), (580, 60, 650, 130), (300, 380, 370, 450)
+    for x in (a, b, c):
+        d.rectangle(x, outline=0, width=2)
+    d.line((100, 95, 580, 95), fill=0, width=2)
+    d.line((335, 380, 250, 96), fill=0, width=2)
+    pairs = {(x["a"], x["b"]) for x in trace(np.asarray(im), [a, b, c])}
+    assert pairs == {(0, 1), (0, 2), (1, 2)}

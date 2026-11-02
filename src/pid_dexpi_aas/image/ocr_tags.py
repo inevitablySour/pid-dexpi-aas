@@ -38,6 +38,70 @@ class OcrTag:
         return ((self.box[0] + self.box[2]) / 2, (self.box[1] + self.box[3]) / 2)
 
 
+# OCR's look-alike characters, by which side of a tag they are on: the letters (ISA letters,
+# equipment prefix) are never digits, the number never letters (bar one final letter, 201A).
+_AS_LETTER = {"0": "O", "1": "I", "5": "S", "8": "B", "2": "Z", "6": "G", "4": "A", "|": "I"}
+_AS_DIGIT = {"O": "0", "D": "0", "Q": "0", "I": "1", "L": "1", "|": "1", "S": "5", "B": "8", "Z": "2",
+             "G": "6", "T": "7"}
+_TAG_SHAPE = re.compile(r"^([A-Z]{1,4})([- ]?)(\d{1,4}[A-Z]?(/\d+)?)$")
+
+
+def repair_tag(text: str) -> str:
+    """A token read as a tag with look-alike characters on the wrong side - "P5V201" ->
+    "PSV201", "TlC-3O1" -> "TIC-301", "8PR 401" -> "BPR 401": each split into 1-4 letters
+    and a number is tried, the look-alikes swapped to their side, and the split needing
+    the fewest swaps wins (a known ISA / equipment prefix breaks ties). Unchanged when it
+    already is a tag or cannot be one."""
+    from pid_dexpi_aas.dexpi.mapping import classify_tag
+
+    t = text.strip().upper().replace("_", "-")
+    # a number alone (the "102" under a bubble's "PI") is half a tag, never to be made letters
+    if _TAG_SHAPE.match(t) or not any(c.isdigit() for c in t) or len(t) > 12 or not re.search(r"[A-Z]", t):
+        return t
+    best = None
+    for k in range(1, 5):
+        head, tail = t[:k], t[k:]
+        sep = tail[:1] if tail[:1] in "- " else ""
+        tail = tail[len(sep):]
+        letters = "".join(_AS_LETTER.get(c, c) for c in head)
+        # the number: look-alikes to digits, but a last letter may stay (201A)
+        body, last = (tail[:-1], tail[-1]) if len(tail) > 1 and tail[-1].isalpha() and tail[-1] not in _AS_DIGIT else (tail, "")
+        number = "".join(_AS_DIGIT.get(c, c) for c in body) + last
+        cand = f"{letters}{sep}{number}"
+        if not _TAG_SHAPE.match(cand):
+            continue
+        swaps = sum(a != b for a, b in zip(head + body, letters + number[:len(body)]))
+        known = classify_tag(f"{letters} {number}")[0] is not None
+        key = (swaps, not known, k)
+        if best is None or key < best[0]:
+            best = (key, cand)
+    return best[1] if best else t
+
+
+def snap_to_known(text: str, known: list[str]) -> str:
+    """A read only look-alike characters off a tag known to be on this drawing (the spec
+    sheet's, the draw.io file's) is that tag - "PSV2O1" -> "PSV201", "P5V201" -> "PSV201" -
+    when exactly one known tag is that close. Nothing else: tags one letter apart are often
+    both real (V202 / XV202 / GV202 - measured: a one-character-off rule turned right reads
+    wrong). Compared by the tag part ("PC 201 N2" -> PC201), without spaces and hyphens."""
+    flat = lambda x: re.sub(r"[\s\-_]", "", x.upper())
+
+    def key(x: str) -> str:
+        m = re.search(r"[A-Z]{1,4}[\s-]?\d{1,4}[A-Z]?(?:/\d+)?", x.upper())
+        return flat(m.group(0)) if m else flat(x)
+    t = flat(text)
+    by_key: dict[str, str] = {}  # its tag part as written ("TIC 301")
+    for k in known:
+        if k:
+            m = re.search(r"[A-Z]{1,4}[\s-]?\d{1,4}[A-Z]?(?:/\d+)?", k.upper())
+            by_key.setdefault(key(k), m.group(0) if m else k.upper())
+    if not t or t in by_key or len(t) < 3:
+        return text
+    alike = lambda a, b: a == b or _AS_DIGIT.get(a) == b or _AS_DIGIT.get(b) == a or _AS_LETTER.get(a) == b or _AS_LETTER.get(b) == a
+    hits = [k for f, k in by_key.items() if len(f) == len(t) and all(alike(x, y) for x, y in zip(t, f))]
+    return hits[0] if len(hits) == 1 else text
+
+
 def normalize_token(text: str) -> str:
     """Uppercase, trim, and fix the classic letter/digit OCR confusions in the number
     part only (O->0, I/l->1), never in the letter prefix where 'O'/'I' are legitimate."""
@@ -57,10 +121,12 @@ def _box(token: dict) -> tuple[float, float, float, float]:
     return tuple(float(v) for v in token["box"])  # type: ignore[return-value]
 
 
-def assemble_tags(tokens: list[dict], min_conf: float = 0.3) -> list[OcrTag]:
-    """Build tags from tokens: one-line tags as-is, stacked letters+number pairs joined."""
+def assemble_tags(tokens: list[dict], min_conf: float = 0.3, known: list[str] | None = None) -> list[OcrTag]:
+    """Build tags from tokens: one-line tags as-is, stacked letters+number pairs joined.
+    Look-alike characters are put right (repair_tag); with known (the drawing's tags, from
+    a spec sheet or the draw.io file) a near-miss read becomes that tag (snap_to_known)."""
     kept = [t for t in tokens if float(t["conf"]) >= min_conf]
-    items = [(normalize_token(t["text"]), _box(t), float(t["conf"])) for t in kept]
+    items = [(repair_tag(normalize_token(t["text"])), _box(t), float(t["conf"])) for t in kept]
     # tag letters are capitals; a word written in lower case ("Bursting disc") is a note -
     # bar a misread "l" for "I" ("Fl")
     worded = {i for i, t in enumerate(kept) if any(c.islower() for c in t["text"].replace("l", "I"))}
@@ -100,6 +166,9 @@ def assemble_tags(tokens: list[dict], min_conf: float = 0.3) -> list[OcrTag]:
         if i not in used and len(items[i][0]) >= 2:
             tags.append(OcrTag(items[i][0], items[i][1], items[i][2], [items[i][0]]))
             used.add(i)
+    if known:
+        for tag in tags:
+            tag.text = snap_to_known(tag.text, known)
     return tags
 
 

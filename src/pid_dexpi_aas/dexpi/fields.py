@@ -93,7 +93,26 @@ def _unwrap(annotation):
     return args[0] if len(args) == 1 else annotation
 
 
+# A stream entering or leaving the drawing (an off-page connector): DEXPI 1.x gives it no
+# process fields at all, so its conditions are custom attributes on the FlowIn/FlowOut
+# connector. Its fluid and operating temperature also go onto its pipe (DEXPI's typed
+# PipingNetworkSegment.fluidCode / operatingTemperature) when the pipe has none.
+STREAM_FIELDS = [
+    SpecField("OperatingPressure", "Operating pressure", "quantity", ["bar", "barg", "mbar", "kPa", "MPa", "psi"], custom=True),
+    SpecField("OperatingTemperature", "Operating temperature", "quantity", ["°C", "K"], custom=True),
+    SpecField("MassFlowRate", "Mass flow rate", "quantity", ["kg/h", "g/min", "g/s", "kg/s", "t/h"], custom=True),
+    SpecField("VolumeFlowRate", "Volume flow rate", "quantity", ["ml/min", "l/min", "l/h", "m3/h", "Nl/min"], custom=True),
+    SpecField("Fluid", "Fluid (medium, e.g. N2, H2, water)", "text", custom=True),
+    SpecField("FluidCode", "Fluid code (as on the line list)", "text", custom=True),
+    SpecField("Phase", "Phase", "choice", options=["gas", "liquid", "solid", "gas/liquid", "slurry"], custom=True),
+    SpecField("Composition", "Composition (e.g. 5 % H2 in N2)", "text", custom=True),
+]
+_STREAMS = {"(off-page connector)", "FlowInPipeOffPageConnector", "FlowOutPipeOffPageConnector", "PipeOffPageConnector"}
+
+
 def spec_fields(class_name: str) -> list[SpecField]:
+    if class_name in _STREAMS:
+        return list(STREAM_FIELDS)
     cls = dexpi_class(class_name)
     if cls is None:
         return []

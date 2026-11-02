@@ -23,11 +23,14 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -51,6 +54,8 @@ from pid_dexpi_aas.dexpi.fields import prefill, spec_fields  # noqa: E402
 from pid_dexpi_aas.render.routing import route  # noqa: E402
 from pid_dexpi_aas.dexpi.mapping import classify_detection  # noqa: E402
 from pid_dexpi_aas.drawio.parser import parse_drawio_xml_resolved  # noqa: E402
+from pid_dexpi_aas.dexpi.spec_sheet import apply_spec_sheet, read_xlsx, template_xlsx
+from pid_dexpi_aas.review import is_flow_arrow, look_reasons
 from pid_dexpi_aas.review import (  # noqa: E402
     DEXPI_CLASS_CHOICES, FLOW_KNOWN, INSTRUMENT_CLASSES, OFF_PAGE, SKIP, VALVE_CLASSES, ReviewConnection, ReviewDiagram, ReviewSymbol,
     _instrument_attributes, _short_token, cross_check, from_drawio, from_image, to_dexpi, validate_rows,
@@ -67,6 +72,45 @@ INFER_SCRIPT = ROOT / "ml" / "pid2graph" / "pipeline" / "infer_sheet.py"
 DEFAULT_CHECKPOINT = os.environ.get("PID_MODEL_CHECKPOINT", str(next(
     (p for p in (ROOT / "ml" / "models" / "pid2graph_final.pt", ROOT / "ml" / "models" / "pid2graph_fold1.pt")
      if p.exists()), ROOT / "ml" / "models" / "pid2graph_final.pt")))
+# The models to choose from (ml/models): name and what sets each apart. Scores are the
+# 4-fold cross-validation on the 12 real OPEN100 sheets (items / lines), where measured.
+MODEL_INFO = {
+    "pid2graph_final.pt": ("v3 (default)",
+                           "The tested default, and the best measured: OPEN100 items 0.719, lines 0.343 (4-fold "
+                           "cross-validation, tiles merged border-aware); text read with docTR."),
+    "pid2graph_final_v5.pt": ("v5 - flow arrows (not recommended)",
+                              "v3 + the team drawings' flow arrows labelled (boxed at OPEN100's arrow size). OPEN100 "
+                              "items 0.673, lines 0.268 - slightly below v3. Not recommended: on drawings unlike the "
+                              "team's (MEM4CHEM Zaiput) it reads many valves as arrows (28 vs v3's 9) and links "
+                              "everything around them."),
+    "pid2graph_final_v4.pt": ("v4 - flow arrows, small boxes (superseded)",
+                              "Arrows boxed at their drawn size - too small to learn. OPEN100 items 0.680, lines "
+                              "0.251. Kept for comparison; use v5 instead."),
+    "pid2graph_final_v6.pt": ("v6 - flow arrows + bends and tees",
+                              "v5 + each pipe's corners and tee joints learned as points (folded back into "
+                              "connections). Final model only - no cross-validation score."),
+    "pid2graph_fold1.pt": ("Fold 1 (old release)",
+                           "The first released model (one cross-validation fold, before the team-data fixes). "
+                           "For reference only."),
+}
+
+
+# superseded - kept on disk, not offered: worse links than v3 on all 4 OPEN100 folds
+# (with the new tile merge: links mAP v3 0.343, v4 0.317, v5 0.327); v5 also reads valves as
+# arrows on drawings unlike the team's
+HIDDEN_MODELS = {"pid2graph_final_v4.pt", "pid2graph_final_v5.pt", "pid2graph_final_v6.pt"}
+
+
+def available_models() -> dict[str, tuple[str, str]]:
+    """{path: (name, description)} for the model files present, the default first."""
+    found = sorted((p for p in (ROOT / "ml" / "models").glob("*.pt") if p.name not in HIDDEN_MODELS),
+                   key=lambda p: (list(MODEL_INFO).index(p.name) if p.name in MODEL_INFO else len(MODEL_INFO), p.name))
+    out = {str(p): MODEL_INFO.get(p.name, (p.stem, "No description.")) for p in found}
+    if DEFAULT_CHECKPOINT not in out:  # PID_MODEL_CHECKPOINT pointing elsewhere
+        out = {DEFAULT_CHECKPOINT: (Path(DEFAULT_CHECKPOINT).stem, "Set by PID_MODEL_CHECKPOINT."), **out}
+    return out
+
+
 HAS_GPU = shutil.which("nvidia-smi") is not None
 # Served to others (scripts/serve_public.sh): a password screen, and no model settings -
 # visitors cannot point the app at files on this PC.
@@ -81,6 +125,17 @@ def cpu_reason(choice: str) -> str:
     return ("The graphics card is busy (a model is being trained on it), so pictures are processed on the "
             "processor instead.")
 GPU_BUSY_MB = 1500  # another process holding this much GPU memory is a training run (desktop apps hold < 100)
+
+
+@st.cache_data(show_spinner=False)
+def blank_spec_sheet() -> bytes:
+    return template_xlsx()
+
+
+def sheet_name() -> str:
+    """The loaded spec sheet, for the editor's Sync buttons ("" = none)."""
+    sheet = st.session_state.get("spec_sheet")
+    return f"{sheet['name']} ({len(sheet['rows'])} tags)" if sheet else ""
 
 
 @st.cache_data(ttl=20, show_spinner=False)
@@ -186,6 +241,11 @@ with st.sidebar:
     in_drawio, in_picture, in_editor = st.tabs(["draw.io file", "Picture", "Editor"])
     with in_drawio:
         uploaded_drawio = st.file_uploader("draw.io file", type=["drawio", "xml"])
+        frames_as_sections = st.checkbox(
+            "Frames are plant sections", False, key="frames_as_sections",
+            help="Coloured frames drawn around groups of items (e.g. 'Autoclave') are not part of a P&ID and are "
+                 "left out. Tick to use each as a plant section instead: its name goes onto the items inside it "
+                 "(DEXPI PlantSectionName).")
     with in_picture:
         image_file = st.file_uploader("P&ID image", type=["png", "jpg", "jpeg"])
         st.caption("With a draw.io file as well, the drawing is checked against the picture.")
@@ -203,20 +263,31 @@ with st.sidebar:
         else:
             st.caption("Draw a P&ID, or change the uploaded draw.io file - or a picture's result - in draw.io "
                        "right here. **Save** (Ctrl+S) in the editor loads it into the app.")
+            st.session_state.setdefault("editor_open", True)  # the main screen; the map is the old view
             st.toggle("Show the editor", key="editor_open")
             if st.session_state.get("editor_xml"):
-                st.download_button("Download the edited drawing", st.session_state["editor_xml"].encode(),
+                st.download_button("Download the edited drawing", lambda x=st.session_state["editor_xml"]: x.encode(),
                                    file_name=st.session_state["editor_name"], mime="application/xml",
                                    width="stretch")
                 if st.button("Discard the edits", width="stretch",
                              help="Back to the uploaded draw.io file (or nothing)"):
                     st.session_state.pop("editor_xml")
                     st.rerun()
+    models = available_models()
+    checkpoint = st.selectbox("Model (pictures)", list(models), format_func=lambda p: models[p][0],
+                              index=list(models).index(DEFAULT_CHECKPOINT), key="model_pick",
+                              help="Which trained model reads uploaded pictures. Each model's result is kept, "
+                                   "so switching back is instant.")
+    with st.expander("About this model"):
+        st.caption(models[checkpoint][1])
+        st.caption("All models: " + " · ".join(f"**{n}**" for n, _ in models.values()))
     if PUBLIC:
-        checkpoint, device = DEFAULT_CHECKPOINT, "auto"
+        device = "auto"
     else:
         with st.expander("Model settings"):
-            checkpoint = st.text_input("Model checkpoint", DEFAULT_CHECKPOINT)
+            other = st.text_input("Other model file", "", help="A checkpoint path on this PC; overrides the list.")
+            if other.strip():
+                checkpoint = other.strip()
             device = st.selectbox("Device", ["auto", "cuda", "cpu"] if HAS_GPU else ["cpu", "cuda"],
                                   help="auto: the GPU unless a training run is using it, else the CPU. CPU works (no NVIDIA GPU "
                                        "needed) but takes minutes per sheet.")
@@ -227,6 +298,33 @@ with st.sidebar:
     st.header("Saved review")
     review_upload = st.file_uploader("Resume a saved review (.json)", type=["json"])
     st.divider()
+    st.header("Specifications")
+    st.caption("An Excel sheet with a row per item: its tag (as on the P&ID), its DEXPI type from a dropdown, "
+               "and then the fields of that type to fill in - they change with the type picked. Filled in once "
+               "and used for every P&ID: items whose tags match get its values (empty fields only) and its type "
+               "(where the drawing gave none); the editor's 'Sync from the spec sheet' puts them over what is there.")
+    st.download_button("Download a blank spec sheet (.xlsx)", blank_spec_sheet, file_name="spec_sheet.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
+    spec_slot = st.container()  # the sheet with this drawing's tags, once there is a drawing
+    spec_upload = st.file_uploader("Filled-in spec sheet (.xlsx)", type=["xlsx"], key="spec_upload")
+    if spec_upload is not None:
+        digest = hashlib.sha256(spec_upload.getvalue()).hexdigest()[:16]
+        if (st.session_state.get("spec_sheet") or {}).get("digest") != digest:
+            try:
+                rows, sheet_notes = read_xlsx(spec_upload.getvalue())
+                st.session_state["spec_sheet"] = {"digest": digest, "name": spec_upload.name, "rows": rows,
+                                                  "notes": sheet_notes}
+            except Exception as exc:  # not the template, a damaged file
+                st.session_state.pop("spec_sheet", None)
+                st.error(f"This file can't be read as a spec sheet: {exc}. Start from 'Download a blank spec sheet'.")
+        sheet = st.session_state.get("spec_sheet")
+        if sheet:
+            st.caption(f"{len(sheet['rows'])} tags in {sheet['name']}.")
+            for note in sheet["notes"][:5]:
+                st.warning(note)
+    else:
+        st.session_state.pop("spec_sheet", None)
+    st.divider()
     st.header("Training data")
     with st.expander("Add a drawing labelled in draw.io"):
         st.caption("Checked sheets are added from 'Add this to the training data' at the bottom of the page. "
@@ -235,6 +333,11 @@ with st.sidebar:
         label_upload = st.file_uploader("Corrected .drawio", type=["drawio", "xml"], key="label_upload")
         show_training = st.checkbox("Show the drawings added so far", key="show_training")
 
+
+
+def drawn(xml: str | None) -> bool:
+    """Something is drawn in it: an empty page (a blank editor's autosave) is no drawing."""
+    return bool(xml) and ('vertex="1"' in xml or 'edge="1"' in xml)
 
 
 class EditedDrawing:
@@ -253,18 +356,116 @@ upload_id = hashlib.sha256(uploaded_drawio.getvalue()).hexdigest() if uploaded_d
 if st.session_state.get("editor_base") != upload_id:
     st.session_state.update(editor_base=upload_id)
     st.session_state.pop("editor_xml", None)
-if st.session_state.get("editor_open") and EDITOR_INSTALLED:
+def model_key(checkpoint: str) -> bytes:
+    """A model in cache keys: its path and its file's time - a retrained model deployed under
+    the same name (ml/pid2graph/auto_retrain.py) is a new model, not the cached one."""
+    try:
+        return f"{checkpoint}|{os.path.getmtime(checkpoint)}".encode()
+    except OSError:
+        return checkpoint.encode()
+
+
+def _digest(*parts: bytes) -> str:
+    h = hashlib.sha256()
+    for p in parts:
+        h.update(p)
+    return h.hexdigest()[:16]
+
+
+# Uploads and the model's results are on disk only while they are in use (security, 2026-11):
+# in a private folder per browser session (mkdtemp: mode 0700, random name), deleted as soon as
+# its picture or drawing is removed or replaced, and swept once idle for SESSION_TTL (a closed
+# tab sends nothing). The shared folder keeps only the model lock and its timings.
+WORK = Path(tempfile.gettempdir()) / "pid_dexpi_app"
+SESSIONS = WORK / "sessions"
+SESSION_TTL = 3 * 3600
+KEEP_SHARED = {"infer.lock", "infer_timings.json"}
+
+
+def session_dir() -> Path:
+    """This browser session's private folder (made on first use; marked in use on each run)."""
+    d = st.session_state.get("work_dir")
+    if d and Path(d).is_dir():
+        os.utime(d)
+        return Path(d)
+    SESSIONS.mkdir(parents=True, exist_ok=True)
+    os.chmod(WORK, 0o700)
+    d = tempfile.mkdtemp(prefix="s_", dir=SESSIONS)
+    st.session_state["work_dir"] = d
+    return Path(d)
+
+
+def forget_upload(key: str) -> None:
+    """Delete everything kept for one upload: its copy, the model's result, the editor's copy."""
+    d = st.session_state.get("work_dir")
+    if key and d:
+        for p in Path(d).glob(f"{key}*"):
+            p.unlink(missing_ok=True)
+    from pid_dexpi_aas.render.drawio_editor import FILES as EDITOR_FILES
+    for name in st.session_state.setdefault("editor_pictures", {}).pop(key, []):
+        (EDITOR_FILES / "pictures" / name).unlink(missing_ok=True)
+
+
+def sweep_old_files() -> None:
+    """Sessions idle for SESSION_TTL, the editor's copies as old, and every upload the app kept
+    before 2026-11 (one shared folder of all of them). At most once a minute."""
+    global _LAST_SWEEP
+    now = time.time()
+    if now - _LAST_SWEEP < 60:
+        return
+    _LAST_SWEEP = now
+    from pid_dexpi_aas.render.drawio_editor import FILES as EDITOR_FILES
+    WORK.mkdir(exist_ok=True)
+    for p in WORK.iterdir():
+        if p.is_file() and p.name not in KEEP_SHARED:
+            p.unlink(missing_ok=True)
+    for d in SESSIONS.iterdir() if SESSIONS.exists() else []:
+        if now - d.stat().st_mtime > SESSION_TTL:
+            shutil.rmtree(d, ignore_errors=True)
+    for p in (EDITOR_FILES / "pictures").glob("*.png"):
+        if now - p.stat().st_mtime > SESSION_TTL:
+            p.unlink(missing_ok=True)
+
+
+_LAST_SWEEP = 0.0
+sweep_old_files()
+
+
+# Bump when the model's input handling changes, so results cached by an older version
+# are redone (v2: dark-theme exports keep their light lines - sheet_image.py; v3: traced pipes;
+# v5: tiles merged border-aware with weighted box fusion - stitch.py; v6: docTR reads the text;
+# v7: the pipe tracer keeps thin lines and joins lines ending just short of a symbol).
+INFER_VERSION = b"v13"
+
+
+# The picture the review on screen was made from, with which model: a new picture, a re-run, or
+# a newly trained model deployed make it stale - the editor then shows the progress of reading
+# the picture in its place (PROGRESS_SLOT), not the old drawing, and opens with the new result.
+PICTURE_KEY = _digest(image_file.getvalue(), model_key(checkpoint), INFER_VERSION) if image_file else ""
+PICTURE_STALE = bool(image_file) and not uploaded_drawio and (
+    bool(st.session_state.get("rerun_model")) or st.session_state.get("review_picture") != PICTURE_KEY)
+PROGRESS_SLOT = None
+# a removed or replaced picture: its files go at once (the review on screen goes with it)
+if st.session_state.get("kept_picture", "") not in ("", PICTURE_KEY):
+    forget_upload(st.session_state["kept_picture"])
+st.session_state["kept_picture"] = PICTURE_KEY
+if st.session_state.get("editor_open") and EDITOR_INSTALLED and PICTURE_STALE:
+    st.markdown("### draw.io editor")
+    PROGRESS_SLOT = st.empty()
+    st.info("Reading the picture - the editor opens with the result.")
+elif st.session_state.get("editor_open") and EDITOR_INSTALLED:
     from pid_dexpi_aas.drawio.editor_data import editor_patch
     from pid_dexpi_aas.render.drawio_editor import write_schema
     st.markdown("### draw.io editor")
     st.caption("Draw with the P&ID libraries on the left; set each item's and line's DEXPI details in the panel on "
-               "the right. **Save** (Ctrl+S) loads the drawing into the check below. The side panel below and this "
-               "editor stay in step: details changed in either show up in both.")
+               "the right (Find: search, and what still needs a look). Changes save themselves after a few seconds "
+               "(or Ctrl+S) and go into the checks and exports below.")
     write_schema()
     # each cell's details from the review as the last run left it (side-panel edits included);
     # a Save rebuilds the review further down, which reruns once to bring them here
     prev = st.session_state.get("review")
-    if prev is not None and prev.drawio is None and prev.image_path and not uploaded_drawio:
+    # a picture review only while its picture is still uploaded: removed, the editor clears at once
+    if prev is not None and prev.drawio is None and prev.image_path and not uploaded_drawio and image_file:
         # a picture review: the model's result drawn over the picture, rebuilt from the review each
         # time the editor is switched on (so map edits made meanwhile are in it); a Save updates the rows
         from pid_dexpi_aas.drawio.picture_editor import apply_editor_drawing, drawing_ids, review_to_editor_xml
@@ -272,12 +473,17 @@ if st.session_state.get("editor_open") and EDITOR_INSTALLED:
         doc = st.session_state.get("editor_pic_doc")
         if (doc is None or doc["key"] != st.session_state.get("input_key")
                 or not st.session_state.get("editor_was_open")):
-            xml = review_to_editor_xml(prev, picture_url(prev.image_path))
+            url = picture_url(prev.image_path, tag=session_dir().name)  # this session's own copy
+            st.session_state.setdefault("editor_pictures", {}).setdefault(PICTURE_KEY, []).append(url.rsplit("/", 1)[-1])
+            xml = review_to_editor_xml(prev, url)
             doc = {"key": st.session_state.get("input_key"), "xml": xml, "ids": drawing_ids(xml)}
             st.session_state["editor_pic_doc"] = doc
         st.session_state["editor_was_open"] = True
-        saved = drawio_editor(doc["xml"], editor_patch(prev), title=prev.source_name, mode="picture")
+        saved = drawio_editor(doc["xml"], editor_patch(prev), title=prev.source_name, mode="picture", sheet=sheet_name(),
+                              focus=st.session_state.get("editor_focus", ""))
         if saved and saved.get("t") != st.session_state.get("editor_t"):  # a new Save
+            if saved.get("sync"):
+                st.session_state["spec_sync"] = saved["sync"]
             # the rows the editor was showing (it adds the side panel's new ones as they come)
             changes = apply_editor_drawing(prev, saved["xml"], set(saved.get("ids") or doc["ids"]), saved.get("routes"))
             doc.update(xml=saved["xml"], ids=drawing_ids(saved["xml"]))
@@ -286,22 +492,38 @@ if st.session_state.get("editor_open") and EDITOR_INSTALLED:
             done = ", ".join(f"{v} {k}" for k, v in changes.items() if v)
             st.toast(f"Loaded from the editor: {done or 'details updated'}.")
             st.rerun()
+    elif image_file and not uploaded_drawio and not drawn(st.session_state.get("editor_xml")):
+        # a picture being read: the editor opens with the model's result once it is there (a
+        # blank editor here autosaved its empty page, which then stood in for a draw.io file)
+        st.info("The editor opens with the model's result once the picture has been read.")
     else:
         saved = drawio_editor(st.session_state.get("editor_xml") or (uploaded_drawio.getvalue().decode("utf-8", "replace")
                                                                    if uploaded_drawio else ""),
                               editor_patch(prev) if prev is not None and prev.drawio is not None else {},
-                              title=uploaded_drawio.name if uploaded_drawio else "new drawing")
+                              title=uploaded_drawio.name if uploaded_drawio else "new drawing", sheet=sheet_name(),
+                              focus=st.session_state.get("editor_focus", ""))
         if saved and saved.get("t") != st.session_state.get("editor_t"):  # a new Save
+            if saved.get("sync"):
+                st.session_state["spec_sync"] = saved["sync"]
             stem = Path(uploaded_drawio.name).stem if uploaded_drawio else "drawing"
             xml = saved["xml"]
             if not xml.lstrip().startswith("<mxfile"):  # embed mode saves the bare graph: make it a .drawio file
                 xml = f'<mxfile host="pid-dexpi-aas"><diagram id="page-1" name="Page-1">{xml}</diagram></mxfile>'
-            st.session_state.update(editor_t=saved["t"], editor_xml=xml, editor_name=f"{stem} (edited).drawio")
-            st.rerun()
+            st.session_state["editor_t"] = saved["t"]
+            if drawn(xml) or uploaded_drawio:  # an empty page saved from a blank editor is not a drawing
+                st.session_state.update(editor_xml=xml, editor_name=f"{stem} (edited).drawio")
+                st.rerun()
 else:
     st.session_state["editor_was_open"] = False
 drawio_file = (EditedDrawing(st.session_state["editor_name"], st.session_state["editor_xml"].encode())
-               if st.session_state.get("editor_xml") else uploaded_drawio)
+               if drawn(st.session_state.get("editor_xml")) else uploaded_drawio)
+
+# the same for a draw.io drawing (each saved edit is a new one: the previous copy goes)
+_drawio_key = "d" + _digest(drawio_file.getvalue()) if drawio_file else ""
+if st.session_state.get("kept_drawio", "") not in ("", _drawio_key):
+    forget_upload(st.session_state["kept_drawio"])
+st.session_state["kept_drawio"] = _drawio_key
+
 
 DATA_ROOT = ROOT / "data" / "PID2Graph"
 if label_upload is not None or show_training:
@@ -360,51 +582,133 @@ if drawio_file is None and image_file is None and review_upload is None:
             "to get started.")
     st.stop()
 
-WORK = Path(tempfile.gettempdir()) / "pid_dexpi_app"
-WORK.mkdir(exist_ok=True)
+def _plant_add(stem: str, xml: bytes, svg, meta: dict) -> None:
+    """A built drawing into the plant AAS (st.session_state["plant_models"])."""
+    st.session_state.setdefault("plant_models", {})[stem] = {"xml": xml, "svg": svg, "meta": meta}
+    st.toast(f"{stem} is in the plant AAS ({len(st.session_state['plant_models'])} drawings).")
 
 
-def _digest(*parts: bytes) -> str:
-    h = hashlib.sha256()
-    for p in parts:
-        h.update(p)
-    return h.hexdigest()[:16]
+def _slug_name(text: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("_") or "plant"
 
 
-# Bump when the model's input handling changes, so results cached by an older version
-# are redone (v2: dark-theme exports keep their light lines - sheet_image.py; v3: traced pipes).
-INFER_VERSION = b"v4"
 
 
 def _image_done(image_bytes: bytes, checkpoint: str) -> bool:
     """Already processed (no wait)?"""
-    return (WORK / f"{_digest(image_bytes, checkpoint.encode(), INFER_VERSION)}.json").exists()
+    return (session_dir() / f"{_digest(image_bytes, model_key(checkpoint), INFER_VERSION)}.json").exists()
 
 
-@st.cache_data(show_spinner=False)
-def run_image_model(image_bytes: bytes, image_name: str, checkpoint: str, device: str) -> dict:
-    # the result does not depend on the device, so it is not part of the key
-    key = _digest(image_bytes, checkpoint.encode(), INFER_VERSION)
-    img_path = WORK / f"{key}_{Path(image_name).name}"
-    out_path = WORK / f"{key}.json"
+def infer_with_progress(image_bytes: bytes, image_name: str, checkpoint: str, device: str) -> None:
+    """Run the model on a picture (infer_sheet.py, in the ML environment) with a progress bar:
+    the script writes its stage and how far it is (infer_sheet.Progress - weighted by this
+    sheet's size and how fast this machine has been); the bar shows it, with the time left.
+    One picture at a time: another one being read is waited for, and the bar says so."""
+    key = _digest(image_bytes, model_key(checkpoint), INFER_VERSION)
+    work = session_dir()
+    img_path = work / f"{key}_{Path(image_name).name}"
+    out_path = work / f"{key}.json"
+    if out_path.exists():
+        return
     img_path.write_bytes(image_bytes)
+    bar = (PROGRESS_SLOT or st).progress(0.0, text="Starting...")   # above the editor, when it is open
+    try:
+        import fcntl
+    except ImportError:  # Windows: no lock (a single local user there)
+        fcntl = None
+    # one image at a time: two users at once would hold the model twice
+    with open(WORK / "infer.lock", "w") as lock:
+        if fcntl is not None:
+            t0 = time.time()
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    bar.progress(0.0, text=f"Waiting for another picture to finish ({time.time() - t0:.0f} s) - "
+                                           "yours starts right after it")
+                    time.sleep(1.0)
+        if out_path.exists():  # read while we waited (the same picture)
+            bar.empty()
+            return
+        progress_path = work / f"{key}.progress.json"
+        progress_path.unlink(missing_ok=True)
+        err_path = work / f"{key}.err"
+        timings_path = WORK / "infer_timings.json"
+        try:  # how long start-up and a whole run took before (infer_sheet.Progress)
+            past = json.loads(timings_path.read_text()).get("cuda" if pick_device(device) != "cpu" else "cpu", {})
+        except (OSError, ValueError):
+            past = {}
+        startup_s, total_s = float(past.get("startup", 4.0)), float(past.get("_total", 12.0))
+        with open(err_path, "w") as err:
+            t0 = time.time()
+            proc = subprocess.Popen(
+                [str(ML_PYTHON), str(INFER_SCRIPT), "--image", str(img_path), "--checkpoint", checkpoint,
+                 "--out", str(out_path), "--device", pick_device(device), "--progress", str(progress_path),
+                 "--timings", str(timings_path), "--started", str(t0)],
+                stdout=subprocess.DEVNULL, stderr=err, text=True)
+            shown, anchor, last = 0.0, None, -1.0   # anchor: (bar, report) when the reports took over / fell back
+            while proc.poll() is None:
+                now = time.time()
+                try:
+                    p = json.loads(progress_path.read_text())
+                except (OSError, ValueError):  # not written yet: Python and the libraries starting up
+                    p = None
+                if p is None:
+                    # start-up: along its usual share of a run, easing off (never quite to its end)
+                    span = startup_s / max(startup_s, total_s)
+                    target = span * (1 - math.exp(-1.5 * (now - t0) / max(0.5, startup_s)))
+                    step, total = "Starting the model", max(startup_s, total_s)
+                else:
+                    # the last report, moved on within its stage at the stage's expected pace -
+                    # easing off as it overruns (a slow stage keeps creeping, never stops)
+                    a, b = float(p.get("stage_start", 0.0)), float(p.get("stage_end", p.get("done", 0.0)))
+                    pace = (now - float(p.get("stage_t0", now))) / max(0.2, float(p.get("stage_est", 1.0)))
+                    target = max(float(p.get("done", 0.0)), a + (b - a) * (1 - math.exp(-1.5 * pace)))
+                    step, total = p.get("step", ""), float(p.get("total", total_s))
+                    # the reports' own scale, fitted into what is left of the bar: no stall when the
+                    # start-up guess ran ahead of them, or when they fall back (a stage turned out
+                    # bigger - how much text needs a second look is known only then)
+                    if anchor is None or target < last - 1e-4:
+                        anchor = (shown, target)
+                    last = target
+                    target = anchor[0] + (1 - anchor[0]) * (target - anchor[1]) / max(1e-6, 1 - anchor[1])
+                shown = max(shown, min(0.99, target))   # never backwards
+                elapsed = now - t0
+                left = total * (1 - shown)
+                if shown > 0.3:  # well under way: this run's own pace counts too
+                    left = 0.5 * left + 0.5 * elapsed * (1 - shown) / shown
+                left = f" - about {left:.0f} s left" if left >= 1 else ""
+                bar.progress(shown, text=f"{step}{left} ({elapsed:.0f} s so far)")
+                time.sleep(0.1)
+        progress_path.unlink(missing_ok=True)
+        message = err_path.read_text()[-3000:]
+        err_path.unlink(missing_ok=True)
+        if proc.returncode != 0:
+            bar.empty()
+            raise RuntimeError(message)
+    bar.progress(1.0, text="Done")
+    bar.empty()
+
+
+def run_image_model(image_bytes: bytes, image_name: str, checkpoint: str, device: str, model_version: bytes = b"") -> dict:
+    # the result is read from this session's folder (no cache shared between sessions); the key
+    # holds the model's file time (model_key), so a model retrained under the same name runs again.
+    # infer_with_progress has written the result already; this only reads it (and runs it, with
+    # no bar, if it is missing)
+    key = _digest(image_bytes, model_key(checkpoint), INFER_VERSION)
+    work = session_dir()
+    out_path = work / f"{key}.json"
     if not out_path.exists():
-        try:
-            import fcntl
-        except ImportError:  # Windows: no lock (a single local user there)
-            fcntl = None
-        # one image at a time: two users at once would hold the model twice
-        with open(WORK / "infer.lock", "w") as lock:
-            if fcntl is not None:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-            if not out_path.exists():
-                proc = subprocess.run(
-                    [str(ML_PYTHON), str(INFER_SCRIPT), "--image", str(img_path), "--checkpoint", checkpoint,
-                     "--out", str(out_path), "--device", pick_device(device)],
-                    capture_output=True, text=True,
-                )
-                if proc.returncode != 0:
-                    raise RuntimeError(proc.stderr[-3000:])
+        img_path = work / f"{key}_{Path(image_name).name}"
+        img_path.write_bytes(image_bytes)
+        proc = subprocess.run(
+            [str(ML_PYTHON), str(INFER_SCRIPT), "--image", str(img_path), "--checkpoint", checkpoint,
+             "--out", str(out_path), "--device", pick_device(device)],
+            capture_output=True, text=True,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stderr[-3000:])
     return json.loads(out_path.read_text())
 
 
@@ -429,25 +733,36 @@ def build_review() -> ReviewDiagram:
             note.warning(f"**This will take {CPU_MINUTES}** - please keep this tab open. "
                          f"{cpu_reason(device)} If someone else's picture is being "
                          "processed, yours starts right after it. The page fills in when it is done.")
-        with st.spinner("Finding symbols, lines and tags in the picture "
-                        + ("(about 15 seconds)..." if on == "cuda" else f"on the processor ({CPU_MINUTES})..."),
-                        show_time=True):
-            try:
-                infer = run_image_model(image_file.getvalue(), image_file.name, checkpoint, on)
-            except RuntimeError as exc:
-                st.error("Image model failed:")
-                st.code(str(exc))
-                st.stop()
+        try:
+            infer_with_progress(image_file.getvalue(), image_file.name, checkpoint, on)
+            infer = run_image_model(image_file.getvalue(), image_file.name, checkpoint, on, model_key(checkpoint))
+        except RuntimeError as exc:
+            st.error("Image model failed:")
+            st.code(str(exc))
+            st.stop()
         note.empty()
-        image_review = from_image(infer, image_file.name)
-    if drawio_review and image_review:
-        return cross_check(drawio_review, image_review, infer)
-    return drawio_review or image_review
+        # the drawing's tags, where known (a spec sheet; a draw.io file given with the picture):
+        # OCR reads a look-alike off one of them become it (ocr_tags.snap_to_known)
+        known = [row["tag"] for row in (st.session_state.get("spec_sheet") or {}).get("rows", {}).values()]
+        if drawio_review is not None:
+            known += [s.tag for s in drawio_review.symbols if s.tag]
+        image_review = from_image(infer, image_file.name, known_tags=known or None)
+    review = cross_check(drawio_review, image_review, infer) if drawio_review and image_review \
+        else drawio_review or image_review
+    if review is not None and not frames_as_sections:
+        # Frames drawn around groups of items are not part of a P&ID (team review, 2026-10): no
+        # plant sections from them. Their lines are still known as frames, so never pipes.
+        for s in review.symbols:
+            s.section = ""
+        if review.drawio is not None:
+            review.drawio.sections = []
+    return review
 
 
 def decode_drawio_bytes(data: bytes, name: str) -> tuple[str, Path]:
-    path = WORK / f"{_digest(data)}_{Path(name).name}"
-    path.write_bytes(data)
+    path = session_dir() / f"d{_digest(data)}_{Path(name).name}"
+    if not path.exists():
+        path.write_bytes(data)
     return decode_drawio(path)[0], path
 
 
@@ -463,12 +778,12 @@ def review_to_json(review: ReviewDiagram) -> str:
 # Session state: rebuild the review only when the inputs change, so edits survive reruns.
 if st.session_state.pop("rerun_model", False) and image_file is not None:
     # "Re-run the model": drop the kept result for this picture, so it is processed again
-    (WORK / f"{_digest(image_file.getvalue(), checkpoint.encode(), INFER_VERSION)}.json").unlink(missing_ok=True)
-    run_image_model.clear()
+    (session_dir() / f"{_digest(image_file.getvalue(), model_key(checkpoint), INFER_VERSION)}.json").unlink(missing_ok=True)
 input_key = _digest(
     drawio_file.getvalue() if drawio_file else b"", image_file.getvalue() if image_file else b"",
-    review_upload.getvalue() if review_upload else b"", checkpoint.encode(),
+    review_upload.getvalue() if review_upload else b"", model_key(checkpoint),
     str(st.session_state.get("model_run", 0)).encode(),  # a re-run starts the review again
+    b"sections" if frames_as_sections else b"",
 )
 if st.session_state.get("input_key") != input_key:
     if review_upload is not None:
@@ -479,10 +794,52 @@ if st.session_state.get("input_key") != input_key:
         review.unattached_tags = saved.get("unattached_tags", [])
     else:
         review = build_review()
-    st.session_state.update(input_key=input_key, review=review, editor_version=0)
+    st.session_state.update(input_key=input_key, review=review, editor_version=0,
+                            review_picture=PICTURE_KEY if image_file and not uploaded_drawio else "")
     if st.session_state.get("editor_open"):
         st.rerun()  # the editor at the top takes each cell's details from this new review
 review: ReviewDiagram = st.session_state["review"]
+
+# The spec sheet: every item whose tag is in it gets its values - automatically into empty
+# fields, once per drawing (and after each picture Save, for items added in the editor);
+# over what is there when the editor asks ("Sync from the spec sheet").
+sheet = st.session_state.get("spec_sheet")
+if sheet:
+    mark = (st.session_state.get("input_key"), sheet["digest"], st.session_state.get("editor_version", 0))
+    rerun = False
+    if st.session_state.get("spec_applied") != mark:
+        res = apply_spec_sheet(review, sheet["rows"])
+        st.session_state["spec_applied"] = mark
+        if res["fields"] or res.get("types"):
+            typed = f", {res['types']} DEXPI types set" if res.get("types") else ""
+            st.toast(f"Spec sheet: {res['fields']} values filled in on {res['items']} items{typed}.")
+            rerun = True
+        st.session_state["spec_result"] = res
+    sync = st.session_state.pop("spec_sync", None)
+    if sync:
+        res = apply_spec_sheet(review, sheet["rows"], overwrite=True, ids=None if sync == "all" else set(sync))
+        typed = f", {res['types']} DEXPI types set" if res.get("types") else ""
+        st.toast(f"Synced from the spec sheet: {res['items']} items matched, {res['fields']} values written{typed}."
+                 if res["items"] else "No item's tag is in the spec sheet.")
+        st.session_state["spec_result"] = {**res, "unused": st.session_state.get("spec_result", {}).get("unused", [])}
+        rerun = bool(res["fields"] or res.get("types"))
+    if rerun and st.session_state.get("editor_open"):
+        st.rerun()  # the editor at the top shows the new specifications
+    res = st.session_state.get("spec_result") or {}
+    with spec_slot:
+        if res.get("problems"):
+            with st.expander(f"Spec sheet: {len(res['problems'])} values not used"):
+                st.markdown("\n".join(f"- {p}" for p in res["problems"][:50]))
+        if res.get("unused"):
+            st.caption(f"Not on this drawing: {', '.join(res['unused'][:12])}" + (" ..." if len(res["unused"]) > 12 else ""))
+elif st.session_state.pop("spec_sync", None):
+    st.toast("Upload a spec sheet in the sidebar first.")
+with spec_slot:
+    st.download_button("Download a spec sheet with this drawing's tags", lambda r=review: template_xlsx(r),
+                       file_name=f"{Path(review.source_name).stem}_specs.xlsx", width="stretch",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       help="The template with every tagged item of this drawing on its tab (and the specifications "
+                            "already set) - fill in the rest and upload it.")
 
 mode = " + ".join(x for x, f in (("draw.io", drawio_file), ("image", image_file)) if f) or "saved review"
 st.caption(f"**{review.source_name}** · input: {mode}" + (
@@ -500,15 +857,7 @@ if image_file is not None and drawio_file is None:
 
 # ------------------------------------------------------------------ needs-review logic ---
 def needs_review(s: ReviewSymbol) -> bool:
-    if s.source == "manual":
-        return False
-    return (
-        s.dexpi_class == SKIP and s.source != "draw.io"
-        or (s.confidence is not None and s.confidence < 0.7)
-        or "overrides" in s.notes
-        or (s.image_check and not s.image_check.startswith("model agrees"))
-        or (s.source == "image model" and not s.tag and s.dexpi_class not in (SKIP,))
-    )
+    return bool(look_reasons(s))  # review.look_reasons: the same rule flags items in the editor
 
 
 # ------------------------------------------------------------------------- overlay ---
@@ -794,17 +1143,20 @@ def picture_layers(review: ReviewDiagram) -> Layers | None:
     if review.picture:  # both inputs: the picture's own findings only
         return hybrid_picture_layers(review)
     only = lambda s: s.image_check.startswith("only in image")
+    # flow arrows are not items (is_flow_arrow): not drawn - only their pipes' flow shows them
+    arrows = {s.id for s in review.symbols if is_flow_arrow(s)}
     boxes = [Box(s.id, tuple(s.box), MODEL_ONLY if only(s) else symbol_color(s, set()),
                  "" if only(s) or status(s) == "left out" else item_name(s.id), 3,
                  _symbol_tip(s), only(s) or _left_out(s), "model" if only(s) else _box_kind(s))
-             for s in review.symbols if s.box]
+             for s in review.symbols if s.box and s.id not in arrows]
     ocr = _ocr_boxes(review)
     name = {s.id: item_name(s.id) for s in review.symbols}
     basis = {"drawn arrow": "arrow", "implied": "implied", "reviewer": "reviewer"}
     conns = [(c.id, c.from_id, c.to_id, c.line_type, c.include,
               f"{name.get(c.from_id, c.from_id)} -> {name.get(c.to_id, c.to_id)}: {LINE_LABELS.get(c.line_type, c.line_type)}"
               f", {found_by(c)}" + (f", flow: {FLOW_LABELS.get(c.flow, c.flow)}" if c.flow else ""),
-              c.path, basis.get(c.flow, "")) for c in review.connections]
+              c.path, basis.get(c.flow, "")) for c in review.connections
+             if c.from_id not in arrows and c.to_id not in arrows]
     layers = image_layers(review.image_path, conns, boxes + ocr)
     layers.legend = BOX_LEGEND + layers.legend + [
         (f"text read in the picture, not on any item ({len(ocr)})", OCR_TAG, "ocr", "box")]
@@ -938,22 +1290,29 @@ version = st.session_state["editor_version"]
 # ---------------------------------------------------------------------------- layout ---
 n_in = sum(status(s) == "in DEXPI" for s in review.symbols)
 n_check = sum(status(s) == "needs review" for s in review.symbols)
-n_out = sum(status(s) == "left out" for s in review.symbols)
+n_out = sum(status(s) == "left out" and not is_flow_arrow(s) for s in review.symbols)
 n_conn = sum(c.include for c in review.connections)
 fs = review.drawio.flow if review.drawio is not None and review.drawio.flow else None
 n_unknown = fs.unknown if fs else sum(c.include and c.line_type == "process" and not c.flow for c in review.connections)
 m = st.columns(5)
 m[0].metric("Items in DEXPI", n_in)
-m[1].metric("Items to check", n_check, help="Red on the map. Use 'Next to check' in the panel.")
+m[1].metric("Items to check", n_check, help="Marked ! in the editor ('Needs a look' in its Find list); the guided "
+            "check takes them first.")
 m[2].metric("Items left out", n_out, help="Decorative shapes, labels, or excluded by you")
 m[3].metric("Lines in DEXPI", n_conn)
 m[4].metric("Pipes with unknown flow", n_unknown, help="Pipes (not instrument taps) with no arrow on them or "
             "their neighbours - grey on the map")
 
-st.markdown("##### 1 · Check the drawing")
-map_col, panel_col = st.columns([7, 3], gap="medium")
-st.markdown("##### 2 · All items and lines (bulk edits)")
-items_tab, lines_tab = st.tabs([f"Items ({len(review.symbols)})", f"Lines ({len(review.connections)})"])
+# With the editor open (the main screen) the map, its side panel and the tables are the old
+# view: folded away, still there for bulk edits in the tables.
+_old_view = (st.expander("The map, side panel and tables (the old view - everything is in the editor above)",
+                         expanded=False)
+             if st.session_state.get("editor_open") and EDITOR_INSTALLED else st.container())
+with _old_view:
+    st.markdown("##### 1 · Check the drawing")
+    map_col, panel_col = st.columns([7, 3], gap="medium")
+    st.markdown("##### 2 · All items and lines (bulk edits)")
+    items_tab, lines_tab = st.tabs([f"Items ({len(review.symbols)})", f"Lines ({len(review.connections)})"])
 
 # ---------------------------------------------------------------------------- tables ---
 ITEM_FILTERS = ["All", "Selected", "To check", "In DEXPI", "Left out"]
@@ -982,7 +1341,7 @@ with items_tab:
             "Left out": lambda s: status(s) == "left out"}[item_filter or "All"]
     in_section = (lambda s: True) if section_filter in (None, "All sections") else \
         (lambda s: not s.section) if section_filter == "(no section)" else (lambda s: s.section == section_filter)
-    shown_syms = [s for s in review.symbols if keep(s) and in_section(s)]
+    shown_syms = [s for s in review.symbols if keep(s) and in_section(s) and not is_flow_arrow(s)]
     hybrid = any(s.image_check for s in review.symbols)
     item_df = pd.DataFrame([{
         "selected": s.id in seed_syms, "id": s.id, "ref": refs[s.id], "tag": s.tag, "dexpi_class": s.dexpi_class,
@@ -1153,6 +1512,36 @@ def _set_item(sid: str, field: str, key: str) -> None:
     setattr(s, field, st.session_state[key])
     if field in ("tag", "dexpi_class"):
         s.attributes = _keep_specs(s.attributes, _instrument_attributes(s.dexpi_class, s.tag))
+    refresh_tables()
+
+
+STREAM_IN, STREAM_OUT = "In - a feed entering the drawing", "Out - a product leaving the drawing"
+
+
+def stream_pipes(sid: str) -> list:
+    return [c for c in review.connections if sid in (c.from_id, c.to_id) and c.line_type == "process"]
+
+
+def stream_way(sid: str) -> str | None:
+    """In or out, from the flow on its pipe(s): DEXPI's FlowIn/FlowOut connector follows it."""
+    pipes = [c for c in stream_pipes(sid) if c.flow in FLOW_KNOWN]
+    if pipes and all(c.from_id == sid for c in pipes):
+        return STREAM_IN
+    if pipes and all(c.to_id == sid for c in pipes):
+        return STREAM_OUT
+    return None
+
+
+def _set_stream(sid: str, key: str) -> None:
+    """In: its pipe(s) flow away from it; out: towards it (set by the reviewer)."""
+    out = st.session_state[key] == STREAM_OUT
+    for c in stream_pipes(sid):
+        other = c.to_id if c.from_id == sid else c.from_id
+        want = (other, sid) if out else (sid, other)
+        if (c.from_id, c.to_id) != want:
+            c.from_id, c.to_id = want
+            c.path = (c.path or [])[::-1] or None
+        c.flow = "reviewer"
     refresh_tables()
 
 
@@ -1572,7 +1961,7 @@ with panel_col:
             s = sel_items[0]
             st.markdown(f"**{item_name(s.id)}** &nbsp; `{refs[s.id]}`")
             st.caption(f"{found_as(s)} · {status(s)}" + (f" · {s.section}" if s.section else ""))
-            fields = spec_fields(s.dexpi_class) if s.dexpi_class not in (SKIP, OFF_PAGE) else []
+            fields = spec_fields(s.dexpi_class) if s.dexpi_class != SKIP else []
             vals, cust = (s.attributes or {}).get("dexpi", {}), (s.attributes or {}).get("custom", {})
             pre = prefill(s.dexpi_class, (s.attributes or {}).get("specs", "")) if fields else {}
             filled = sum(1 for f in fields if (cust if f.custom else vals).get(f.name) or pre.get(f.name))
@@ -1586,6 +1975,17 @@ with panel_col:
                 st.selectbox("DEXPI type", DEXPI_CLASS_CHOICES,
                              index=DEXPI_CLASS_CHOICES.index(s.dexpi_class) if s.dexpi_class in DEXPI_CLASS_CHOICES else 0,
                              key=f"cls_{s.id}_{k}", on_change=_set_item, args=(s.id, "dexpi_class", f"cls_{s.id}_{k}"))
+                if s.dexpi_class == OFF_PAGE:
+                    if stream_pipes(s.id):
+                        way = stream_way(s.id)
+                        st.radio("Stream", [STREAM_IN, STREAM_OUT], index=[STREAM_IN, STREAM_OUT].index(way) if way else None,
+                                 key=f"way_{s.id}_{k}", on_change=_set_stream, args=(s.id, f"way_{s.id}_{k}"),
+                                 help="Sets the flow on its pipe: away from it (in) or towards it (out). DEXPI: a "
+                                      "FlowIn- or FlowOutPipeOffPageConnector.")
+                        if not way:
+                            st.caption("In or out is not known yet: pick one.")
+                    else:
+                        st.caption("A stream needs its pipe: connect it to an item first (Connect tab).")
                 st.toggle("In DEXPI", s.include, key=f"inc_{s.id}_{k}", on_change=_set_item,
                           args=(s.id, "include", f"inc_{s.id}_{k}"))
                 if section_names:
@@ -1804,13 +2204,22 @@ with st.expander("AAS details (Asset Administration Shell, IDTA 02012-1-0) - opt
     aas_base = st.text_input("Id prefix for the AAS, its Submodel and the items (leave empty for an automatic one)",
                              "", key="aas_base", help="e.g. https://your-lab.example/plants/lightup - the twins look "
                              "items up by '<prefix>:asset:<tag>'")
-with st.expander("Add this to the training data"):
+with st.expander("Add this drawing to the training data"):
     from pid_dexpi_aas.image.drawio_labels import review_to_drawio, safe_name
-    from pid_dexpi_aas.image.training_export import add_review_to_training, list_reviewed
+    from pid_dexpi_aas.image.training_export import add_review_to_training, list_reviewed, retrain_status
+    # what it is worth, and how ready it is: the labels teach the model as they are
+    t_items = [s for s in review.symbols if s.include and not is_flow_arrow(s)]
+    t_lines = [c for c in review.connections if c.include]
+    unchecked = (sum(not s.checked for s in t_items), sum(not c.checked for c in t_lines))
+    st.markdown(f"This drawing adds **{len(t_items) + len(t_lines)} units** of training data "
+                f"({len(t_items)} items + {len(t_lines)} connections).")
+    if any(unchecked):
+        st.warning(f"Not checked yet: {unchecked[0]} items and {unchecked[1]} connections. The model learns these "
+                   "labels as they are - go through the editor's guided check first.")
     from_drawing = review.drawio is not None and drawio_file is not None
     st.caption("Teach the model from this sheet once it is checked: "
                + ("the drawing is rendered by draw.io and labelled like the team's drawings (items, lines, "
-                  "dashed = signal, flow arrows)." if from_drawing else
+                  "dashed = signal)." if from_drawing else
                   "the boxes, lines, line types and paths as you checked them here - on the map, in the side "
                   "panel or in the editor - are the labels. Only add a sheet whose boxes fit their symbols."))
     t1, t2 = st.columns([3, 2])
@@ -1836,7 +2245,9 @@ with st.expander("Add this to the training data"):
                     with tempfile.TemporaryDirectory() as tmp:
                         f = Path(tmp) / f"{t_name}.drawio"
                         f.write_bytes(drawio_file.getvalue())
-                        info = drawing_to_training(f, DATA_ROOT, t_subset, 1500, 500, arrows=True)
+                        # labelled like the live model's own team data (Team v3: no team arrow labels -
+                        # v4/v5's arrow labels made links worse and read valves as arrows)
+                        info = drawing_to_training(f, DATA_ROOT, t_subset, 1500, 500, arrows=False)
                     done = f"{info['symbols']} items, {info['edges']} lines, {info['patches']} tiles"
                 else:
                     info = add_review_to_training(review, DATA_ROOT, t_subset, t_name)
@@ -1854,12 +2265,38 @@ with st.expander("Add this to the training data"):
         a2.download_button("Download the drawing (.drawio)", lambda r=review: review_to_drawio(r).encode(),
                            file_name=f"{t_name}.drawio", mime="application/xml", on_click="ignore",
                            width="stretch", key="train_dl")
-    st.caption("Training uses the added sheets once 'Patched/Reviewed' is in the training config "
-               "(DATA.EXTRA_TRAIN_SUBSETS); held-out ones are scored with eval_sheets.py --set reviewed.")
+    st.caption("Or: download the drawing, correct it in draw.io, and add it under 'Add a drawing labelled in "
+               "draw.io' in the sidebar.")
+    # automatic retraining (ml/pid2graph/auto_retrain.py, nightly): how far the next one is
+    rs = retrain_status(DATA_ROOT)
+    st.markdown("**Automatic retraining**")
+    st.progress(min(1.0, rs["new_units"] / rs["threshold"]),
+                text=f"New since the last retraining: {rs['new_units']} of {rs['threshold']} units "
+                     f"({len(rs['new'])} sheets) - 10 % of the {rs['base_units']} hand-labelled units the model has")
+    st.caption("When enough has been added, a new model is trained at night (~4 h) and replaces the live one only "
+               f"if it scores no worse on the held-out sheets ({rs['held_out']} so far - add some as 'Held-out "
+               "test', or new models wait for approval). Value = labelled items + connections, so a large P&ID "
+               "counts for more than a small one.")
+    if rs["last"]:
+        st.caption(f"Last retraining ({rs['last']['when']}): {rs['last'].get('result', '')}")
+    if not PUBLIC:
+        r1, r2 = st.columns(2)
+        if r1.button("Retrain now", width="stretch", help="Trains a candidate now (~4 h on the GPU; pictures run on "
+                     "the processor meanwhile), checked against the held-out sheets as at night"):
+            subprocess.Popen(["systemd-inhibit", "--what=sleep:idle", "--why=pid-dexpi retrain", str(ROOT / ".venv" / "bin" / "python"),
+                              str(ROOT / "ml" / "pid2graph" / "auto_retrain.py"), "--force"],
+                             stdout=open(ROOT / "ml" / "logs" / "auto_retrain.log", "a"), stderr=subprocess.STDOUT,
+                             cwd=ROOT, start_new_session=True)
+            st.success("Retraining started - see ml/logs/auto_retrain.log.")
+        if rs["pending"] and r2.button(f"Deploy the held-back model ({rs['pending']['when']})", width="stretch",
+                                       help="Trained without held-out sheets to check it on: deploy it as the live model"):
+            subprocess.run([str(ROOT / ".venv" / "bin" / "python"), str(ROOT / "ml" / "pid2graph" / "auto_retrain.py"),
+                            "--approve"], cwd=ROOT)
+            st.success("Deployed - the old model is in ml/models/archive/.")
 
 b1, b2 = st.columns([1, 1])
 with b2:
-    st.download_button("Save review (.json) to continue later", review_to_json(review),
+    st.download_button("Save review (.json) to continue later", lambda r=review: review_to_json(r),
                        file_name=f"{Path(review.source_name).stem}_review.json", mime="application/json")
 with b1:
     build_clicked = st.button("Build & validate DEXPI", type="primary")
@@ -1877,8 +2314,9 @@ if problems:
         sid = next((s.id for s in review.symbols if p.startswith(f"{s.id}:")), None)
         c1, c2 = st.columns([5, 1])
         c1.write(f"- {item_option(sid)}: {p.split(':', 1)[1].strip()}" if sid else f"- {p}")
-        if sid and c2.button("Show on map", key=f"prob_{n}"):
+        if sid and c2.button("Show it", key=f"prob_{n}", help="Selects it in the editor (and on the map)"):
             select({sid}, (), zoom=True)
+            st.session_state["editor_focus"] = f"{sid}|{time.time()}"
             st.rerun()
     build_clicked = False
 if build_clicked:
@@ -1900,16 +2338,19 @@ if build_clicked:
     m3.metric("Pipe segments", sum(len(s.segments) for s in cm.pipingNetworkSystems))
     m4.metric("Skipped elements", report.skipped_count)
     d1, d2, d3 = st.columns(3)
-    d1.download_button("Download DEXPI XML", xml_bytes, file_name=f"{stem}.xml", mime="application/xml")
+    d1.download_button("Download DEXPI XML", lambda b=xml_bytes: b, file_name=f"{stem}.xml", mime="application/xml")
     with st.spinner("Packaging the AAS..."):
         aas_in = DexpiModelInput(stem, xml_bytes, drawing_svg(diagram, result),
                                  {k: v for k, v in aas_model_meta.items() if v})
         aas_data = aasx_bytes([aas_in], {k: v for k, v in aas_plant.items() if v}, version=aas_version,
                               base_iri=aas_base or None)
         aas_ok, aas_problems = check_aasx(aas_data)
-    d3.download_button(f"Download AAS {aas_version} (.aasx)", aas_data, file_name=f"{stem}.aasx", mime="application/asset-administration-shell-package",
+    d3.download_button(f"Download AAS {aas_version} (.aasx)", lambda b=aas_data: b, file_name=f"{stem}.aasx", mime="application/asset-administration-shell-package",
                        help="Asset Administration Shell with the IDTA 02012-1-0 DEXPI Submodel: the DEXPI file, the "
                             "drawing as SVG, and every tagged item mapped to a global id.")
+    d3.button("Add this drawing to the plant AAS", key="plant_add", width="stretch", on_click=_plant_add,
+              args=(stem, xml_bytes, drawing_svg(diagram, result), {k: v for k, v in aas_model_meta.items() if v}),
+              help="Several drawings of one plant in one AAS (below: 'Plant AAS')")
     n_mapped = len(mapping_entries(xml_bytes))
     if aas_ok:
         d3.caption(f"✓ Valid AAS {aas_version} ({'IDTA test engine + ' if aas_version == '3.0' else ''}aas-core "
@@ -1921,7 +2362,7 @@ if build_clicked:
     with st.spinner("Preparing the check sheet..."):
         sheet = build_check_sheet(review, result, mode, diagram)
     d2.download_button(
-        "Download check sheet for review (.xlsx)", sheet, file_name=f"{stem}_check_sheet.xlsx",
+        "Download check sheet for review (.xlsx)", lambda b=sheet: b, file_name=f"{stem}_check_sheet.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         help="For a domain expert: before/after drawings, every item and connection in plain words, "
              "with Yes/No columns to fill in and a verdict that updates itself.",
@@ -1947,3 +2388,45 @@ if build_clicked:
         with st.expander(f"Skipped elements ({len(report.skipped_details)})"):
             for detail in report.skipped_details:
                 st.text(detail)
+
+
+# ------------------------------------------------------------------------ plant AAS ---
+# Several drawings of one plant as one AAS: one shell for the plant, one DEXPI submodel with a
+# Model01, Model02 ... per drawing (each its DEXPI file, its SVG and its tag mapping). A tag on
+# several drawings gets the same global asset id in each, so the plant's twins find one asset.
+plant = st.session_state.setdefault("plant_models", {})
+with st.expander(f"Plant AAS - several drawings in one AAS ({len(plant)} drawings)", expanded=bool(plant)):
+    st.caption("Build each drawing's DEXPI file and press 'Add this drawing to the plant AAS' (or add DEXPI files "
+               "made before), then download one AAS for the whole plant. The plant details are the ones under "
+               "'AAS details' above. A tag that appears on several drawings (a line crossing between sheets, an "
+               "instrument shown twice) is one asset in the AAS.")
+    more = st.file_uploader("Add DEXPI files (.xml) made before", type=["xml"], accept_multiple_files=True,
+                            key="plant_upload")
+    for f in more or []:
+        if Path(f.name).stem not in plant:
+            plant[Path(f.name).stem] = {"xml": f.getvalue(), "svg": None, "meta": {}}
+    if plant:
+        tags = {name: {e.tag for e in mapping_entries(m["xml"]) if e.kind == "TagMapping"} for name, m in plant.items()}
+        shared = {t for t in set().union(*tags.values()) if sum(t in v for v in tags.values()) > 1}
+        for name in list(plant):
+            c1, c2 = st.columns([5, 1])
+            c1.write(f"**{name}** - {len(tags[name])} tagged items")
+            if c2.button("Remove", key=f"plant_rm_{name}"):
+                plant.pop(name)
+                st.rerun()
+        if len(plant) > 1:
+            st.caption(f"On more than one drawing: {len(shared)} tags" + (f" ({', '.join(sorted(shared)[:15])}"
+                       + (" ..." if len(shared) > 15 else "") + ")" if shared else ""))
+        models = [DexpiModelInput(name, m["xml"], m["svg"], m["meta"]) for name, m in plant.items()]
+        plant_meta = {k: v for k, v in aas_plant.items() if v}
+        plant_data = aasx_bytes(models, plant_meta, version=aas_version, base_iri=aas_base or None)
+        ok, problems = check_aasx(plant_data)
+        plant_stem = _slug_name(plant_meta.get("ProcessPlantName") or "plant")
+        st.download_button(f"Download the plant AAS {aas_version} (.aasx)", lambda b=plant_data: b, file_name=f"{plant_stem}.aasx",
+                           mime="application/asset-administration-shell-package", type="primary")
+        if ok:
+            st.caption(f"✓ Valid AAS {aas_version} · {len(models)} drawings · "
+                       f"{sum(len(v) for v in tags.values())} tagged items mapped")
+        else:
+            st.warning("The plant AAS did not pass the compliance check")
+            st.text("\n".join(problems))

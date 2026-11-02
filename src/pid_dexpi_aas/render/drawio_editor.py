@@ -25,9 +25,11 @@ PARAMS = "&".join([
     "stealth=1", "lang=en", "ui=kennedy", "pages=0", "format=0",
 ])
 CONFIG = {
-    # only the P&ID shapes the converter understands (plus the panel's lines and labels)
-    "defaultLibraries": "pid",
-    "enabledLibraries": ["pid"],
+    # the P&ID shapes the converter understands, draw.io's General shapes (boxes, text,
+    # basic shapes - for drawing extra detail onto a symbol and grouping it), the panel's
+    # lines and labels
+    "defaultLibraries": "general;pid",
+    "enabledLibraries": ["general", "pid"],
     # new lines are right-angled pipes
     "defaultEdgeStyle": {"edgeStyle": "orthogonalEdgeStyle", "rounded": 0, "orthogonalLoop": 1,
                          "jettySize": "auto", "html": 1},
@@ -40,11 +42,12 @@ _component = components.declare_component("drawio_editor", path=str(FILES))
 def write_schema() -> None:
     """The panel's lists - DEXPI types, specification fields per class - as a file next to it
     (fetched once, instead of resent on every page update)."""
+    from pid_dexpi_aas.dexpi.mapping import shape_rules
     from pid_dexpi_aas.drawio.editor_data import spec_schema
     from pid_dexpi_aas.review import DEXPI_CLASS_CHOICES, INSTRUMENT_CLASSES, OFF_PAGE, SKIP, VALVE_CLASSES
-    classes = [c for c in DEXPI_CLASS_CHOICES if c not in (SKIP, OFF_PAGE)]
+    classes = [c for c in DEXPI_CLASS_CHOICES if c != SKIP]  # a stream's too (fields.STREAM_FIELDS)
     data = json.dumps({"choices": DEXPI_CLASS_CHOICES, "skip": SKIP, "off_page": OFF_PAGE,
-                       "instruments": INSTRUMENT_CLASSES, "valves": VALVE_CLASSES,
+                       "instruments": INSTRUMENT_CLASSES, "valves": VALVE_CLASSES, "shapes": shape_rules(),
                        "classes": spec_schema(classes + ["PipingNetworkSegment", "SignalLineFunction",
                                                          "MeasuringLineFunction"])}, sort_keys=True)
     path = FILES / "schema.json"
@@ -52,15 +55,17 @@ def write_schema() -> None:
         path.write_text(data)
 
 
-def picture_url(image_path: str) -> str:
+def picture_url(image_path: str, tag: str = "") -> str:
     """The picture as a file the editor loads (served with it; never inside the drawing,
-    which goes back and forth on every page update). Dark-theme exports made dark-on-white."""
+    which goes back and forth on every page update). Dark-theme exports made dark-on-white.
+    tag: the browser session's own private name - each session its own copy, deleted with its
+    picture (app.forget_upload), and a name nobody else can guess."""
     import hashlib as _h
 
     from PIL import Image
 
     from pid_dexpi_aas.image.sheet_image import to_dark_on_white
-    name = _h.sha1(Path(image_path).read_bytes()).hexdigest()[:16] + ".png"
+    name = (f"{tag}_" if tag else "") + _h.sha1(Path(image_path).read_bytes()).hexdigest()[:16] + ".png"
     out = FILES / "pictures" / name
     if not out.exists():
         out.parent.mkdir(exist_ok=True)
@@ -70,11 +75,13 @@ def picture_url(image_path: str) -> str:
 
 
 def drawio_editor(xml: str, patch: dict | None = None, *, title: str = "", height: int = 820,
-                  mode: str = "drawing", key: str = "drawio_editor") -> dict | None:
+                  mode: str = "drawing", key: str = "drawio_editor", sheet: str = "", focus: str = "") -> dict | None:
     """Show the editor with `xml` (a draw.io file's text; "" = a blank page) and each cell's
     DEXPI details (`patch`, editor_data.editor_patch). mode "picture": a picture review drawn
-    over its picture (picture_editor.py) - the panel offers a box for a missed item. Returns {"xml", "t"} after each Save,
-    else the last value (None before the first)."""
+    over its picture (picture_editor.py) - the panel offers a box for a missed item. sheet: the
+    loaded spec sheet's name ("" = none) - the panel offers to sync specifications from it.
+    focus: "<cell id>|<nonce>" - the editor selects and shows that cell (once per nonce).
+    Returns {"xml", "t", "ids", "routes", "sync"} after each Save, else the last value (None before the first)."""
     patch = patch or {}
     return _component(xml=xml, patch=patch, patch_id=hashlib.sha1(json.dumps(patch, sort_keys=True).encode()).hexdigest(),
-                      title=title, mode=mode, params=PARAMS, config=CONFIG, height=height, key=key, default=None)
+                      title=title, mode=mode, sheet=sheet, focus=focus, params=PARAMS, config=CONFIG, height=height, key=key, default=None)

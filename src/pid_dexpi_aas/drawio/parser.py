@@ -26,6 +26,8 @@ class Shape:
     # data fields of a draw.io <object>/<UserObject> cell - the Editor tab keeps each item's
     # DEXPI details there (drawio/editor_data.py)
     data: dict = field(default_factory=dict)
+    # a draw.io group read as one item: the ids of the shapes drawn in it (Shape.id is the group's)
+    parts: tuple = ()
 
     @property
     def is_labeled_only(self) -> bool:
@@ -141,14 +143,20 @@ def _extract_shape_token(style: str) -> str | None:
 def parse_drawio_xml(xml_text: str, source_file: str) -> ParsedDiagram:
     root = ET.fromstring(xml_text)
     diagram = ParsedDiagram(source_file=source_file)
+    cells = list(_cells(root))
+    offset, owner = _nesting(cells)
+    members: dict[str, list] = {}  # group id -> its shapes (Shape), each at its page position
 
-    for cell, cell_id, value, data in _cells(root):
+    for cell, cell_id, value, data in cells:
         if cell_id in (None, "0", "1"):
             continue  # the two mxGraph root cells carry no shape data
 
         style = cell.get("style", "")
+        dx, dy = offset.get(cell_id, (0.0, 0.0))
 
         if cell.get("edge") == "1":
+            if cell_id in owner:
+                continue  # a line drawn inside a group is part of the item's picture, not a pipe
             source_point = target_point = None
             exit_fraction = entry_fraction = None
             has_source = cell.get("source") is not None
@@ -161,13 +169,13 @@ def parse_drawio_xml(xml_text: str, source_file: str) -> ParsedDiagram:
                     target_mxpoint = geometry.find("mxPoint[@as='targetPoint']")
                     if source_mxpoint is not None:
                         source_point = (
-                            float(source_mxpoint.get("x", 0)),
-                            float(source_mxpoint.get("y", 0)),
+                            float(source_mxpoint.get("x", 0)) + dx,
+                            float(source_mxpoint.get("y", 0)) + dy,
                         )
                     if target_mxpoint is not None:
                         target_point = (
-                            float(target_mxpoint.get("x", 0)),
-                            float(target_mxpoint.get("y", 0)),
+                            float(target_mxpoint.get("x", 0)) + dx,
+                            float(target_mxpoint.get("y", 0)) + dy,
                         )
 
                 if not has_source:
@@ -185,8 +193,9 @@ def parse_drawio_xml(xml_text: str, source_file: str) -> ParsedDiagram:
             diagram.edges.append(
                 Edge(
                     id=cell_id,
-                    source=cell.get("source"),
-                    target=cell.get("target"),
+                    # a line drawn to a shape inside a group ends on the group (one item)
+                    source=owner.get(cell.get("source"), cell.get("source")),
+                    target=owner.get(cell.get("target"), cell.get("target")),
                     style=style,
                     source_point=source_point,
                     target_point=target_point,
@@ -206,12 +215,13 @@ def parse_drawio_xml(xml_text: str, source_file: str) -> ParsedDiagram:
 
         if cell.get("vertex") == "1":
             geometry = cell.find("mxGeometry")
-            x = float(geometry.get("x", 0)) if geometry is not None else 0.0
-            y = float(geometry.get("y", 0)) if geometry is not None else 0.0
+            x = float(geometry.get("x", 0)) + dx if geometry is not None else dx
+            y = float(geometry.get("y", 0)) + dy if geometry is not None else dy
             width = float(geometry.get("width", 0)) if geometry is not None else 0.0
             height = float(geometry.get("height", 0)) if geometry is not None else 0.0
 
-            diagram.shapes.append(
+            target = diagram.shapes if cell_id not in owner else members.setdefault(owner[cell_id], [])
+            target.append(
                 Shape(
                     id=cell_id,
                     shape_token=_extract_shape_token(style),
@@ -225,7 +235,67 @@ def parse_drawio_xml(xml_text: str, source_file: str) -> ParsedDiagram:
                 )
             )
 
+    if members:
+        diagram.shapes = [_group_item(sh, members[sh.id]) if sh.id in members else sh for sh in diagram.shapes]
     return diagram
+
+
+_GROUP_RE = re.compile(r"(?:^|;)group(?:;|$)")
+
+
+def _nesting(cells) -> tuple[dict, dict]:
+    """(offset, owner). draw.io stores a shape inside a group (or container) relative to it:
+    offset[id] = what to add to its geometry for its page position. owner[id] = the
+    outermost draw.io GROUP a shape is drawn in - a group is one item (its parts are the
+    picture of it); a container's shapes (a frame other items sit in) stay items of their own."""
+    info = {cid: (cell.get("parent"), cell.get("vertex") == "1", cell.get("style", ""), cell.find("mxGeometry"))
+            for cell, cid, _, _ in cells if cid is not None}
+    offset: dict = {}
+
+    def pos(cid, depth=0):
+        if cid in offset:
+            return offset[cid]
+        parent = info.get(cid, (None,))[0]
+        out = (0.0, 0.0)
+        if parent in info and info[parent][1] and depth < 50:  # inside a shape: relative to it
+            px, py = pos(parent, depth + 1)
+            g = info[parent][3]
+            out = (px + (float(g.get("x", 0)) if g is not None else 0.0),
+                   py + (float(g.get("y", 0)) if g is not None else 0.0))
+        offset[cid] = out
+        return out
+
+    owner: dict = {}
+    for cid in info:
+        pos(cid)
+        top, p, depth = None, info[cid][0], 0
+        while p in info and depth < 50:
+            if info[p][1] and _GROUP_RE.search(info[p][2]):
+                top = p
+            p, depth = info[p][0], depth + 1
+        if top is not None:
+            owner[cid] = top
+    return {k: v for k, v in offset.items() if v != (0.0, 0.0)}, owner
+
+
+def _group_item(group: Shape, parts: list) -> Shape:
+    """A draw.io group as one item: the symbol of its main shape (what the item is - see
+    below), the group's own label, else that shape's, else the texts in the group (its tag). The
+    group's box; the style without rotation (the box already holds the rotated parts)."""
+    from pid_dexpi_aas.dexpi.mapping import map_shape
+    shapes = [p for p in parts if p.shape_token] or parts
+    # the part that IS the item, not the biggest (a plain circle drawn round an instrument is
+    # decoration): details set by a person, then a symbol with a DEXPI class, then size
+    main = max(shapes, key=lambda p: (p.data.get("dexpi_auto") == "0" or p.data.get("tag_auto") == "0",
+                                      map_shape(p.shape_token, p.text, p.style).dexpi_class_name is not None,
+                                      p.width * p.height), default=None)
+    if main is None:
+        return group
+    texts = [p.text for p in parts if p is not main and p.shape_token is None and p.text]
+    style = re.sub(r"(?:^|;)rotation=[^;]*", "", main.style or "")
+    return Shape(id=group.id, shape_token=main.shape_token, text=group.text or main.text or " ".join(texts),
+                 x=group.x, y=group.y, width=group.width, height=group.height, style=style,
+                 data={**main.data, **group.data}, parts=tuple(p.id for p in parts))
 
 
 _OBJECT_TAGS = ("object", "UserObject")

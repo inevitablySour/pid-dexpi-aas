@@ -16,7 +16,7 @@ import html
 import json
 from xml.etree import ElementTree as ET
 
-from pid_dexpi_aas.drawio.parser import _cells, _extract_shape_token, _strip_html
+from pid_dexpi_aas.drawio.parser import _cells, _extract_shape_token, _nesting, _strip_html
 
 PICTURE_LAYER, ITEM_LAYER = "picture", "items"
 _COLOURS = {"valve": "#0b8a4b", "instrument": "#2456c4", "equipment": "#d9480f", "off-page": "#8a5a2b",
@@ -46,6 +46,7 @@ def review_to_editor_xml(review, picture_url: str) -> str:
     """The picture review as a draw.io drawing; ids are the review's row ids."""
     W, H = review.image_size or (2000, 1500)
     unit, font, stroke = sizes(review)
+    box_of = {s.id: s.box for s in review.symbols if s.box}
 
     root = ET.Element("mxGraphModel", grid="0", gridSize="10", guides="1", tooltips="1", connect="1", arrows="1",
                       fold="1", page="0", pageScale="1", pageWidth=str(W), pageHeight=str(H), math="0", shadow="0",
@@ -66,6 +67,18 @@ def review_to_editor_xml(review, picture_url: str) -> str:
         x1, y1, x2, y2 = (float(v) for v in s.box)
         boxes[s.id] = (x1, y1, x2, y2)
         colour = _COLOURS[_kind(s)]
+        group_parts = (s.attributes or {}).get("group_parts")
+        if group_parts:  # a group drawn in the editor: the group and its shapes, as drawn
+            g = ET.SubElement(cells, "mxCell", id=s.id, value="", parent=ITEM_LAYER, vertex="1", connectable="0",
+                              style="group")
+            ET.SubElement(g, "mxGeometry", x=f"{x1:.1f}", y=f"{y1:.1f}", width=f"{x2 - x1:.1f}",
+                          height=f"{y2 - y1:.1f}", **{"as": "geometry"})
+            for part in group_parts:
+                try:
+                    cells.append(ET.fromstring(part))
+                except ET.ParseError:
+                    pass
+            continue
         cell = ET.SubElement(cells, "mxCell", id=s.id, value=html.escape(s.tag or ""), parent=ITEM_LAYER, vertex="1",
                              style=f"rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor={colour};"
                                    f"strokeWidth={stroke};fontColor={colour};fontSize={font};fontStyle=1;"
@@ -107,7 +120,17 @@ def review_to_editor_xml(review, picture_url: str) -> str:
         path = [tuple(p) for p in c.path] if c.path else []
         if len(path) > 2:
             from pid_dexpi_aas.image.training_export import _corners
-            inner = _corners(path, tol=max(2.0, unit * 0.03))[1:-1]
+            corners = _corners(path, tol=max(2.0, unit * 0.03))
+            inner = corners[1:-1]
+            # an end short of its item (the pipe meets the item's line at a tee next to it): kept,
+            # so the line runs there and then into the item, not across from the last corner
+            def short_of(sid, p):
+                b = box_of.get(sid)
+                return b is not None and not (b[0] - 2 <= p[0] <= b[2] + 2 and b[1] - 2 <= p[1] <= b[3] + 2)
+            if short_of(c.from_id, corners[0]):
+                inner.insert(0, corners[0])
+            if short_of(c.to_id, corners[-1]):
+                inner.append(corners[-1])
             if inner:
                 pts = ET.SubElement(geo, "Array", **{"as": "points"})
                 for x, y in inner:
@@ -162,10 +185,37 @@ def apply_editor_drawing(review, xml: str, known_ids: set, routes: dict | None =
     if root.tag != "mxGraphModel":
         root = root.find(".//mxGraphModel")
     vertices, edges = {}, {}
-    for cell, cid, label, data in _cells(root):
+    cells = list(_cells(root))
+    # a draw.io group (Ctrl+G) is ONE item: its box is the group's, its type its biggest
+    # symbol's; its parts (drawn relative to it) are not items, lines to a part end on it
+    _, owner = _nesting(cells)
+    # each group's shapes as drawn (cells of the drawing, kept on the item: the editor draws
+    # the group again when it is opened next - review_to_editor_xml)
+    drawn_parts: dict[str, list] = {}
+    for holder in root.iter("root"):
+        for el in holder:
+            if el.get("id") in owner:
+                drawn_parts.setdefault(owner[el.get("id")], []).append(ET.tostring(el, encoding="unicode"))
+    parts: dict[str, list] = {}
+    for cell, cid, label, data in cells:
+        if cid in owner and cell.get("vertex") == "1":
+            g = cell.find("mxGeometry")
+            area = float(g.get("width", 0)) * float(g.get("height", 0)) if g is not None else 0.0
+            parts.setdefault(owner[cid], []).append((area, _extract_shape_token(cell.get("style", "")), _strip_html(label)))
+    for cell, cid, label, data in cells:
         if cid in (None, "0", PICTURE_LAYER, ITEM_LAYER, "picture-image") or cell.get("parent") == PICTURE_LAYER:
             continue
+        if cid in owner:
+            continue  # a part of a group
         geo = cell.find("mxGeometry")
+        if cell.get("vertex") == "1" and geo is not None and cid in parts:
+            x, y = float(geo.get("x", 0)), float(geo.get("y", 0))
+            w, h = float(geo.get("width", 0)), float(geo.get("height", 0))
+            shaped = [p for p in parts[cid] if p[1]] or parts[cid]
+            main = max(shaped, key=lambda p: (map_shape(p[1], p[2], "").dexpi_class_name is not None, p[0]))
+            vertices[cid] = {"box": [x, y, x + w, y + h], "data": data, "token": main[1], "text": False,
+                             "label": _strip_html(label) or main[2] or " ".join(p[2] for p in parts[cid] if p[2])}
+            continue
         if cell.get("vertex") == "1" and geo is not None:
             x, y = float(geo.get("x", 0)), float(geo.get("y", 0))
             w, h = float(geo.get("width", 0)), float(geo.get("height", 0))
@@ -177,7 +227,8 @@ def apply_editor_drawing(review, xml: str, known_ids: set, routes: dict | None =
                                           for p in geo.findall("Array[@as='points']/mxPoint")]
             ends = {} if geo is None else {p.get("as"): (float(p.get("x", 0)), float(p.get("y", 0)))
                                            for p in geo.findall("mxPoint") if p.get("as") in ("sourcePoint", "targetPoint")}
-            edges[cid] = {"source": cell.get("source"), "target": cell.get("target"), "style": cell.get("style", ""),
+            edges[cid] = {"source": owner.get(cell.get("source"), cell.get("source")),
+                          "target": owner.get(cell.get("target"), cell.get("target")), "style": cell.get("style", ""),
                           "points": pts, "data": data, "ends": ends, "route": routes.get(cid)}
     style_val = lambda st, k: next((p.split("=", 1)[1] for p in (st or "").split(";") if p.startswith(k + "=")), None)
     # a loose end lying on another line (dropped there, not attached): a branch of that line
@@ -201,7 +252,12 @@ def apply_editor_drawing(review, xml: str, known_ids: set, routes: dict | None =
 
     counts = {"moved": 0, "added": 0, "removed": 0, "lines added": 0, "lines removed": 0, "lines changed": 0}
     rows = {s.id: s for s in review.symbols}
+    # an item's tag label ("Add a tag label"): its tag, not an item (nor a stream's end)
+    tag_label = {v["data"]["tag_cell"]: sid for sid, v in vertices.items()
+                 if v["data"].get("tag_cell") in vertices and v["data"]["tag_cell"] != sid}
     for sid, v in vertices.items():
+        if sid in tag_label:
+            continue
         d, s = v["data"], rows.get(sid)
         if s is None:  # drawn in the editor: a box, or a symbol from the P&ID library
             tag = d.get("tag") if d.get("tag_auto") == "0" else v["label"]
@@ -213,7 +269,7 @@ def apply_editor_drawing(review, xml: str, known_ids: set, routes: dict | None =
                 cls = classify_tag(tag or "")[1] or SKIP
             s = ReviewSymbol(id=sid, source="manual", box=v["box"], detected_as="drawn in the editor", tag=tag or "",
                              tag_source="manual" if tag else "", dexpi_class=cls, identified_by="drawn in the editor",
-                             attributes=_instrument_attributes(cls, tag or ""), include=cls != SKIP)
+                             attributes=_instrument_attributes(cls, tag or ""), include=cls != SKIP, checked=True)
             review.symbols.append(s)
             rows[sid] = s
             counts["added"] += 1
@@ -225,7 +281,9 @@ def apply_editor_drawing(review, xml: str, known_ids: set, routes: dict | None =
             s.dexpi_class = d["dexpi_class"]
         elif d.get("dexpi_auto") == "1" and auto.get("dexpi_class"):
             s.dexpi_class = auto["dexpi_class"]
-        if d.get("tag_auto") == "0":
+        if d.get("tag_cell") in tag_label:
+            s.tag = vertices[d["tag_cell"]]["label"]  # its tag label, as it reads now
+        elif d.get("tag_auto") == "0":
             s.tag = d.get("tag", "")
         elif v["label"] != s.tag and sid in known_ids:
             s.tag = v["label"]  # the tag text edited on the drawing
@@ -233,10 +291,16 @@ def apply_editor_drawing(review, xml: str, known_ids: set, routes: dict | None =
             s.include = d["in_dexpi"] == "1" and s.dexpi_class != SKIP
         if d.get("notes"):
             s.notes = d["notes"]
+        if d.get("checked") in ("0", "1"):
+            s.checked = d["checked"] == "1"
         specs = json.loads(d.get("specs") or "{}") if d.get("specs") else {}
         for part in ("dexpi", "custom"):
             if part in specs:
                 s.attributes = {**(s.attributes or {}), part: specs[part]}
+        if sid in drawn_parts:
+            s.attributes = {**(s.attributes or {}), "group_parts": drawn_parts[sid]}
+        elif "group_parts" in (s.attributes or {}):  # ungrouped since
+            s.attributes = {k: v for k, v in s.attributes.items() if k != "group_parts"}
     gone = {sid for sid in known_ids if sid in rows and sid not in vertices}
     if gone:
         review.symbols = [s for s in review.symbols if s.id not in gone]
@@ -324,7 +388,7 @@ def apply_editor_drawing(review, xml: str, known_ids: set, routes: dict | None =
         c = conns.get(eid)
         if c is None:
             c = ReviewConnection(id=eid, from_id=frm, to_id=to, source="manual",
-                                 confidence="drawn in the editor", path=path)
+                                 confidence="drawn in the editor", path=path, checked=True)
             review.connections.append(c)
             counts["lines added"] += 1
             before = None
@@ -352,6 +416,8 @@ def apply_editor_drawing(review, xml: str, known_ids: set, routes: dict | None =
         d = e["data"]
         if d.get("in_dexpi") in ("0", "1"):
             c.include = d["in_dexpi"] == "1"
+        if d.get("checked") in ("0", "1"):
+            c.checked = d["checked"] == "1"
         if d.get("notes"):
             c.notes = d["notes"]
         specs = json.loads(d.get("specs") or "{}") if d.get("specs") else {}

@@ -32,9 +32,13 @@ from pathlib import Path
 
 import networkx as nx
 import numpy as np
-import torch
 from PIL import Image
-from torch.utils.data import Dataset
+
+try:
+    import torch
+    from torch.utils.data import Dataset
+except ImportError:  # the graph helpers (_collapse_graph, _point_graph) work, and are tested, without torch
+    torch, Dataset = None, object
 
 # Real label vocabulary confirmed against the downloaded dataset (see module docstring).
 # Index 0 is reserved for "__background__" per this repo's own convention (see
@@ -50,7 +54,11 @@ PID2GRAPH_CLASSES = [
     "tank",
     "valve",
 ]
-CLASS_TO_IDX = {name: idx for idx, name in enumerate(PID2GRAPH_CLASSES)}
+# Line points, learned only by DATA.LINE_POINTS models (classes 8 and 9, NUM_OBJ_CLS 9):
+# the corners of a line ("bend") and the points where lines meet in a tee ("junction").
+# Kept as nodes instead of collapsed, so the model reads each pipe's route and tees.
+POINT_CLASSES = ["bend", "junction"]
+CLASS_TO_IDX = {name: idx for idx, name in enumerate(PID2GRAPH_CLASSES + POINT_CLASSES)}
 
 # Structural node types that exist only to route a line through waypoints - never a
 # real detectable symbol, collapsed away rather than treated as a "general" object.
@@ -144,6 +152,113 @@ def _collapse_graph(g: nx.Graph) -> tuple[list[str], list[tuple[float, float, fl
     return labels, boxes, sorted(collapsed_edges)
 
 
+def _point_kind(g: nx.Graph, node) -> str | None:
+    """What a structural node is taught as - PID2Graph's own scheme, as its author describes
+    it (2026-10, by mail): "crossing" nodes are kept - with two arms an "ankle" (a bend:
+    "bend" here), with more a junction; "connector" nodes (where a line enters a symbol) are
+    not used at all. Measured on OPEN100: all 2,408 connectors sit next to a symbol; 98% of
+    2-arm crossings are real corners. One difference: a 4-arm crossing of two straight pipes
+    is not a junction (they only cross, _pass_through_partner) and is walked straight through."""
+    label, deg = g.nodes[node].get("label"), g.degree(node)
+    # (a connector with 3+ arms - 1% of them - is where a branch leaves: a junction)
+    if label not in ("crossing", "connector") or (label == "connector" and deg < 3) or _point_at(g, node) is None:
+        return None
+    if deg >= 3:
+        return None if _pass_through_partner(g, node) is not None else "junction"
+    return "bend" if deg == 2 else None
+
+
+def _point_at(g: nx.Graph, node) -> tuple[float, float] | None:
+    """A structural node's position: its box centre, else (a few have no box) the middle of
+    its neighbours."""
+    c = _center(g.nodes[node])
+    if c is not None:
+        return c
+    near = [p for p in (_center(g.nodes[n]) for n in g.neighbors(node)) if p is not None]
+    return (sum(p[0] for p in near) / len(near), sum(p[1] for p in near) / len(near)) if near else None
+
+
+def _point_graph(g: nx.Graph, point_box: float) -> tuple[list[str], list[tuple[float, float, float, float]], list[tuple[int, int, str]]]:
+    """Like _collapse_graph, but bends and junctions stay as nodes ("bend"/"junction", a
+    point_box-sized square on the point): a pipe from a valve round two corners to a tank
+    becomes valve - bend - bend - tank, a tee one junction with three links. Invisible
+    waypoints are walked through as _collapse_graph does (straight on, and straight across
+    a pass-through crossing); a walk ending at a line end or the patch border adds nothing.
+
+    Collapsing the points of this graph again gives _collapse_graph's symbol links, so
+    scores stay comparable (contract_points)."""
+    if g.is_multigraph():
+        g = nx.Graph(g)
+    kind = {n: _point_kind(g, n) for n in g.nodes}
+    kept = [n for n, d in g.nodes(data=True) if d.get("label") not in _STRUCTURAL_LABELS or kind[n]]
+    index = {n: i for i, n in enumerate(kept)}
+    labels, boxes = [], []
+    half = point_box / 2
+    for n in kept:
+        if kind[n]:
+            cx, cy = _point_at(g, n)
+            labels.append(kind[n])
+            boxes.append((cx - half, cy - half, cx + half, cy + half))
+        else:
+            labels.append(g.nodes[n]["label"])
+            bbox = _node_bbox(g.nodes[n])
+            boxes.append(bbox if bbox is not None else (0.0, 0.0, 0.0, 0.0))
+
+    partners: dict = {}
+    edges: set[tuple[int, int, str]] = set()
+    for start in kept:
+        for neighbor in g.neighbors(start):
+            edge_label = g.edges[start, neighbor].get("edge_label", "solid")
+            current, came_from, steps = neighbor, start, 0
+            while current not in index and steps < len(g):
+                # an invisible waypoint: straight on (2 arms) or straight across (crossing)
+                steps += 1
+                if g.nodes[current].get("label") not in ("connector", "crossing"):
+                    current = None  # border node / background: the line leaves the patch
+                    break
+                if current not in partners:
+                    partners[current] = _pass_through_partner(g, current)
+                if partners[current] is not None:
+                    nxt = partners[current].get(came_from)
+                else:
+                    onward = [n for n in g.neighbors(current) if n != came_from]
+                    nxt = onward[0] if len(onward) == 1 else None
+                if nxt is None:
+                    current = None  # a line end
+                    break
+                current, came_from = nxt, current
+            if current in index and current != start:
+                a, b = index[start], index[current]
+                edges.add((min(a, b), max(a, b), edge_label))
+    return labels, boxes, sorted(edges)
+
+
+def contract_points(labels: list[str], edges: list[tuple]) -> set[tuple[int, int]]:
+    """Symbol-to-symbol links of a graph with line points: two symbols are linked when a
+    chain of bend/junction nodes joins them (through a junction, every arm is linked to
+    every other, as _collapse_graph walks a tee). Pairs are (i, j) node indices, i < j."""
+    adj: dict[int, set[int]] = {}
+    for e in edges:
+        adj.setdefault(e[0], set()).add(e[1])
+        adj.setdefault(e[1], set()).add(e[0])
+    point = lambda i: labels[i] in POINT_CLASSES
+    out = set()
+    for s in range(len(labels)):
+        if point(s):
+            continue
+        seen, stack = {s}, list(adj.get(s, ()))
+        while stack:
+            n = stack.pop()
+            if n in seen:
+                continue
+            seen.add(n)
+            if point(n):
+                stack.extend(adj.get(n, ()))
+            elif n != s:
+                out.add((min(s, n), max(s, n)))
+    return out
+
+
 def _center(data: dict) -> tuple[float, float] | None:
     bbox = _node_bbox(data)
     return None if bbox is None else ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
@@ -182,11 +297,14 @@ def _pass_through_partner(g: nx.Graph, node, tolerance_deg: float = 20.0) -> dic
 
 
 class PID2GraphDataset(Dataset):
-    def __init__(self, samples: list[tuple[Path, Path]], transforms=None, n_queries: int = 201, n_rel_classes: int = 1):
+    def __init__(self, samples: list[tuple[Path, Path]], transforms=None, n_queries: int = 201, n_rel_classes: int = 1,
+                 point_box: float = 0.0):
         """samples: list of (image_path, graphml_path) pairs. n_rel_classes = MODEL.NUM_REL_CLS:
         1 -> every connection is "connected"; 2 -> "solid" (process pipe) vs "non-solid"
-        (signal/instrument line) are learned as separate relation classes."""
+        (signal/instrument line) are learned as separate relation classes. point_box > 0
+        (DATA.LINE_POINTS): bends and junctions are nodes of that size (_point_graph)."""
         self.samples = samples
+        self.point_box = point_box
         self.transforms = transforms
         self.n_queries = n_queries
         self.predicate_to_idx = (
@@ -202,7 +320,7 @@ class PID2GraphDataset(Dataset):
         w, h = img.size
 
         g = nx.read_graphml(graphml_path)
-        labels, boxes, edges = _collapse_graph(g)
+        labels, boxes, edges = _point_graph(g, self.point_box) if self.point_box else _collapse_graph(g)
 
         if len(labels) == 0:
             # A symbol-free patch: ~6.75% of patches, measured. These are NOT blank -
@@ -393,7 +511,10 @@ def build_pid2graph_data(config, mode: str = "split", split: float = 0.9, seed: 
         ]
     )
     val_transform = T.Compose([T.RandomResize([800], max_size=800), normalize])
-    ds = lambda pairs, tf: PID2GraphDataset(pairs, tf, n_queries, n_rel)
+    # DATA.LINE_POINTS: side in patch pixels of the bend/junction boxes (0 = symbols only).
+    # 24 px is ~13 px after the 800 px resize: v4's 5 px arrow boxes were not learned.
+    point_box = float(_cfg(config, "DATA", "LINE_POINTS", 0) or 0)
+    ds = lambda pairs, tf: PID2GraphDataset(pairs, tf, n_queries, n_rel, point_box)
 
     if mode == "team_test":
         return ds(_discover_pairs(root, list(_cfg(config, "DATA", "TEAM_TEST_SUBSETS", ["Patched/Team test"]))),

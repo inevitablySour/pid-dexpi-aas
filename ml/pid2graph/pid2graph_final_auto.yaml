@@ -1,0 +1,115 @@
+# written by auto_retrain.py: pid2graph_final.yaml + the reviewed sheets (Patched/Reviewed)
+DATA:
+  DIM: 2
+  BATCH_SIZE: 4
+  DATA_PATH: ../../data/PID2Graph
+  PID2GRAPH_SUBSETS:
+  - Patched/PID2Graph Synthetic
+  - Patched/Dataset PID
+  PID2GRAPH_TEST_SUBSETS:
+  - Patched/PID2Graph OPEN100
+  BG_EDGE_PER_IMG: 75
+  FG_EDGE_PER_IMG: 25
+  SORT_ONLY_BY_REL: true
+  USE_GT_FILTER: true
+  MEAN_RECALL: true
+  MULTI_PRED: true
+  NUM_WORKERS: 4
+  PIN_MEMORY: true
+  SEED: 10
+  REAL_SUBSET: Patched/PID2Graph OPEN100
+  NUM_FOLDS: 4
+  EXTRA_TRAIN_SUBSETS:
+  - Patched/Team v3
+  - Patched/Reviewed
+  TEAM_TEST_SUBSETS:
+  - Patched/Team v3 test
+  STYLE_AUGMENT: true
+  BALANCED_SAMPLING: true
+  EPOCH_SAMPLES: 10000
+  REAL_WEIGHT: 8.0
+  TEAM_WEIGHT: 20.0
+  RARITY_CAP: 4.0
+  CLASS_BOOST:
+    pump: 3.0
+MODEL:
+  RESUME: ''
+  PRETRAIN: ''
+  NUM_OBJ_CLS: 7
+  NUM_REL_CLS: 2
+  LABEL_SMOOTHING: 0.1
+  ENCODER:
+    TYPE: deformable_transformer_backbone
+    NAME: deformable_transformer_backbone
+    HIDDEN_DIM: 256
+    POSITION_EMBEDDING: sine
+    LR_BACKBONE: 2e-5
+    NUM_FEATURE_LEVELS: 3
+    BACKBONE: resnet50
+    MASKS: false
+    DILATION: false
+    PATCH_SIZE:
+    - 4
+    - 4
+    - 4
+    IN_CHANS: 3
+    DEPTHS:
+    - 4
+    - 4
+    - 8
+    - 8
+  DECODER:
+    TYPE: deformable_transformer
+    NAME: deformable_transformer
+    HIDDEN_DIM: 256
+    NHEADS: 8
+    ENC_LAYERS: 4
+    DEC_LAYERS: 4
+    DIM_FEEDFORWARD: 1024
+    DROPOUT: 0.15
+    ACTIVATION: relu
+    NUM_FEATURE_LEVELS: 4
+    DEC_N_POINTS: 4
+    ENC_N_POINTS: 4
+    NUM_QUERIES: 100
+    TWO_STAGE: false
+    INTERMEDIATE: true
+    AUX_LOSS: true
+    WITH_BOX_REFINE: true
+    FREQ_BIAS: false
+    FREQ_DR: 0.2
+    LOGSOFTMAX_FREQ: false
+    ADD_EMB_REL: true
+    DROPOUT_REL: true
+    NORM_REL_EMB: true
+TRAIN:
+  EPOCHS: 12
+  LR: 5e-5
+  LR_BACKBONE: 1.5e-05
+  WEIGHT_DECAY: 1e-4
+  LR_DROP: 9
+  CLIP_MAX_NORM: 0.1
+  START_EPOCH: 0
+  FOCAL_LOSS_ALPHA: ''
+  OPTIMIZER.NAME: adamw
+  OPTIMIZER.EPS: 1e-8
+  OPTIMIZER.BETAS: (0.9, 0.999)
+  OPTIMIZER.MOMENTUM: 0.9
+  EDGE_W_WARMUP: true
+  SAVE_PATH: ./trained_weights/
+  VAL_INTERVAL: 1
+  SAVE_VAL: true
+  LOSSES:
+  - boxes
+  - class
+  - cards
+  - nodes
+  - edges
+  W_BBOX: 2.0
+  W_CLASS: 2.0
+  W_CARD: 1.0
+  W_NODE: 4.0
+  W_EDGE: 3.0
+log:
+  exp_name: PID2Graph Experiment
+  message: Relationformer (scene_graph branch, multi-class node/edge head) on PID2Graph

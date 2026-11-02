@@ -136,7 +136,7 @@ def test_image_review_from_model_output():
             {"id": "m1", "box": [400, 100, 450, 150], "class": "valve", "score": 0.95},
             {"id": "m2", "box": [700, 700, 750, 750], "class": "general", "score": 0.6},
         ],
-        "connections": [{"from": "m0", "to": "m1", "prob": 0.8}, {"from": "m1", "to": "m2", "prob": 0.7}],
+        "connections": [{"from": "m0", "to": "m1", "prob": 0.98}, {"from": "m1", "to": "m2", "prob": 0.95}],
         "ocr_tokens": [tok("PI", 110, 110, 140, 125), tok("N2", 112, 128, 138, 142), tok("XV101", 400, 155, 450, 170)],
     }
     review = from_image(infer, "x.png")
@@ -171,3 +171,91 @@ def test_drawio_valves_get_their_type_from_the_separate_tag_label():
     )
     assert built["GateValve"] > 0 and built["CheckValve"] > 0 and built["OperatedValve"] > 0
     assert built["SafetyValveOrFitting"] > 0
+
+
+def test_model_only_connections_need_to_be_sure_and_no_skip():
+    """The tracer's connections are kept; a model prediction it did not confirm only when the
+    model is sure enough (MODEL_ONLY_MIN) and it does not jump over an item the tracer put between them."""
+    from pid_dexpi_aas.review import from_image
+    box = lambda x: [x, 0, x + 40, 40]
+    infer = {"image": "x.png", "image_size": [1000, 200], "ocr_tokens": [],
+             "symbols": [{"id": f"m{i}", "box": box(100 * i), "class": "valve", "score": 0.99} for i in range(5)],
+             "traced": [{"from": "m0", "to": "m1"}, {"from": "m1", "to": "m2"}],
+             "connections": [{"from": "m0", "to": "m2", "prob": 0.99},   # skips m1: dropped
+                             {"from": "m2", "to": "m3", "prob": 0.95},   # sure: kept
+                             {"from": "m3", "to": "m4", "prob": 0.4}]}   # not sure: dropped
+    pairs = {frozenset((c.from_id, c.to_id)) for c in from_image(infer, "x.png").connections}
+    assert pairs == {frozenset(p) for p in (("m0", "m1"), ("m1", "m2"), ("m2", "m3"))}
+
+
+def test_possible_missed_item_is_a_suggestion():
+    """A symbol the model drew no box for, on a traced pipe: a flagged item for the guided
+    check, left out of DEXPI, the pipe kept as traced (splitting it made the labelled sets worse)."""
+    from pid_dexpi_aas.review import MISSED, from_image, look_reasons
+    infer = {"image": "x.png", "image_size": [1000, 200], "ocr_tokens": [], "connections": [],
+             "symbols": [{"id": "m0", "box": [0, 0, 40, 40], "class": "pump", "score": 0.99},
+                         {"id": "m1", "box": [400, 0, 440, 40], "class": "tank", "score": 0.99}],
+             "traced": [{"from": "m0", "to": "m1", "flow": 1, "path": [[40 + 10 * i, 20] for i in range(37)]}],
+             "missed": [{"box": [190, 5, 230, 35], "from": "m0", "to": "m1", "class": "", "score": None,
+                         "how": "pipe traced through a drawn symbol"}]}
+    review = from_image(infer, "x.png")
+    item = next(s for s in review.symbols if s.detected_as == MISSED)
+    assert item.dexpi_class and not item.include
+    assert any("possible missed item" in w for w in look_reasons(item))
+    assert [(c.from_id, c.to_id, c.flow) for c in review.connections] == [("m0", "m1", "drawn arrow")]
+
+
+def test_flow_arrow_direction_carries_to_the_bridged_line():
+    """pump - arrow - tank: the tracer read the arrow pointing on from the pump, so the line
+    joining pump and tank across the arrow flows pump -> tank."""
+    from pid_dexpi_aas.review import from_image
+    box = lambda x: [x, 0, x + 40, 40]
+    infer = {"image": "x.png", "image_size": [1000, 200], "ocr_tokens": [], "connections": [],
+             "symbols": [{"id": "m0", "box": box(300), "class": "tank", "score": 0.99},
+                         {"id": "m1", "box": box(150), "class": "arrow", "score": 0.99},
+                         {"id": "m2", "box": box(0), "class": "pump", "score": 0.99}],
+             "traced": [{"from": "m2", "to": "m1", "flow": 1}, {"from": "m1", "to": "m0", "flow": 0}]}
+    review = from_image(infer, "x.png")
+    bridged = [c for c in review.connections if c.confidence == "through a flow arrow"]
+    assert [(c.from_id, c.to_id, c.flow) for c in bridged] == [("m2", "m0", "drawn arrow")]
+
+
+def test_arrow_bridge_is_traced_when_both_its_lines_are():
+    """pump - arrow - tank traced, plus a model guess arrow - valve: the pump - tank line
+    across the arrow is traced; the one line on to the valve (a tree, not every pair) a guess."""
+    from pid_dexpi_aas.review import from_image
+    box = lambda x: [x, 0, x + 40, 40]
+    infer = {"image": "x.png", "image_size": [1000, 200], "ocr_tokens": [],
+             "symbols": [{"id": "m0", "box": box(300), "class": "tank", "score": 0.99},
+                         {"id": "m1", "box": box(150), "class": "arrow", "score": 0.99},
+                         {"id": "m2", "box": box(0), "class": "pump", "score": 0.99},
+                         {"id": "m3", "box": box(600), "class": "valve", "score": 0.99}],
+             "traced": [{"from": "m2", "to": "m1"}, {"from": "m1", "to": "m0"}],
+             "connections": [{"from": "m1", "to": "m3", "prob": 0.95}]}
+    review = from_image(infer, "x.png")
+    bridged = {frozenset((c.from_id, c.to_id)): c.source for c in review.connections if c.confidence == "through a flow arrow"}
+    assert bridged[frozenset(("m0", "m2"))] == "picture tracing"
+    to_valve = [src for pair, src in bridged.items() if "m3" in pair]
+    assert len(bridged) == 2 and to_valve == ["image model"]   # a tree: one line on to the valve
+
+
+def test_traced_pipe_network_is_built_with_tees():
+    """A traced pipe network of four items (shown as a tree of three lines) is one DEXPI pipe
+    network with two PipeTee fittings - not three separate pipes."""
+    from pydexpi.dexpi_classes import piping
+
+    from pid_dexpi_aas.review import from_image, to_dexpi
+    box = lambda x: [x, 0, x + 40, 40]
+    infer = {"image": "x.png", "image_size": [1000, 300], "ocr_tokens": [], "connections": [],
+             "symbols": [{"id": f"m{i}", "box": box(200 * i), "class": c, "score": 0.99}
+                         for i, c in enumerate(["pump", "valve", "valve", "tank"])],
+             # every pair of the network, as the tracer reports it (net 7)
+             "traced": [{"from": f"m{i}", "to": f"m{j}", "net": 7, "length": 200.0 * (j - i),
+                         "path": [[200 * i + 40, 20], [200 * j, 20]]} for i in range(4) for j in range(i + 1, 4)]}
+    review = from_image(infer, "x.png")
+    shown = [c for c in review.connections if c.include]
+    assert len(shown) == 3 and all(c.attributes.get("net") == "t7" for c in shown)
+    _, result = to_dexpi(review)
+    segs = [s for sys_ in result.model.conceptualModel.pipingNetworkSystems for s in sys_.segments]
+    tees = {id(i) for s in segs for i in s.items if isinstance(i, piping.PipeTee)}
+    assert len(tees) == 2

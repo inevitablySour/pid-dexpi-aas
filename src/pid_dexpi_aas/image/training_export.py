@@ -247,3 +247,48 @@ def remove_reviewed(root: Path, subset: str, name: str) -> None:
     for f in (Path(root) / "Complete" / subset).glob(f"{name}.*"):
         f.unlink()
     shutil.rmtree(Path(root) / "Patched" / subset / name, ignore_errors=True)
+
+
+# --------------------------------------------------------------- automatic retraining ---
+# How much new training data a sheet brings: its labelled items + labelled connections - what
+# the model learns from. Not the number of sheets: a 10-item sketch is not a 150-item plant.
+# Retraining is due when the reviewed sheets added since the last retraining reach 10 % of the
+# hand-labelled data the model already has (the team's drawings + earlier reviewed sheets),
+# at least MIN_NEW_UNITS. ml/pid2graph/auto_retrain.py runs it (nightly) and deploys the new
+# model only if it scores no worse on the held-out sheets.
+MIN_NEW_UNITS = 150
+NEW_FRACTION = 0.10
+BASE_TEAM_SUBSET = "Team v3"  # the live model's team drawings (pid2graph_final.yaml)
+
+
+def sheet_units(graphml: Path) -> int:
+    """Labelled items + labelled connections of one sheet (its Complete/ graphml)."""
+    from xml.etree import ElementTree as ET
+    root = ET.parse(graphml).getroot()
+    return sum(1 for el in root.iter() if el.tag.endswith("}node") or el.tag.endswith("}edge"))
+
+
+def retrain_state_path(root: Path) -> Path:
+    return Path(root).parents[1] / "ml" / "models" / "retrain_state.json"
+
+
+def retrain_status(root: Path) -> dict:
+    """{"new": [{name, units}], "new_units", "base_units", "threshold", "due", "held_out",
+    "last": the last run's record or None, "pending": a candidate awaiting approval or None}."""
+    import json
+    root = Path(root)
+    state_file = retrain_state_path(root)
+    state = json.loads(state_file.read_text()) if state_file.exists() else {}
+    trained = state.get("trained", {})  # {name: units} of reviewed sheets in the live model
+    sheets = {g.stem: (sheet_units(g), g.stat().st_mtime) for g in sorted((root / "Complete" / "Reviewed").glob("*.graphml"))}
+    new = [{"name": n, "units": u} for n, (u, t) in sheets.items()
+           if n not in trained or trained[n].get("mtime") != t]
+    base = sum(sheet_units(g) for g in (root / "Complete" / BASE_TEAM_SUBSET).glob("*.graphml")) + \
+        sum(v.get("units", 0) for n, v in trained.items() if n in sheets)
+    threshold = max(MIN_NEW_UNITS, round(NEW_FRACTION * base))
+    new_units = sum(x["units"] for x in new)
+    return {"new": new, "new_units": new_units, "base_units": base, "threshold": threshold,
+            "due": new_units >= threshold and new_units > state.get("tried_units", -1),
+            "held_out": len(list((root / "Complete" / "Reviewed test").glob("*.graphml"))),
+            "last": (state.get("history") or [None])[-1], "pending": state.get("pending"),
+            "sheets": {n: {"units": u, "mtime": t} for n, (u, t) in sheets.items()}}

@@ -235,6 +235,56 @@ _EQUIPMENT_FAMILIES: list[tuple[tuple[str, ...], str, list[tuple[str, str]]]] = 
     (("separators",), "Separator", [("gravit", "GravitationalSeparator"), ("scrub", "ScrubbingSeparator")]),
     (("vessels",), "Vessel", [("tank", "Tank"), ("cistern", "Tank"), ("silo", "Silo"), ("bottle", "CustomVessel"),
                               ("pressur", "PressureVessel"), ("column", "ProcessColumn")]),
+    (("engines",), "Motor", [("motor_(ac)", "AlternatingCurrentMotor"), ("motor_(dc)", "DirectCurrentMotor"),
+                             ("generator_(ac)", "AlternatingCurrentGenerator"),
+                             ("generator_(dc)", "DirectCurrentGenerator"), ("generator", "ElectricGenerator"),
+                             ("gear", "CustomEquipment"), ("steam_turbine", "SteamTurbine"), ("gas_turbine", "GasTurbine"),
+                             ("turbine", "Turbine"), ("combustion", "CombustionEngine")]),
+    (("centrifuges",), "Centrifuge", [("perforated", "FilteringCentrifuge"), ("pusher", "FilteringCentrifuge"),
+                                      ("filter", "FilteringCentrifuge"), ("solid_shell", "SedimentalCentrifuge"),
+                                      ("separator", "SedimentalCentrifuge")]),
+    (("driers", "dryers"), "Dryer", [("fluidized", "ConvectionDryer"), ("spray", "ConvectionDryer"),
+                                     ("drum", "HeatedSurfaceDryer"), ("roller", "HeatedSurfaceDryer"),
+                                     
+                                     ("heat_consumer", "CustomEquipment")]),
+    (("crushers_grinding",), "Crusher", [("mill", "Mill"), ("pulveriz", "Mill"), ("grind", "Grinder")]),
+    (("feeders",), "Feeder", [("weigh", "Weigher")]),
+    (("shaping_machines",), "CustomEquipment",
+     [("extruder_(piston)", "ReciprocatingExtruder"), ("extruder_(screw)", "RotatingExtruder"),
+      ("extruder", "Extruder"), ("pelletiz", "RotatingGrowthAgglomerator"), ("press_(piston)", "ReciprocatingPressureAgglomerator"),
+      ("press_(roller)", "RotatingPressureAgglomerator"), ("press", "Agglomerator")]),
+    # Misc: everything else - named where DEXPI has a class, else CustomEquipment (an item of
+    # its own, typed by the reviewer if they want more)
+    (("misc",), "CustomEquipment",
+     [("column", "ProcessColumn"), ("conveyor", "Conveyor"), ("cooling_tower", "CoolingTower"),
+      ("air_cooler", "AirCoolingSystem"), ("blower", "Blower"), ("fan", "Fan"), ("flare", "Flare"),
+      ("chimney", "Chimney"), ("stack", "Chimney"), ("boiler", "Boiler"), ("burner", "Burner"),
+      ("furnace", "Furnace"), ("steam_generator", "SteamGenerator"), ("evaporator", "ThinFilmEvaporator"),
+      ("sieve", "Sieve"), ("screen", "Sieve"), ("weigh", "Weigher"), ("scale", "Weigher"), ("silo", "Silo"),
+      ("forklift", "ForkliftTruck"), ("truck", "Truck"), ("ship", "Ship"), ("rail", "RailWaggon"),
+      ("palletiz", "PackagingSystem"), ("bag_filling", "PackagingSystem"), ("packag", "PackagingSystem"),
+      ("elevator", "Lift"), ("lift", "Lift"), ("kneader", "Kneader"), ("mixer", "Mixer"), ("agitator", "Agitator"),
+      ("ejector", "AirEjector"), ("separator", "Separator"), ("filter", "Filter"), ("tank", "Tank"),
+      ("vessel", "Vessel"), ("heat_exchanger", "HeatExchanger"), ("heater", "Heater"), ("pump", "Pump"),
+      ("compressor", "Compressor"), ("crusher", "Crusher"), ("mill", "Mill"), ("dryer", "Dryer"),
+      ("drier", "Dryer"), ("centrifuge", "Centrifuge"), ("feeder", "Feeder")]),
+]
+# In-line piping parts (the Piping and Fittings libraries), checked by the words of the shape's
+# name in order; anything else there is a CustomPipingComponent - still a part ON the pipe.
+_PIPING_FAMILIES = ("piping", "fittings")
+_PIPING_WORDS = [
+    ("cone_strainer", "ConicalStrainer"), ("conical_strainer", "ConicalStrainer"), ("strainer", "Strainer"),
+    ("reducer", "PipeReducer"), ("figure_8", "LineBlind"), ("spectacle", "LineBlind"), ("line_blind", "LineBlind"),
+    ("blind_flange", "BlindFlange"), ("blank", "PipeFlangeSpade"), ("blind_disc", "PipeFlangeSpade"),
+    ("interchangeable_disc", "PipeFlangeSpade"), ("spacer", "PipeFlangeSpacer"), ("arrestor", "FlameArrestor"),
+    ("arrester", "FlameArrestor"), ("silencer", "Silencer"), ("steam_trap", "SteamTrap"),
+    ("breather", "BreatherValve"), ("rupture", "RuptureDisc"), ("bursting", "RuptureDisc"),
+    ("illuminated_sight", "IlluminatedSightGlass"), ("sight_glass", "SightGlass"), ("compensator", "Compensator"),
+    ("expansion_joint", "Compensator"), ("clamped_flange", "ClampedFlangeCoupling"), ("coupling", "PipeCoupling"),
+    ("flange", "Flange"), ("hose", "Hose"), ("funnel", "Funnel"), ("orifice", "RestrictionOrifice"),
+    ("excess_flow_valve", "CustomSafetyValveOrFitting"), ("release_valve", "CustomSafetyValveOrFitting"),
+    ("breakthrough", "Penetration"), ("penetration", "Penetration"), ("mixer", "InLineMixer"),
+    ("vent", "VentilationDevice"), ("cap", "CustomPipeFitting"), ("welded", "CustomPipeFitting"),
 ]
 _VALVE_WORDS = [("gate", "GateValve"), ("globe", "GlobeValve"), ("ball", "BallValve"),
                 ("butterfly", "ButterflyValve"), ("needle", "NeedleValve"), ("plug", "PlugValve"),
@@ -267,6 +317,11 @@ def _library_family(shape_token: str, tag_text: str, style: str) -> MappingResul
             return MappingResult(Category.PIPING, dexpi_class, valve_note)
         dexpi_class, _ = classify_instrument_tag(tag_text)
         return MappingResult(Category.INSTRUMENTATION, dexpi_class, note)
+    if family in _PIPING_FAMILIES:
+        return MappingResult(Category.PIPING, next((c for w, c in _PIPING_WORDS if w in name), "CustomPipingComponent"),
+                             note)
+    if family == "apparatus_elements":
+        return None  # a vessel's nozzle, support leg, skirt, manhole: part of the vessel - group it with it
     for families, default, words in _EQUIPMENT_FAMILIES:
         if family in families or any(family.startswith(f) for f in families):
             return MappingResult(Category.EQUIPMENT, next((c for w, c in words if w in name), default), note)
@@ -363,3 +418,26 @@ def classify_detection(model_class: str, tag_text: str | None) -> tuple[MappingR
     if tag_text and note:
         reason = f"{reason}; {note}"
     return MappingResult(category, dexpi_class, reason), f"model class {model_class!r}"
+
+
+def shape_rules() -> dict:
+    """map_shape's shape-only rules as data, for the Editor tab: a shape dragged in from
+    draw.io's libraries gets its DEXPI type the moment it is dropped (index.html classOf),
+    the same as map_shape(token, "", style) - a tag refines valves and instruments on Save."""
+    exact = {t: c for t, c in EQUIPMENT_SHAPE_MAP.items()}
+    exact.update({t: None for t in NOT_PROCESS_EQUIPMENT_SHAPES})
+    for t in (DISC_INST_SHAPE, CYLINDER_SHAPE, OFF_PAGE_CONNECTOR_SHAPE):
+        exact[t] = map_shape(t, "").dexpi_class_name
+    return {
+        "exact": exact,
+        "generic_valve": GENERIC_VALVE_SHAPE,
+        "valve_types": VALVE_TYPE_MAP,
+        "valve_default": _classify_valve("", "")[0],
+        "valve_words": _VALVE_WORDS,
+        "instrument_families": ["inst", "instruments", "flow_sensors"],
+        "instrument_class": classify_instrument_tag("")[0],
+        "piping_families": list(_PIPING_FAMILIES),
+        "piping_words": _PIPING_WORDS,
+        "piping_default": "CustomPipingComponent",
+        "equipment_families": [[list(f), d, w] for f, d, w in _EQUIPMENT_FAMILIES],
+    }
