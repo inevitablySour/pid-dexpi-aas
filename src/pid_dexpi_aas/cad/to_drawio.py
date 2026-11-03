@@ -23,6 +23,7 @@ reads as a tee.
 """
 from __future__ import annotations
 
+import base64
 import html
 import math
 import re
@@ -54,6 +55,8 @@ class Item:
     block: str = ""
     why: str = ""
     cls: str = ""   # a DEXPI class set here (written as editor data, so the review keeps it)
+    rot: int = 0    # the block's rotation in the CAD drawing, degrees counter-clockwise
+    ents: list = field(default_factory=list)   # its drawn geometry, in drawing coordinates
 
 
 def _fields(ins) -> list[str]:
@@ -65,19 +68,31 @@ def _fields(ins) -> list[str]:
     return out
 
 
-def _geometry_box(ins):
-    """The symbol's outline: its drawn geometry, not its attribute texts."""
-    from ezdxf import bbox
+def _parts(ins, depth=0) -> list:
+    """A block reference's drawn geometry in drawing coordinates (nested blocks opened up),
+    without its texts."""
+    out = []
     try:
-        parts = [e for e in ins.virtual_entities() if e.dxftype() not in TEXT_TYPES]
+        for e in ins.virtual_entities():
+            if e.dxftype() == "INSERT" and depth < 4:
+                out += _parts(e, depth + 1)
+            elif e.dxftype() not in TEXT_TYPES:
+                out.append(e)
     except Exception:
-        parts = []
+        pass
+    return out
+
+
+def _geometry_box(ins):
+    """(The symbol's outline box, its parts): its drawn geometry, not its attribute texts."""
+    from ezdxf import bbox
+    parts = _parts(ins)
     if not parts:
-        return None
+        return None, []
     ext = bbox.extents(parts)
     if not ext.has_data:
-        return None
-    return (ext.extmin.x, ext.extmin.y, ext.extmax.x, ext.extmax.y)
+        return None, []
+    return (ext.extmin.x, ext.extmin.y, ext.extmax.x, ext.extmax.y), parts
 
 
 def _text_only(doc, ins) -> bool:
@@ -100,6 +115,36 @@ def _classify(fields: list[str]) -> tuple[str, str, str, list, str]:
     if kind:
         return kind, tag, "", fields[1:], f"tag prefix ({cls})"
     return "unknown", tag, "", fields[1:], "tag not recognised"
+
+
+def _within(e, box) -> bool:
+    from ezdxf import bbox
+    ext = bbox.extents([e])
+    return ext.has_data and _inside(ext.extmin, box, 0.01) and _inside(ext.extmax, box, 0.01)
+
+
+def symbol_svg(ents, box) -> str:
+    """The symbol as drawn in the CAD file, as an SVG image of exactly its box (y up -> down)."""
+    from ezdxf import path as dpath
+    w, h = max(box[2] - box[0], 0.5), max(box[3] - box[1], 0.5)
+    pad = 0.3
+    shapes = []
+    for e in ents:
+        try:
+            paths = (list(dpath.from_hatch(e)) if e.dxftype() == "HATCH" else [dpath.make_path(e)])
+        except Exception:
+            continue
+        filled = e.dxftype() in ("HATCH", "SOLID", "TRACE")
+        for pth in paths:
+            pts = list(pth.flattening(0.05))
+            if len(pts) < 2:
+                continue
+            d = "M" + " L".join(f"{p.x - box[0] + pad:.2f},{box[3] - p.y + pad:.2f}" for p in pts)
+            shapes.append(f'<path d="{d}{" Z" if filled else ""}" fill="{"#000" if filled else "none"}"/>')
+    vw, vh = w + 2 * pad, h + 2 * pad
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {vw:.2f} {vh:.2f}" width="{vw:.2f}mm" '
+            f'height="{vh:.2f}mm"><g stroke="#000" stroke-width="0.25" stroke-linecap="round" '
+            f'stroke-linejoin="round">{"".join(shapes)}</g></svg>')
 
 
 def _inside(p, box, margin=0.0) -> bool:
@@ -127,17 +172,18 @@ def read_symbols(doc) -> tuple[list[Item], list, list]:
             if fields:
                 labels.append((ins.dxf.insert.x, ins.dxf.insert.y, fields))
             continue
-        box = _geometry_box(ins)
+        box, parts = _geometry_box(ins)
         if box is None or (box[2] - box[0]) > 0.25 * W or (box[3] - box[1]) > 0.25 * H:
             continue  # the drawing frame
         iid = f"b{k}"
         if not fields:
-            items.append(Item(iid, "inline", box, block=ins.dxf.name, why="symbol without text"))
+            items.append(Item(iid, "inline", box, block=ins.dxf.name, why="symbol without text",
+                              rot=round(ins.dxf.rotation) % 360, ents=parts))
             continue
         if len(fields) >= 3 and not (_LETTERS.match(fields[0]) and _NUMBER.match(fields[1])):
             continue  # a data box beside a symbol (a safety valve's set pressure), not a symbol
         kind, tag, body, extra, why = _classify(fields)
-        items.append(Item(iid, kind, box, tag=tag, extra=extra, block=ins.dxf.name, why=why,
+        items.append(Item(iid, kind, box, tag=tag, extra=extra, block=ins.dxf.name, why=why, rot=round(ins.dxf.rotation) % 360, ents=parts,
                           style=f"valveType={body};" if body else ""))
     # equipment drawn as an outline, named by a label inside it; outlines around symbols: frames
     frames = []
@@ -154,7 +200,10 @@ def read_symbols(doc) -> tuple[list[Item], list, list]:
         for f in names:
             kind, cls, _ = classify_tag(f[0])
             if kind == "equipment":
-                items.append(Item(f"q{k}", "equipment", box, tag=f[0], extra=f[1:], why=f"outline named {f[0]}"))
+                inner = [e for e in msp.query("LINE LWPOLYLINE ARC CIRCLE ELLIPSE")
+                         if e is not pl and _within(e, box)]
+                items.append(Item(f"q{k}", "equipment", box, tag=f[0], extra=f[1:], why=f"outline named {f[0]}",
+                                  ents=[pl] + inner))
                 break
     return items, labels, frames
 
@@ -303,10 +352,36 @@ def _ends_on_pipes(chains: list[dict]) -> int:
     return n
 
 
+def _fraction(p, frame) -> tuple[float, float]:
+    """A point as draw.io's fraction of a (turned) shape's own box, 0-1 each way."""
+    cx, cy, w, h, turn = frame
+    dx, dy = p[0] - cx, p[1] - cy
+    t = math.radians(-turn)
+    ux, uy = dx * math.cos(t) - dy * math.sin(t), dx * math.sin(t) + dy * math.cos(t)
+    clamp = lambda v: round(min(1.0, max(0.0, v)), 3)
+    return clamp(0.5 + ux / w), clamp(0.5 + uy / h)
+
+
 def _box_gap(a, b) -> float:
     dx = max(a[0] - b[2], b[0] - a[2], 0)
     dy = max(a[1] - b[3], b[1] - a[3], 0)
     return math.hypot(dx, dy)
+
+
+def _dexpi_class(it: Item) -> str:
+    """The DEXPI class an item is written with (as editor data): its drawing is the CAD symbol."""
+    from pid_dexpi_aas.dexpi.mapping import DISC_INST_SHAPE, GENERIC_VALVE_SHAPE, map_shape
+    if it.cls:
+        return it.cls
+    if it.kind == "valve":
+        return map_shape(GENERIC_VALVE_SHAPE, it.tag, it.style).dexpi_class_name or "CustomPipingComponent"
+    if it.kind == "instrument":
+        return map_shape(DISC_INST_SHAPE, it.tag).dexpi_class_name or "ProcessInstrumentationFunction"
+    if it.kind == "equipment":
+        return classify_tag(it.tag)[1] or "CustomEquipment"
+    if it.kind == "stream":
+        return "(off-page connector)"
+    return "CustomPipeFitting"
 
 
 def _style(it: Item) -> tuple[str, str]:
@@ -363,12 +438,31 @@ def dxf_to_drawio(doc, title: str = "drawing") -> tuple[str, dict]:
     X = lambda x: round((x - x0) * SCALE, 1)
     Y = lambda y: round((ytop - y) * SCALE, 1)
     cells = ['<mxCell id="0"/>', '<mxCell id="1" parent="0"/>']
+    frame = {}   # item id -> (centre x, centre y, unrotated w, h, clockwise rotation) in draw.io units
     for it in items:
-        style, label = _style(it)
+        _, label = _style(it)
+        svg = base64.b64encode(symbol_svg(it.ents, it.box).encode()).decode()
+        style = (f"shape=image;image=data:image/svg+xml,{svg};imageAspect=0;html=1;fontSize=10;"
+                 + ("verticalLabelPosition=middle;verticalAlign=middle;" if it.kind == "instrument"
+                    else "verticalLabelPosition=bottom;verticalAlign=top;"))
+        if not it.ents:   # a stream drawn as text only: stays a text label
+            style = "text;html=1;align=center;verticalAlign=middle;fontSize=11;"
+        it.cls = _dexpi_class(it)
         x, y = X(it.box[0]), Y(it.box[3])
         w, h = max(4.0, X(it.box[2]) - x), max(4.0, Y(it.box[1]) - y)
-        geo = f'<mxGeometry x="{x}" y="{y}" width="{round(w, 1)}" height="{round(h, 1)}" as="geometry"/>'
-        if it.cls:   # a class set here: kept as the editor keeps a person's choice (review._apply_editor_data)
+        cx, cy = x + w / 2, y + h / 2
+        turn = 0
+        if False:   # drawn as placed in the CAD file: no turning needed
+            # draw.io turns a shape clockwise about its centre; CAD counter-clockwise. The box read
+            # from CAD is the turned one: a quarter turn swaps its sides back.
+            turn = (360 - it.rot) % 360
+            if turn in (90, 270):
+                w, h = h, w
+            x, y = cx - w / 2, cy - h / 2
+            style += f"rotation={turn};"
+        frame[it.id] = (cx, cy, w, h, turn)
+        geo = f'<mxGeometry x="{round(x, 1)}" y="{round(y, 1)}" width="{round(w, 1)}" height="{round(h, 1)}" as="geometry"/>'
+        if it.cls and it.ents:   # its class, kept as the editor keeps a person's choice (review._apply_editor_data)
             data = {"label": label, "dexpi_class": it.cls, "dexpi_auto": "0", "notes": it.why}
             if it.tag:
                 data.update(tag=it.tag, tag_auto="0")
@@ -384,7 +478,16 @@ def dxf_to_drawio(doc, title: str = "drawing") -> tuple[str, dict]:
     for c in kept:
         pts = c["pts"]
         style = "endArrow=none;html=1;rounded=0;edgeStyle=none;" + ("dashed=1;" if c["dashed"] else "")
-        src, tgt = c["a"] or c.get("on_a"), c["b"] or c.get("on_b")
+        # each end exactly where it touches its symbol in the CAD drawing - not draw.io's own
+        # choice (towards the shape's centre), which drew slanted pipes
+        for end, side, q in (("a", "exit", pts[0]), ("b", "entry", pts[-1])):
+            f = frame.get(c[end])
+            if f:
+                fx, fy = _fraction((X(q[0]), Y(q[1])), f)
+                style += f"{side}X={fx};{side}Y={fy};{side}Dx=0;{side}Dy=0;{side}Perimeter=0;"
+        # a branch end on another pipe stays a point ON that pipe (exact), not attached to the line:
+        # draw.io would draw it to a point of its own choosing; the draw.io route reads the tee
+        src, tgt = c["a"], c["b"]
         terms = (f' source="{src}"' if src else "") + (f' target="{tgt}"' if tgt else "")
         inner = "".join(f'<mxPoint x="{X(p[0])}" y="{Y(p[1])}"/>' for p in pts[1:-1])
         cells.append(f'<mxCell id="{c["id"]}" style="{style}" edge="1" parent="1"{terms}><mxGeometry relative="1" as="geometry">'

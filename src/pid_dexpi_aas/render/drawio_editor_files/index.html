@@ -738,8 +738,34 @@ const MARK_LOOK = SVG('<text x="8" y="12.5" font-size="12" font-family="sans-ser
 // reviewer's lines all carried a green tick while two of them were loose (2026-11). Flagged
 // everywhere, a tick or not: in open space the end becomes an inlet / outlet, near an item it
 // is guessed onto that item - either way not what the drawing shows unless it is meant.
-const looseEnds = (c) => graph.getModel().isEdge(c)
-  ? [graph.getModel().getTerminal(c, true), graph.getModel().getTerminal(c, false)].filter((t) => !t).length : 0;
+// An end lying on another line is a branch (the app reads a tee there), not loose.
+function onALine(c, p) {
+  for (const o of Object.values(graph.model.cells)) {
+    if (o === c || !graph.model.isEdge(o)) continue;
+    const st = graph.view.getState(o);
+    const pts = st && st.absolutePoints;
+    if (!pts) continue;
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1], b = pts[i];
+      if (!a || !b) continue;
+      const dx = b.x - a.x, dy = b.y - a.y, L = dx * dx + dy * dy;
+      const t = L ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / L)) : 0;
+      if (Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy)) <= 4 * graph.view.scale) return true;
+    }
+  }
+  return false;
+}
+const looseEnds = (c) => {
+  const m = graph.getModel();
+  if (!m.isEdge(c)) return 0;
+  const st = graph.view.getState(c);
+  const pts = st && st.absolutePoints;
+  let n = 0;
+  for (const [term, p] of [[m.getTerminal(c, true), pts && pts[0]], [m.getTerminal(c, false), pts && pts[pts.length - 1]]]) {
+    if (!term && !(p && onALine(c, p))) n += 1;
+  }
+  return n;
+};
 const LOOSE_TIP = "Not attached at one end - drag the end onto its symbol until the symbol is outlined in blue. " +
   "Ending in open space it becomes an inlet / outlet of the drawing.";
 const MARK_FLOW = SVG('<path d="M3 8h8M8 5l3 3-3 3" stroke="#fff" stroke-width="1.6" fill="none"/>', "#868e96");

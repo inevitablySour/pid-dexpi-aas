@@ -60,12 +60,14 @@ def test_symbols_by_general_rules(drawing):
 
 def test_pipes_attach_to_their_symbols(drawing):
     xml, _ = drawing
-    ids = dict(re.findall(r'<mxCell id="(b\d+|q\d+)" value="([^"]*)"', xml))
+    ids = dict(re.findall(r'<(?:mxCell|object) id="(b\d+|q\d+)" (?:value|label)="([^"]*)"', xml))
     by_tag = {v: k for k, v in ids.items()}
     links = set(re.findall(r'edge="1" parent="1"(?: source="(\w+)")?(?: target="(\w+)")?', xml))
     want = {(by_tag["FEED"], by_tag["AFS001"]), (by_tag["AFS001"], by_tag["P101"]), (by_tag["P101"], by_tag["T001"])}
     assert want <= links          # the valve - pump pipe runs through the flange
     assert "PI&lt;br&gt;101" in xml   # the instrument bubble carries its letters and number
+    assert 'dexpi_class="Pump"' in xml and 'dexpi_class="ProcessInstrumentationFunction"' in xml
+    assert "shape=image;image=data:image/svg+xml," in xml   # drawn with its own CAD symbol
 
 
 def test_decoration_and_signal_lines(drawing):
