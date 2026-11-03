@@ -100,13 +100,14 @@ def _flags(review, out: dict) -> None:
     each line were found (why), unknown flow on a pipe (flow_unknown), and - pictures - text
     the OCR read near an item that no item claimed (ocr_near: often its missed tag)."""
     import math
-    from pid_dexpi_aas.review import FLOW_KNOWN, item_why, line_why, look_reasons
+    from pid_dexpi_aas.review import FLOW_KNOWN, duplicate_tags, item_why, line_why, look_reasons
     loose = review.unattached_tags or []
+    dupes = duplicate_tags(review)
     for s in review.symbols:
         a = out.get(s.id, {}).get("attrs")
         if a is None:
             continue
-        a["look"] = "; ".join(look_reasons(s))
+        a["look"] = "; ".join(look_reasons(s, dupes))
         a["why"] = item_why(s)
         if loose and s.box:
             size = max(s.box[2] - s.box[0], s.box[3] - s.box[1])

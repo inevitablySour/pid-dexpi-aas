@@ -56,7 +56,7 @@ from pid_dexpi_aas.render.routing import route  # noqa: E402
 from pid_dexpi_aas.dexpi.mapping import classify_detection  # noqa: E402
 from pid_dexpi_aas.drawio.parser import parse_drawio_xml_resolved  # noqa: E402
 from pid_dexpi_aas.dexpi.spec_sheet import apply_spec_sheet, read_xlsx, template_xlsx
-from pid_dexpi_aas.review import is_flow_arrow, look_reasons
+from pid_dexpi_aas.review import duplicate_tags, is_flow_arrow, look_reasons
 from pid_dexpi_aas.review import (  # noqa: E402
     DEXPI_CLASS_CHOICES, FLOW_KNOWN, INSTRUMENT_CLASSES, OFF_PAGE, SKIP, VALVE_CLASSES, ReviewConnection, ReviewDiagram, ReviewSymbol,
     _instrument_attributes, _short_token, cross_check, from_drawio, from_image, to_dexpi, validate_rows,
@@ -935,7 +935,9 @@ if image_file is not None and drawio_file is None:
 
 # ------------------------------------------------------------------ needs-review logic ---
 def needs_review(s: ReviewSymbol) -> bool:
-    return bool(look_reasons(s))  # review.look_reasons: the same rule flags items in the editor
+    # review.look_reasons: the same rule flags items in the editor (a tag used twice included)
+    rv = st.session_state.get("review")
+    return bool(look_reasons(s, duplicate_tags(rv) if rv is not None else None))
 
 
 # ------------------------------------------------------------------------- overlay ---

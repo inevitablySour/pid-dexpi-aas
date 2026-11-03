@@ -134,3 +134,25 @@ def test_units_planned_items_and_data_tables():
     assert specs["dexpi"]["nominalCapacityVolume"] == {"unit": "m3", "value": 12.0}
     assert specs["custom"]["DesignPressure"] == {"unit": "bar", "value": 8.0}
     assert specs["custom"]["Medium"] == "WATER" and "Material" not in str(specs)   # XXXXXX: a placeholder
+
+
+def test_data_box_names_a_symbol_and_line_numbers_go_on_pipes():
+    """A data box against an untagged symbol names it ("PSV-001 / 5 BARG": a safety valve set at
+    5 bar); a line number label beside a pipe goes onto that pipe, with its size."""
+    doc = ezdxf.new()
+    msp = doc.modelspace()
+    _block(doc, "STREAM", lambda b: b.add_lwpolyline([(-10, -3), (8, -3), (10, 0), (8, 3), (-10, 3)], close=True), ["NAME"])
+    _block(doc, "SAFETY", lambda b: b.add_lwpolyline([(-2, -4), (2, -4), (0, 4)], close=True))
+    box = _block(doc, "DATABOX", lambda b: b.add_lwpolyline([(-6, 0), (6, 0), (6, 9), (-6, 9)], close=True),
+                 ["TAG", "NUMBER", "SET"])
+    _block(doc, "LABEL", lambda b: None, ["TEXT"])
+    msp.add_lwpolyline([(-50, -150), (250, -150), (250, 150), (-50, 150)], close=True)   # the sheet's frame
+    msp.add_blockref("STREAM", (0, 0)).add_auto_attribs({"NAME": "FEED"})
+    msp.add_blockref("SAFETY", (40, 0))
+    msp.add_blockref("DATABOX", (40, 4)).add_auto_attribs({"TAG": "PSV-001", "NUMBER": "1-234", "SET": "5 BARG"})
+    msp.add_line((10, 0), (38, 0))
+    msp.add_blockref("LABEL", (20, 2)).add_auto_attribs({"TEXT": "LINE-001-D80"})
+    xml, report = dxf_to_drawio(doc, "t")
+    m = re.search(r"label=\"PSV-001\"[^>]*specs='([^']*)'", xml)
+    assert m and json.loads(m.group(1))["dexpi"]["setPressureHigh"] == {"unit": "bar", "value": 5.0}
+    assert report["line_numbers"] == 1 and "LINE-001-D80" in xml and "DN80" in xml

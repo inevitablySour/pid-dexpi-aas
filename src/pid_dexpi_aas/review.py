@@ -111,12 +111,25 @@ def is_flow_arrow(s: ReviewSymbol) -> bool:
     return s.detected_as == "arrow" and s.dexpi_class == SKIP
 
 
-def look_reasons(s: ReviewSymbol) -> list[str]:
+def duplicate_tags(review: "ReviewDiagram") -> dict[str, list]:
+    """Tags carried by more than one item going into DEXPI (streams and flow arrows aside): a
+    tag names one item, so one of them is mistyped - in the drawing itself, or read wrongly."""
+    groups: dict = {}
+    for x in review.symbols:
+        if x.include and x.tag and x.dexpi_class != OFF_PAGE and not is_flow_arrow(x):
+            groups.setdefault(x.tag.strip().upper(), []).append(x)
+    return {t: g for t, g in groups.items() if len(g) > 1}
+
+
+def look_reasons(s: ReviewSymbol, dupes: dict | None = None) -> list[str]:
     """Why an item needs a person's look ([] = it does not): the map's "to check" items, and
-    the editor's flagged ones."""
-    if s.source == "manual" or is_flow_arrow(s):
-        return []
+    the editor's flagged ones. dupes: duplicate_tags(review), to flag a tag used twice."""
     why = []
+    if dupes and s.include and s.tag and s.tag.strip().upper() in dupes:
+        n = len(dupes[s.tag.strip().upper()]) - 1
+        why.append(f"tag {s.tag} is also on {n} other item{'s' if n > 1 else ''}")
+    if s.source == "manual" or is_flow_arrow(s):
+        return why
     if s.dexpi_class == SKIP and s.source != "draw.io":
         why.append("no DEXPI type")
     if s.confidence is not None and s.confidence < 0.7:
@@ -289,6 +302,15 @@ def _apply_editor_data(review: ReviewDiagram, diagram: ParsedDiagram) -> None:
     import json
     data = {sh.id: sh.data for sh in diagram.shapes if sh.data}
     data.update({e.id: e.data for e in diagram.edges if e.data})
+    # a pipe network's connections (net<k>:a:b, worked out from the drawn lines) carry the
+    # specifications (line number, size) of a drawn line of that network ending on one of their ends
+    for c in review.connections:
+        if c.id.startswith("net") and c.id not in data:
+            net = c.id.split(":", 1)[0]
+            touching = [e for e in diagram.edges if e.merged_into == net and (e.data or {}).get("specs")
+                        and {e.source, e.target} & {c.from_id, c.to_id}]
+            if touching:
+                data[c.id] = {"specs": touching[0].data["specs"]}
     texts = {sh.id: sh.text for sh in diagram.shapes}
     for row in [*review.symbols, *review.connections]:
         d = data.get(row.id)

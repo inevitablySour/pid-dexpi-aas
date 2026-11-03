@@ -194,7 +194,7 @@ def read_symbols(doc) -> tuple[list[Item], list, list]:
     msp = doc.modelspace()
     sheet = bbox.extents(msp)
     W, H = sheet.size.x, sheet.size.y
-    items, labels = [], []
+    items, labels, databoxes = [], [], []
     for k, ins in enumerate(msp.query("INSERT")):
         fields = _fields(ins)
         if len(fields) > 6:
@@ -212,11 +212,28 @@ def read_symbols(doc) -> tuple[list[Item], list, list]:
                               rot=round(ins.dxf.rotation) % 360, ents=parts, future=_is_future(doc, parts)))
             continue
         if len(fields) >= 3 and not (_LETTERS.match(fields[0]) and _NUMBER.match(fields[1])):
-            continue  # a data box beside a symbol (a safety valve's set pressure), not a symbol
+            databoxes.append((box, fields))   # a data box beside a symbol (a safety valve's set pressure)
+            continue
         kind, tag, body, extra, why = _classify(fields)
         items.append(Item(iid, kind, box, tag=tag, extra=extra, block=ins.dxf.name, why=why, rot=round(ins.dxf.rotation) % 360, ents=parts,
                           future=_is_future(doc, parts),
                           style=f"valveType={body};" if body else ""))
+    # a data box touching an untagged symbol names it: "PSV-0001 / 1-12345 / 5 BARG" on a
+    # safety valve's symbol makes it PSV-0001, set at 5 bar
+    for dbox, fields in databoxes:
+        near = min(((_box_gap(dbox, it.box), it) for it in items if not it.tag), key=lambda t: t[0], default=(None, None))
+        if near[1] is None or near[0] > 1.5:
+            continue
+        it = near[1]
+        kind, tag, body, _, why = _classify(fields[:1])
+        it.kind, it.tag, it.why = (kind if kind != "unknown" else "valve"), tag, f"named by its data box ({why})"
+        it.style = f"valveType={body};" if body else it.style
+        for f in fields[1:]:
+            m = re.search(r"(\d+(?:[.,]\d+)?)\s*BAR", f, re.I)
+            if m:
+                it.specs.setdefault("dexpi", {})["setPressureHigh"] = {"value": float(m.group(1).replace(",", ".")), "unit": "bar"}
+            else:
+                it.specs.setdefault("custom", {})["DataBox"] = f
     # equipment drawn as an outline, named by a label inside it; outlines around symbols: frames
     frames = []
     for k, pl in enumerate(msp.query("LWPOLYLINE")):
@@ -418,7 +435,8 @@ def pass_through(chains: list[dict], items: list[Item]) -> list[str]:
                 dot = d[0] * run[0] + d[1] * run[1]
                 if abs(dot) > 1e-9:
                     votes.add(1 if dot > 0 else -1)
-            c1.update(pts=p1 + p2, a=far1, b=far2, votes=votes)
+            specs = {**(c2.get("specs") or {}), **(c1.get("specs") or {})}
+            c1.update(pts=p1 + p2, a=far1, b=far2, votes=votes, specs=specs)
             chains.remove(c2)
             del by_id[it.id]
             gone.append(it.tag or it.block)
@@ -637,9 +655,24 @@ def dxf_to_drawio(doc, title: str = "drawing") -> tuple[str, dict]:
     ends_on = {c[e] for c in chains for e in ("a", "b") if c[e]}
     for it in items:
         if it.kind == "unknown" and it.id in ends_on and not any(c["a"] == it.id and c["b"] == it.id for c in chains):
-            n_on = sum(1 for c in chains for e in ("a", "b") if c[e] == it.id)
-            if n_on == 1:
+            on = [c for c in chains for e in ("a", "b") if c[e] == it.id]
+            if len(on) == 1 and not on[0]["dashed"]:
                 it.kind, it.why = "stream", "text where a pipe ends: a stream"
+            elif on and all(c["dashed"] for c in on):
+                # text at the end of a signal line: instrumentation, not a stream
+                it.kind, it.cls, it.why = "instrument", "ProcessInstrumentationFunction", "text at the end of a signal line"
+    # one block, one meaning: a block used mostly as a stream is a stream everywhere (a stream
+    # named like equipment - "V0205" on the same arrow box as MEDIUM 01 - is still a stream)
+    by_block: dict = {}
+    for it in items:
+        if it.block:
+            by_block.setdefault(it.block, []).append(it)
+    for same in by_block.values():
+        streams = [it for it in same if it.kind == "stream"]
+        if len(streams) * 2 > len(same):
+            for it in same:
+                if it.kind != "stream" and sum(1 for c in chains for e in ("a", "b") if c[e] == it.id) <= 1:
+                    it.kind, it.cls, it.why = "stream", "", f"drawn with the same symbol as the streams ({len(streams)} of {len(same)})"
     ends_on = {c[e] for c in chains for e in ("a", "b") if c[e]}
     units = [it for it in items if it.kind == "unit"]
     for u in units:
@@ -649,7 +682,57 @@ def dxf_to_drawio(doc, title: str = "drawing") -> tuple[str, dict]:
         for it in items:   # what is drawn inside it is part of it
             if it is not u and _inside(((it.box[0] + it.box[2]) / 2, (it.box[1] + it.box[3]) / 2), u.box):
                 it.section = u.tag
+    # an instrument with no line of its own drawn against a process pipe (within TAP mm) measures
+    # on it: a short branch from the bubble to the pipe, which the draw.io route reads as a tap
+    taps = 0
+    TAP = 8.0
+    ends_on = {c[e] for c in chains for e in ("a", "b") if c[e]}
+    for it in items:
+        if it.kind != "instrument" or it.id in ends_on or it.future:
+            continue
+        centre = ((it.box[0] + it.box[2]) / 2, (it.box[1] + it.box[3]) / 2)
+        best = None
+        for c in chains:
+            if c["dashed"] or c.get("future"):
+                continue
+            for q, r in zip(c["pts"], c["pts"][1:]):
+                ax, ay = r[0] - q[0], r[1] - q[1]
+                L = ax * ax + ay * ay
+                t = 0.0 if L == 0 else max(0.0, min(1.0, ((centre[0] - q[0]) * ax + (centre[1] - q[1]) * ay) / L))
+                foot = (q[0] + t * ax, q[1] + t * ay)
+                d = _dist_to_box(foot, it.box)
+                if d <= TAP and (best is None or d < best[0]):
+                    best = (d, foot)
+        if best is None:
+            continue
+        foot = best[1]
+        edge = (min(max(foot[0], it.box[0]), it.box[2]), min(max(foot[1], it.box[1]), it.box[3]))
+        chains.append({"pts": [edge, foot], "dashed": False, "future": False, "a": it.id, "b": None})
+        taps += 1
     tables = read_tables(doc)
+    line_numbers = 0
+    for x, y, fields in labels:   # "LEIDING-001-D80" beside a pipe: its line number and size
+        text = fields[0]
+        if classify_tag(text)[0] or not re.search(r"\d", text) or "-" not in text or len(text) < 6:
+            continue
+        best = None
+        for c in chains:
+            if c["dashed"]:
+                continue
+            for q, r in zip(c["pts"], c["pts"][1:]):
+                d = _seg_dist((x, y), q, r)
+                if d <= 8.0 and (best is None or d < best[0]):
+                    best = (d, c)
+        if best is None:
+            continue
+        c = best[1]
+        dexpi = c.setdefault("specs", {}).setdefault("dexpi", {})
+        dexpi["segmentNumber"] = text
+        m = re.search(r"\bD(?:N)?\s?(\d{2,4})\b", text)
+        if m:
+            dexpi["nominalDiameterRepresentation"] = f"DN{m.group(1)}"
+        c["label"] = text
+        line_numbers += 1
     for it in items:
         if it.kind == "equipment" and it.tag in tables:
             it.specs = tables[it.tag]
@@ -744,9 +827,18 @@ def dxf_to_drawio(doc, title: str = "drawing") -> tuple[str, dict]:
         src, tgt = c["a"], c["b"]
         terms = (f' source="{src}"' if src else "") + (f' target="{tgt}"' if tgt else "")
         inner = "".join(f'<mxPoint x="{X(p[0])}" y="{Y(p[1])}"/>' for p in pts[1:-1])
+        data = {}
         if c.get("future"):   # a planned / out-of-service pipe: in the drawing, left out of DEXPI
-            note = "drawn dashed and grey: planned or out of service, left out of DEXPI"
-            cells.append(f'<object id="{c["id"]}" in_dexpi="0" notes={quoteattr(note)}><mxCell style="{style}" edge="1" parent="1"{terms}>'
+            data.update(in_dexpi="0", notes="drawn dashed and grey: planned or out of service, left out of DEXPI")
+        if c.get("specs"):
+            import json
+            data["specs"] = json.dumps(c["specs"], sort_keys=True)
+        if c.get("label"):
+            data["label"] = c["label"]
+            style += "fontSize=9;labelBackgroundColor=#ffffff;"
+        if data:
+            attrs = " ".join(f"{k}={quoteattr(v)}" for k, v in data.items())
+            cells.append(f'<object id="{c["id"]}" {attrs}><mxCell style="{style}" edge="1" parent="1"{terms}>'
                          f'<mxGeometry relative="1" as="geometry">'
                          f'<mxPoint x="{X(pts[0][0])}" y="{Y(pts[0][1])}" as="sourcePoint"/>'
                          f'<mxPoint x="{X(pts[-1][0])}" y="{Y(pts[-1][1])}" as="targetPoint"/>'
@@ -765,6 +857,6 @@ def dxf_to_drawio(doc, title: str = "drawing") -> tuple[str, dict]:
     report = {"symbols": kinds, "pipes": sum(1 for c in chains if not c["dashed"]),
               "signal_lines": sum(1 for c in chains if c["dashed"]), "through": through, "bridged": bridged, "tees": tees, "flow_from_arrows": with_flow,
               "units": [it.tag for it in items if it.kind == "unit"], "future": sum(it.future for it in items),
-              "tables": sorted(tables),
+              "tables": sorted(tables), "line_numbers": line_numbers, "taps_added": taps,
               "frames": len(frames), "unrecognised": sorted({it.tag or it.block for it in items if it.cls})}
     return xml, report
