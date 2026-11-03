@@ -20,6 +20,7 @@ check; (2) all items and lines as tables for bulk edits; (3) build, verify and d
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
@@ -241,13 +242,36 @@ class UploadedPicture:
         return self._data
 
 
-@st.cache_data(show_spinner="Reading the AutoCAD file...", max_entries=4)
-def cad_to_drawio(data: bytes, name: str) -> tuple[str, dict]:
-    """An AutoCAD P&ID (.dwg via LibreDWG, or .dxf) as a draw.io drawing (cad/to_drawio.py).
-    In memory: the converter's temporary folder is deleted straight after."""
+@st.cache_data(show_spinner="Reading the AutoCAD file...", max_entries=6)
+def cad_to_drawio(data: bytes, name: str, legend_json: str = "") -> tuple[str, dict]:
+    """An AutoCAD P&ID (.dwg via LibreDWG, or .dxf) as a draw.io drawing (cad/to_drawio.py), with
+    a symbol legend (JSON {block: type}) over the general rules. In memory: the converter's
+    temporary folder is deleted straight after."""
     from pid_dexpi_aas.cad.dwg_read import read_cad
     from pid_dexpi_aas.cad.to_drawio import dxf_to_drawio
-    return dxf_to_drawio(read_cad(data, name), Path(name).stem)
+    return dxf_to_drawio(read_cad(data, name), Path(name).stem, json.loads(legend_json) if legend_json else None)
+
+
+# Symbol legends, one per company: {block name: DEXPI type or a special choice}, confirmed by a
+# person and reused on that company's next drawings. Only symbol names and types - no drawing.
+LEGENDS = ROOT / "data" / "legends"
+
+
+def load_legends() -> dict:
+    out = {}
+    for f in sorted(LEGENDS.glob("*.json")) if LEGENDS.exists() else []:
+        try:
+            d = json.loads(f.read_text())
+            out[d.get("name") or f.stem] = d.get("blocks") or {}
+        except (OSError, ValueError):
+            pass
+    return out
+
+
+def save_legend(name: str, blocks: dict) -> None:
+    LEGENDS.mkdir(parents=True, exist_ok=True)
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "legend"
+    (LEGENDS / f"{slug}.json").write_text(json.dumps({"name": name, "blocks": blocks}, indent=1, sort_keys=True))
 
 
 @st.cache_data(show_spinner=False, max_entries=8)
@@ -286,7 +310,25 @@ with st.sidebar:
                                                 "Check it in the editor - unknown symbols are flagged.")
         if uploaded_drawio is not None and uploaded_drawio.name.lower().endswith((".dwg", ".dxf")):
             try:
-                cad_xml, cad_report = cad_to_drawio(uploaded_drawio.getvalue(), uploaded_drawio.name)
+                cad_data, cad_name = uploaded_drawio.getvalue(), uploaded_drawio.name
+                cad_digest = hashlib.sha256(cad_data).hexdigest()[:16]   # (_digest is defined further down)
+                _, cad_first = cad_to_drawio(cad_data, cad_name)
+                blocks_here = {r["block"] for r in cad_first["legend"]}
+                # the legend: a saved one covering most of this drawing's symbols, then this
+                # session's own choices on top
+                saved_name, saved = "", {}
+                for nm, blk in load_legends().items():
+                    share = len(blocks_here & set(blk)) / max(1, len(blocks_here))
+                    if share >= 0.5 and len(blocks_here & set(blk)) > len(blocks_here & set(saved)):
+                        saved_name, saved = nm, blk
+                cad_legend = {b: c for b, c in saved.items() if b in blocks_here}
+                cad_legend.update(st.session_state.get("cad_legend_edits", {}).get(cad_digest, {}))
+                cad_xml, cad_report = (cad_to_drawio(cad_data, cad_name, json.dumps(cad_legend, sort_keys=True))
+                                       if cad_legend else cad_to_drawio(cad_data, cad_name))
+                st.session_state["cad_current"] = {"digest": cad_digest, "legend_name": saved_name,
+                                                   "legend": cad_legend, "rows": cad_report["legend"]}
+                if saved_name:
+                    st.caption(f"Symbol legend: {saved_name}")
                 n_sym = sum(cad_report["symbols"].values())
                 st.caption(f"Read from AutoCAD: {n_sym} symbols, {cad_report['pipes']} pipes, "
                            f"{cad_report['signal_lines']} signal lines"
@@ -296,6 +338,9 @@ with st.sidebar:
             except Exception as exc:
                 st.error(f"This CAD file can't be read: {exc}")
                 uploaded_drawio = None
+        if uploaded_drawio is None or not uploaded_drawio.name.lower().endswith(".drawio") \
+                or not isinstance(uploaded_drawio, UploadedPicture):
+            st.session_state.pop("cad_current", None)
         frames_as_sections = st.checkbox(
             "Frames are plant sections", False, key="frames_as_sections",
             help="Coloured frames drawn around groups of items (e.g. 'Autoclave') are not part of a P&ID and are "
@@ -511,6 +556,47 @@ sweep_old_files()
 # v7: the pipe tracer keeps thin lines and joins lines ending just short of a symbol).
 INFER_VERSION = b"v13"
 
+
+# A CAD drawing's symbol legend: every symbol type once, its picture and the type the rules gave
+# it; a person corrects it, applies it, and saves it for that company's next drawings.
+if st.session_state.get("cad_current"):
+    from pid_dexpi_aas.cad.to_drawio import LEGEND_SPECIAL
+    cad = st.session_state["cad_current"]
+    with st.expander(f"Symbol legend of this AutoCAD drawing ({len(cad['rows'])} symbol types)"
+                     + (f" - using '{cad['legend_name']}'" if cad["legend_name"] else ""), expanded=False):
+        st.caption("Each symbol type once, with the DEXPI type it was given (by the general rules, or a saved "
+                   "legend). Change a type and Apply; Save it under the company's name and its next drawings "
+                   "use it straight away.")
+        rows = pd.DataFrame([{"picture": ("data:image/svg+xml;base64," + base64.b64encode(r["svg"].encode()).decode())
+                              if r["svg"] else None, "block": r["block"], "count": r["count"], "example": r["example"],
+                              "dexpi_class": r["dexpi_class"], "why": r["why"]} for r in cad["rows"]])
+        edited = st.data_editor(
+            rows, key=f"legend_{cad['digest']}", hide_index=True, width="stretch", height=420,
+            disabled=["picture", "block", "count", "example", "why"],
+            column_config={
+                "picture": st.column_config.ImageColumn("Symbol", width="small"),
+                "block": st.column_config.TextColumn("Name in the drawing"),
+                "count": st.column_config.NumberColumn("How many", width="small"),
+                "example": st.column_config.TextColumn("e.g."),
+                "dexpi_class": st.column_config.SelectboxColumn("DEXPI type", options=LEGEND_SPECIAL + DEXPI_CLASS_CHOICES,
+                                                                required=True),
+                "why": st.column_config.TextColumn("How it was worked out"),
+            })
+        changed = {r.block: r.dexpi_class for r, o in zip(edited.itertuples(), cad["rows"]) if r.dexpi_class != o["dexpi_class"]}
+        a1, a2, a3 = st.columns([1, 2, 1])
+        if a1.button("Apply", disabled=not changed, width="stretch",
+                     help="Convert the drawing again with these types (the editor reloads)"):
+            st.session_state.setdefault("cad_legend_edits", {}).setdefault(cad["digest"], {}).update(changed)
+            st.rerun()
+        legend_name = a2.text_input("Company", value=cad["legend_name"], placeholder="Company name, e.g. Sitech",
+                                    label_visibility="collapsed")
+        if a3.button("Save legend", disabled=not legend_name.strip(), width="stretch",
+                     help="Keep these types for this company's drawings (symbol names and types only)"):
+            full = {r.block: r.dexpi_class for r in edited.itertuples()}
+            save_legend(legend_name.strip(), full)
+            st.session_state.setdefault("cad_legend_edits", {}).setdefault(cad["digest"], {}).update(changed)
+            st.toast(f"Legend '{legend_name.strip()}' saved: {len(full)} symbol types.")
+            st.rerun()
 
 # The picture the review on screen was made from, with which model: a new picture, a re-run, or
 # a newly trained model deployed make it stale - the editor then shows the progress of reading

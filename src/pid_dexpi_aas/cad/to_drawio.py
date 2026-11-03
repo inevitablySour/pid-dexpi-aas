@@ -39,7 +39,12 @@ DASHED = re.compile(r"HIDDEN|DASH|DOT|CENTER|PHANTOM", re.I)
 TEXT_TYPES = {"TEXT", "MTEXT", "ATTDEF", "ATTRIB"}
 # Dutch valve abbreviations seen on P&IDs: afsluiter, kogelafsluiter, terugslagklep
 VALVE_WORDS = {"AFS": "", "KAF": "ball", "TSK": "check", "TK": "check", "KA": "ball", "VA": ""}
-GREY = {8, 9, 250, 251, 252, 253, 254}   # AutoCAD colour numbers drawn grey
+GREY = {8, 9, 250, 251, 252, 253, 254}
+# a symbol legend's choices beside the DEXPI types (cad_legend: one choice per symbol type)
+IN_LINE = "(in-line: the pipe runs through)"
+FLOW_ARROW = "(flow arrow)"
+LEAVE_OUT = "(leave out)"
+LEGEND_SPECIAL = [IN_LINE, FLOW_ARROW, LEAVE_OUT]   # AutoCAD colour numbers drawn grey
 _REDUCER = re.compile(r"^\d+\s*/\s*\d+$")
 _LETTERS = re.compile(r"^[A-Z]{1,5}$")
 _NUMBER = re.compile(r"^[0-9]{1,6}[A-Z]?$")
@@ -136,7 +141,7 @@ def _classify(fields: list[str]) -> tuple[str, str, str, list, str]:
         return "instrument", f"{fields[0]} {fields[1]}", "", fields[2:], "tag in two fields: an instrument bubble"
     tag = fields[0]
     if _REDUCER.match(tag):
-        return "inline", tag, "", fields[1:], "size change (reducer)"
+        return "reducer", tag, "", fields[1:], "size change (reducer)"
     m = re.match(r"^([A-Z]+)-?\s*\d", tag)
     prefix = m.group(1) if m else ""
     if prefix in VALVE_WORDS:
@@ -621,6 +626,8 @@ def _dexpi_class(it: Item) -> str:
         return classify_tag(it.tag)[1] or "CustomEquipment"
     if it.kind == "stream":
         return "(off-page connector)"
+    if it.kind == "reducer":
+        return "PipeReducer"
     return "CustomPipeFitting"
 
 
@@ -644,13 +651,40 @@ def _style(it: Item) -> tuple[str, str]:
     return "rounded=0;whiteSpace=wrap;html=1;dashed=1;strokeColor=#d9480f;fontSize=10;", it.tag
 
 
-def dxf_to_drawio(doc, title: str = "drawing") -> tuple[str, dict]:
-    """(draw.io XML, report) for an ezdxf document."""
+def apply_legend(items: list[Item], legend: dict) -> None:
+    """A person's symbol legend ({block name: DEXPI type or a LEGEND_SPECIAL choice}) over the
+    general rules, for every symbol of that type."""
+    from pid_dexpi_aas.review import EQUIPMENT_CLASSES, INSTRUMENT_CLASSES, OFF_PAGE
+    for it in list(items):
+        choice = legend.get(it.block)
+        if not choice:
+            continue
+        it.why = f"symbol legend: {choice}"
+        if choice == LEAVE_OUT:
+            items.remove(it)
+        elif choice in (IN_LINE, FLOW_ARROW):
+            it.kind, it.cls = "inline", ""
+        elif choice == OFF_PAGE:
+            it.kind, it.cls = "stream", ""
+        else:
+            it.cls = choice
+            it.kind = ("instrument" if choice in INSTRUMENT_CLASSES else
+                       "equipment" if choice in EQUIPMENT_CLASSES else "valve")
+
+
+def dxf_to_drawio(doc, title: str = "drawing", legend: dict | None = None) -> tuple[str, dict]:
+    """(draw.io XML, report) for an ezdxf document. legend: a person's choice per symbol type
+    (apply_legend); the report's "legend" lists every symbol type found, for making one."""
+    from collections import Counter
     from ezdxf import bbox
     items, labels, frames = read_symbols(doc)
+    every = list(items)   # for the legend: types a legend leaves out stay listed (to be put back)
+    if legend:
+        apply_legend(items, legend)
     pieces = read_lines(doc, items)
     chains = join_pieces(pieces)
     attach(chains, items)
+    found = [(it, sum(1 for c in chains for e in ("a", "b") if c[e] == it.id)) for it in every if it.block]
     # unknown text where a pipe ends: a stream in or out of the drawing; else a note
     ends_on = {c[e] for c in chains for e in ("a", "b") if c[e]}
     for it in items:
@@ -848,6 +882,33 @@ def dxf_to_drawio(doc, title: str = "drawing") -> tuple[str, dict]:
                      f'<mxPoint x="{X(pts[0][0])}" y="{Y(pts[0][1])}" as="sourcePoint"/>'
                      f'<mxPoint x="{X(pts[-1][0])}" y="{Y(pts[-1][1])}" as="targetPoint"/>'
                      + (f'<Array as="points">{inner}</Array>' if inner else "") + "</mxGeometry></mxCell>")
+    # the symbol legend: every symbol type, what it became, a picture of it
+    emitted = {it.id: it for it in items}
+    rows: dict = {}
+    for it, n_ends in found:
+        row = rows.setdefault(it.block, {"block": it.block, "count": 0, "became": Counter(), "why": it.why,
+                                         "svg": None, "example": it.tag})
+        row["count"] += 1
+        if it.id in emitted:
+            became = emitted[it.id].cls or ("(off-page connector)" if emitted[it.id].kind == "stream" else "")
+        elif (legend or {}).get(it.block) in LEGEND_SPECIAL:
+            became = legend[it.block]
+        elif not it.tag and _pointing(it.ents) is not None:
+            became = FLOW_ARROW
+        elif n_ends:
+            became = IN_LINE
+        else:
+            became = LEAVE_OUT
+        row["became"][became] += 1
+        if row["svg"] is None and it.ents:
+            row["svg"] = symbol_svg(it.ents, it.box)
+        if not row["example"] and it.tag:
+            row["example"] = it.tag
+    legend_rows = []
+    for row in sorted(rows.values(), key=lambda r: -r["count"]):
+        choice, _ = row["became"].most_common(1)[0]
+        legend_rows.append({"block": row["block"], "count": row["count"], "dexpi_class": choice,
+                            "why": row["why"], "example": row["example"] or "", "svg": row["svg"] or ""})
     W, H = X(ext.extmax.x), Y(ext.extmin.y)
     xml = (f'<mxfile><diagram name={quoteattr(title)} id="cad"><mxGraphModel dx="0" dy="0" grid="1" gridSize="10" '
            f'page="1" pageWidth="{W}" pageHeight="{H}"><root>' + "".join(cells) + "</root></mxGraphModel></diagram></mxfile>")
@@ -858,5 +919,6 @@ def dxf_to_drawio(doc, title: str = "drawing") -> tuple[str, dict]:
               "signal_lines": sum(1 for c in chains if c["dashed"]), "through": through, "bridged": bridged, "tees": tees, "flow_from_arrows": with_flow,
               "units": [it.tag for it in items if it.kind == "unit"], "future": sum(it.future for it in items),
               "tables": sorted(tables), "line_numbers": line_numbers, "taps_added": taps,
+              "legend": legend_rows,
               "frames": len(frames), "unrecognised": sorted({it.tag or it.block for it in items if it.cls})}
     return xml, report

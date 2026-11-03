@@ -156,3 +156,29 @@ def test_data_box_names_a_symbol_and_line_numbers_go_on_pipes():
     m = re.search(r"label=\"PSV-001\"[^>]*specs='([^']*)'", xml)
     assert m and json.loads(m.group(1))["dexpi"]["setPressureHigh"] == {"unit": "bar", "value": 5.0}
     assert report["line_numbers"] == 1 and "LINE-001-D80" in xml and "DN80" in xml
+
+
+def test_a_symbol_legend_overrides_the_rules(drawing):
+    """A person's legend sets a symbol type's DEXPI class for every symbol of that type; a type
+    left out stays in the legend's list, to be put back."""
+    from pid_dexpi_aas.cad.to_drawio import LEAVE_OUT
+    xml, report = drawing
+    rows = {r["block"]: r["dexpi_class"] for r in report["legend"]}
+    assert rows["PUMP"] == "Pump" and rows["FLANGE"] == "(in-line: the pipe runs through)"
+    assert all(r["svg"].startswith("<svg") for r in report["legend"])   # each type with its picture
+
+
+def test_legend_choices_apply(tmp_path):
+    import ezdxf as _ez
+    doc = _ez.new()
+    msp = doc.modelspace()
+    msp.add_lwpolyline([(-50, -150), (250, -150), (250, 150), (-50, 150)], close=True)
+    _block(doc, "THING", lambda b: b.add_circle((0, 0), 3))
+    msp.add_blockref("THING", (20, 0)); msp.add_blockref("THING", (60, 0))
+    msp.add_line((-30, 0), (17, 0)); msp.add_line((23, 0), (57, 0)); msp.add_line((63, 0), (100, 0))
+    _, plain = dxf_to_drawio(doc, "t")
+    assert {r["block"]: r["dexpi_class"] for r in plain["legend"]}["THING"] == "(in-line: the pipe runs through)"
+    xml, rep = dxf_to_drawio(doc, "t", {"THING": "BallValve"})
+    assert xml.count('dexpi_class="BallValve"') == 2
+    _, out = dxf_to_drawio(doc, "t", {"THING": "(leave out)"})
+    assert {r["block"]: r["dexpi_class"] for r in out["legend"]}["THING"] == "(leave out)"
