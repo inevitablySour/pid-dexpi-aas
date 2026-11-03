@@ -241,6 +241,15 @@ class UploadedPicture:
         return self._data
 
 
+@st.cache_data(show_spinner="Reading the AutoCAD file...", max_entries=4)
+def cad_to_drawio(data: bytes, name: str) -> tuple[str, dict]:
+    """An AutoCAD P&ID (.dwg via LibreDWG, or .dxf) as a draw.io drawing (cad/to_drawio.py).
+    In memory: the converter's temporary folder is deleted straight after."""
+    from pid_dexpi_aas.cad.dwg_read import read_cad
+    from pid_dexpi_aas.cad.to_drawio import dxf_to_drawio
+    return dxf_to_drawio(read_cad(data, name), Path(name).stem)
+
+
 @st.cache_data(show_spinner=False, max_entries=8)
 def pdf_page_count(data: bytes) -> int:
     import pypdfium2 as pdfium
@@ -271,7 +280,22 @@ with st.sidebar:
     st.header("Input")
     in_drawio, in_picture, in_editor = st.tabs(["draw.io file", "Picture", "Editor"])
     with in_drawio:
-        uploaded_drawio = st.file_uploader("draw.io file", type=["drawio", "xml"])
+        uploaded_drawio = st.file_uploader("draw.io or AutoCAD file", type=["drawio", "xml", "dwg", "dxf"],
+                                           help="An AutoCAD P&ID (.dwg or .dxf) is turned into a draw.io drawing: "
+                                                "symbols with their tags, equipment outlines, pipes and streams. "
+                                                "Check it in the editor - unknown symbols are flagged.")
+        if uploaded_drawio is not None and uploaded_drawio.name.lower().endswith((".dwg", ".dxf")):
+            try:
+                cad_xml, cad_report = cad_to_drawio(uploaded_drawio.getvalue(), uploaded_drawio.name)
+                n_sym = sum(cad_report["symbols"].values())
+                st.caption(f"Read from AutoCAD: {n_sym} symbols, {cad_report['pipes']} pipes, "
+                           f"{cad_report['signal_lines']} signal lines"
+                           + (f"; {len(cad_report['unrecognised'])} symbol types not recognised (flagged in the editor)"
+                              if cad_report["unrecognised"] else "") + ".")
+                uploaded_drawio = UploadedPicture(Path(uploaded_drawio.name).stem + ".drawio", cad_xml.encode())
+            except Exception as exc:
+                st.error(f"This CAD file can't be read: {exc}")
+                uploaded_drawio = None
         frames_as_sections = st.checkbox(
             "Frames are plant sections", False, key="frames_as_sections",
             help="Coloured frames drawn around groups of items (e.g. 'Autoclave') are not part of a P&ID and are "
@@ -446,6 +470,14 @@ def forget_upload(key: str) -> None:
     from pid_dexpi_aas.render.drawio_editor import FILES as EDITOR_FILES
     for name in st.session_state.setdefault("editor_pictures", {}).pop(key, []):
         (EDITOR_FILES / "pictures" / name).unlink(missing_ok=True)
+    # the editor's drawing made over that picture points at the copy just deleted: made again
+    # from scratch if the same file comes back (else its boxes showed with no picture behind)
+    st.session_state.pop("editor_pic_doc", None)
+    # and the review made from it is out of date: the same file uploaded again is read again
+    # (its picture and result were just deleted), with the progress bar, not shown from memory
+    if st.session_state.get("review_picture") == key:
+        st.session_state.pop("review_picture", None)
+        st.session_state["model_run"] = st.session_state.get("model_run", 0) + 1
 
 
 def sweep_old_files() -> None:
@@ -507,7 +539,11 @@ elif st.session_state.get("editor_open") and EDITOR_INSTALLED:
     # a Save rebuilds the review further down, which reruns once to bring them here
     prev = st.session_state.get("review")
     # a picture review only while its picture is still uploaded: removed, the editor clears at once
-    if prev is not None and prev.drawio is None and prev.image_path and not uploaded_drawio and image_file:
+    if (prev is not None and prev.drawio is None and prev.image_path and not uploaded_drawio and image_file
+            and not Path(prev.image_path).exists()):
+        # its picture is gone (removed and uploaded again): the review is being made again
+        st.info("Reading the picture again - the editor opens with the result.")
+    elif prev is not None and prev.drawio is None and prev.image_path and not uploaded_drawio and image_file:
         # a picture review: the model's result drawn over the picture, rebuilt from the review each
         # time the editor is switched on (so map edits made meanwhile are in it); a Save updates the rows
         from pid_dexpi_aas.drawio.picture_editor import apply_editor_drawing, drawing_ids, review_to_editor_xml

@@ -54,6 +54,19 @@ py -m venv .venv
 Next time: `cd pid-dexpi-aas` and `.venv\Scripts\streamlit run app.py`
 (Linux / macOS: `./launch_app.sh`). Stop the app with Ctrl+C in that window.
 
+### AutoCAD drawings (optional: .dwg)
+
+The **draw.io file** upload also takes AutoCAD P&IDs. A `.dxf` is read directly; a `.dwg` needs
+**LibreDWG** (open source), built once into `tools/libredwg`:
+
+```bash
+./scripts/get_libredwg.sh    # Linux / macOS: needs a C compiler and make; takes a few minutes
+```
+
+On Windows, save the drawing as `.dxf` in AutoCAD, or run the app in WSL2. The drawing is turned
+into a draw.io drawing (symbols with their tags, equipment outlines, pipes, tees, streams) and
+opens in the editor; symbols whose type is not recognised are flagged there.
+
 ### Cairo (optional: the re-drawn P&ID)
 
 The check sheet and the build page show the P&ID re-drawn from the DEXPI file. That drawing
@@ -87,6 +100,7 @@ the normal NVIDIA driver; training also needs the CUDA toolkit.
 | Port 8501 in use | `./launch_app.sh --server.port 8502` (Windows: add `--server.port 8502`) |
 | "ML environment not found" | Run the picture model steps, or use draw.io files only |
 | "The re-drawn P&ID needs the Cairo graphics library" | Install Cairo (above), or ignore it |
+| "Reading .dwg files needs LibreDWG" | Run `scripts/get_libredwg.sh`, or upload the drawing as `.dxf` |
 | Editor tab missing | Run `scripts/get_drawio_editor.py` with the app's Python (above) |
 
 ## Using the app

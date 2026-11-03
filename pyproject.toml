@@ -14,6 +14,7 @@ dependencies = [
     "pandas",
     "pillow",
     "pypdfium2",  # a P&ID uploaded as a PDF: its page as the picture the model reads
+    "ezdxf",  # AutoCAD P&IDs (cad/): .dxf read directly, .dwg after LibreDWG (scripts/get_libredwg.sh)
     "openpyxl",
     "cairosvg",  # check sheet "after" drawing; needs the cairo library (macOS: brew install cairo)
     "networkx",

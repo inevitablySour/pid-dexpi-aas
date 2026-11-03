@@ -129,7 +129,12 @@ def _build_piping_item(shape: Shape, mapping: MappingResult, tag_name: str | Non
     ("GV101") and number ("101"); a class without those fields (SafetyValveOrFitting)
     gets a TagName custom attribute so the tag is never lost."""
     cls = _PIPING_CLASSES[mapping.dexpi_class_name]
-    obj = cls(nodes=[piping.PipingNode(), piping.PipingNode()])
+    kwargs = {"nodes": [piping.PipingNode(), piping.PipingNode()]}
+    # DEXPI's Custom* piping classes (a fitting or component with no exact class - e.g. read from
+    # a CAD drawing, cad/to_drawio.py) require a free-text typeName, as Custom* equipment does
+    if "typeName" in cls.model_fields and cls.model_fields["typeName"].is_required():
+        kwargs["typeName"] = tag_name or shape.text or mapping.dexpi_class_name
+    obj = cls(**kwargs)
     if tag_name:
         fields = type(obj).model_fields
         if "pipingComponentName" in fields:
