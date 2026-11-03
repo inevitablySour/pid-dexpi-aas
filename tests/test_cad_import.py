@@ -1,6 +1,7 @@
 """AutoCAD P&IDs (cad/to_drawio.py): a small DXF built here, in the style of a real plant P&ID
 (symbols as blocks with their tags as attributes, equipment as an outline named by a label
 inside it, pipes as separate line pieces). No company symbol table: general rules only."""
+import json
 import re
 
 import ezdxf
@@ -87,3 +88,49 @@ def test_flow_from_an_arrow_on_the_pipe(drawing):
     edge = re.search(r'<mxCell id="l\d+" style="([^"]*)" edge="1" parent="1" source="%s" target="%s"' % (by_tag["FEED"], by_tag["AFS001"]), xml)
     assert edge and "endArrow=block" in edge.group(1)   # drawn FEED -> valve, arrowhead at the valve
     assert report["flow_from_arrows"] == 1
+
+
+def test_units_planned_items_and_data_tables():
+    """A frame that a pipe ends on is one unit; dashed grey symbols and pipes are planned (left
+    out of DEXPI); an equipment data table fills the equipment's specifications."""
+    doc = ezdxf.new()
+    doc.linetypes.add("HIDDEN", pattern=[5, 3, -2])
+    msp = doc.modelspace()
+    _block(doc, "STREAM", lambda b: b.add_lwpolyline([(-10, -3), (8, -3), (10, 0), (8, 3), (-10, 3)], close=True), ["NAME"])
+    _block(doc, "VALVE", lambda b: b.add_lwpolyline([(-4, -2), (4, 2), (4, -2), (-4, 2)], close=True), ["TAG"])
+    _block(doc, "LABEL", lambda b: None, ["NAME"])
+    table = doc.blocks.new("TABLE")
+    for k, (label, unit) in enumerate([("Tag", ""), ("Name", ""), ("Volume:", "m"), ("Ontwerpdruk:", "bar"),
+                                       ("Ontwerptemp.:", "°C"), ("Medium:", ""), ("Materiaal:", "")]):
+        y = -6 * k
+        table.add_text(label, dxfattribs={"insert": (0, y), "height": 2})
+        table.add_attdef(f"F{k}", (40, y), dxfattribs={"height": 2})
+        if unit:
+            table.add_text(unit, dxfattribs={"insert": (50, y), "height": 2})
+    table.add_text("3", dxfattribs={"insert": (52, 1), "height": 1})   # m + superscript 3
+    msp.add_lwpolyline([(100, 20), (140, 20), (140, 60), (100, 60)], close=True)     # the vessel's outline
+    lab = msp.add_blockref("LABEL", (110, 40)); lab.add_auto_attribs({"NAME": "%%UV010"})
+    msp.add_lwpolyline([(0, 100), (60, 100), (60, 140), (0, 140)], close=True)        # a package unit's frame
+    msp.add_text("SKID", dxfattribs={"insert": (20, 135), "height": 3})
+    for k in range(2):                                                               # two things inside it
+        msp.add_blockref("VALVE", (20 + 20 * k, 120)).add_auto_attribs({"TAG": f"AFS00{k + 1}"})
+    msp.add_blockref("STREAM", (-40, 110)).add_auto_attribs({"NAME": "WATER"})
+    msp.add_line((-30, 110), (0, 110))                                               # into the unit's frame
+    msp.add_line((60, 120), (100, 40))                                               # unit -> vessel
+    grey = {"linetype": "HIDDEN", "color": 252}
+    pv = msp.add_blockref("VALVE", (120, 90), dxfattribs=grey); pv.add_auto_attribs({"TAG": "AFS099"})
+    for ent in doc.blocks.get("VALVE"):
+        ent.dxf.linetype, ent.dxf.color = "BYBLOCK", 0
+    msp.add_line((120, 60), (120, 88), dxfattribs=grey)                              # a planned pipe to it
+    t = msp.add_blockref("TABLE", (200, 50))
+    t.add_auto_attribs({"F0": "V010", "F1": "VAT 10", "F2": "12", "F3": "8", "F4": "120", "F5": "WATER",
+                        "F6": "XXXXXX"})
+    xml, report = dxf_to_drawio(doc, "t")
+    assert report["units"] == ["SKID"]
+    assert report["tables"] == ["V010"]
+    assert report["future"] >= 1 and 'in_dexpi="0"' in xml
+    m = re.search(r"label=\"V010\"[^>]*specs='([^']*)'", xml)
+    specs = json.loads(m.group(1))
+    assert specs["dexpi"]["nominalCapacityVolume"] == {"unit": "m3", "value": 12.0}
+    assert specs["custom"]["DesignPressure"] == {"unit": "bar", "value": 8.0}
+    assert specs["custom"]["Medium"] == "WATER" and "Material" not in str(specs)   # XXXXXX: a placeholder

@@ -39,6 +39,7 @@ DASHED = re.compile(r"HIDDEN|DASH|DOT|CENTER|PHANTOM", re.I)
 TEXT_TYPES = {"TEXT", "MTEXT", "ATTDEF", "ATTRIB"}
 # Dutch valve abbreviations seen on P&IDs: afsluiter, kogelafsluiter, terugslagklep
 VALVE_WORDS = {"AFS": "", "KAF": "ball", "TSK": "check", "TK": "check", "KA": "ball", "VA": ""}
+GREY = {8, 9, 250, 251, 252, 253, 254}   # AutoCAD colour numbers drawn grey
 _REDUCER = re.compile(r"^\d+\s*/\s*\d+$")
 _LETTERS = re.compile(r"^[A-Z]{1,5}$")
 _NUMBER = re.compile(r"^[0-9]{1,6}[A-Z]?$")
@@ -57,6 +58,27 @@ class Item:
     cls: str = ""   # a DEXPI class set here (written as editor data, so the review keeps it)
     rot: int = 0    # the block's rotation in the CAD drawing, degrees counter-clockwise
     ents: list = field(default_factory=list)   # its drawn geometry, in drawing coordinates
+    future: bool = False   # drawn dashed and grey: planned or out of service, not in DEXPI by default
+    section: str = ""      # the unit it is drawn inside (DEXPI plant section)
+    specs: dict = field(default_factory=dict)   # {"dexpi": {...}, "custom": {...}} from a data table
+
+
+def _look(doc, e) -> tuple[bool, bool]:
+    """(dashed, grey) as an entity is drawn, its layer's line type and colour where it has none."""
+    layer = doc.layers.get(e.dxf.layer) if doc.layers.has_entry(e.dxf.layer) else None
+    lt = e.dxf.get("linetype", "BYLAYER") or "BYLAYER"
+    if lt.upper() in ("BYLAYER", "BYBLOCK"):
+        lt = layer.dxf.linetype if layer is not None else ""
+    col = e.dxf.get("color", 256)
+    if col in (0, 256):
+        col = abs(layer.dxf.color) if layer is not None else 7
+    return bool(DASHED.search(lt or "")), col in GREY
+
+
+def _is_future(doc, ents) -> bool:
+    """Drawn dashed and grey (most of it): planned, or out of service."""
+    looks = [_look(doc, e) for e in ents]
+    return bool(looks) and sum(d and g for d, g in looks) >= 0.7 * len(looks)
 
 
 def _fields(ins) -> list[str]:
@@ -74,6 +96,14 @@ def _parts(ins, depth=0) -> list:
     out = []
     try:
         for e in ins.virtual_entities():
+            # AutoCAD's rules for what a block draws with: BYBLOCK takes the reference's line type
+            # and colour, and things on layer 0 take the reference's layer
+            if (e.dxf.get("linetype", "") or "").upper() == "BYBLOCK":
+                e.dxf.linetype = ins.dxf.get("linetype", "BYLAYER")
+            if e.dxf.get("color", 256) == 0:
+                e.dxf.color = ins.dxf.get("color", 256)
+            if e.dxf.get("layer", "0") == "0":
+                e.dxf.layer = ins.dxf.get("layer", "0")
             if e.dxftype() == "INSERT" and depth < 4:
                 out += _parts(e, depth + 1)
             elif e.dxftype() not in TEXT_TYPES:
@@ -123,7 +153,7 @@ def _within(e, box) -> bool:
     return ext.has_data and _inside(ext.extmin, box, 0.01) and _inside(ext.extmax, box, 0.01)
 
 
-def symbol_svg(ents, box) -> str:
+def symbol_svg(ents, box, faded: bool = False) -> str:
     """The symbol as drawn in the CAD file, as an SVG image of exactly its box (y up -> down)."""
     from ezdxf import path as dpath
     w, h = max(box[2] - box[0], 0.5), max(box[3] - box[1], 0.5)
@@ -143,7 +173,8 @@ def symbol_svg(ents, box) -> str:
             shapes.append(f'<path d="{d}{" Z" if filled else ""}" fill="{"#000" if filled else "none"}"/>')
     vw, vh = w + 2 * pad, h + 2 * pad
     return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {vw:.2f} {vh:.2f}" width="{vw:.2f}mm" '
-            f'height="{vh:.2f}mm"><g stroke="#000" stroke-width="0.25" stroke-linecap="round" '
+            f'height="{vh:.2f}mm"><g stroke="{"#8a8a8a" if faded else "#000"}" stroke-width="0.25" '
+            f'{"stroke-dasharray=\"1.2,0.8\" " if faded else ""}stroke-linecap="round" '
             f'stroke-linejoin="round">{"".join(shapes)}</g></svg>')
 
 
@@ -178,12 +209,13 @@ def read_symbols(doc) -> tuple[list[Item], list, list]:
         iid = f"b{k}"
         if not fields:
             items.append(Item(iid, "inline", box, block=ins.dxf.name, why="symbol without text",
-                              rot=round(ins.dxf.rotation) % 360, ents=parts))
+                              rot=round(ins.dxf.rotation) % 360, ents=parts, future=_is_future(doc, parts)))
             continue
         if len(fields) >= 3 and not (_LETTERS.match(fields[0]) and _NUMBER.match(fields[1])):
             continue  # a data box beside a symbol (a safety valve's set pressure), not a symbol
         kind, tag, body, extra, why = _classify(fields)
         items.append(Item(iid, kind, box, tag=tag, extra=extra, block=ins.dxf.name, why=why, rot=round(ins.dxf.rotation) % 360, ents=parts,
+                          future=_is_future(doc, parts),
                           style=f"valveType={body};" if body else ""))
     # equipment drawn as an outline, named by a label inside it; outlines around symbols: frames
     frames = []
@@ -196,6 +228,10 @@ def read_symbols(doc) -> tuple[list[Item], list, list]:
         names = [f for (x, y, f) in labels if _inside((x, y), box)]
         if len(inside_syms) >= 2:
             frames.append(box)
+            name = next((t.dxf.text.strip() for t in msp.query("TEXT MTEXT")
+                         if t.dxftype() == "TEXT" and _inside((t.dxf.insert.x, t.dxf.insert.y), box) and t.dxf.text.strip()), "")
+            items.append(Item(f"u{k}", "unit", box, tag=name or "Package unit", ents=[pl], cls="CustomEquipment",
+                              why="a frame that pipes end on: a package unit, as one item", future=_is_future(doc, [pl])))
             continue
         for f in names:
             kind, cls, _ = classify_tag(f[0])
@@ -203,9 +239,75 @@ def read_symbols(doc) -> tuple[list[Item], list, list]:
                 inner = [e for e in msp.query("LINE LWPOLYLINE ARC CIRCLE ELLIPSE")
                          if e is not pl and _within(e, box)]
                 items.append(Item(f"q{k}", "equipment", box, tag=f[0], extra=f[1:], why=f"outline named {f[0]}",
-                                  ents=[pl] + inner))
+                                  ents=[pl] + inner, future=_is_future(doc, [pl])))
                 break
     return items, labels, frames
+
+
+# words in a data table's labels -> (specification field, default unit); Dutch and English
+TABLE_FIELDS = [
+    (re.compile(r"volume|inhoud", re.I), "nominalCapacityVolume", "m3"),
+    (re.compile(r"ontwerpdruk|design\s*pressure|ontwerp-?\s*druk", re.I), "DesignPressure", "bar"),
+    (re.compile(r"ontwerptemp|design\s*temp", re.I), "DesignTemperature", "°C"),
+    (re.compile(r"materia", re.I), "Material", ""),
+    (re.compile(r"^medium", re.I), "Medium", ""),
+]
+
+
+def read_tables(doc) -> dict:
+    """Equipment data tables (a block of labelled fields, the first the equipment's tag) as
+    {tag: {"dexpi": {...}, "custom": {...}}}: each value paired with the label on its row to its
+    left, and the unit to its right. Placeholders (####, XXXX) are skipped."""
+    from pid_dexpi_aas.dexpi.fields import spec_fields
+    from pid_dexpi_aas.dexpi.mapping import classify_tag
+    from pid_dexpi_aas.dexpi.spec_sheet import to_value
+    out = {}
+    for ins in doc.modelspace().query("INSERT"):
+        atts = [(a.dxf.insert.x, a.dxf.insert.y, (a.dxf.text or "").replace("%%U", "").strip()) for a in ins.attribs]
+        if len(atts) <= 6:
+            continue
+        texts = []
+        for e in ins.virtual_entities():
+            if e.dxftype() == "TEXT" and (e.dxf.text or "").strip():
+                texts.append((e.dxf.insert.x, e.dxf.insert.y, e.dxf.text.strip()))
+        if not texts:
+            continue
+        tag = max(atts, key=lambda a: a[1])[2]   # the top field
+        kind, cls, _ = classify_tag(tag)
+        if kind != "equipment":
+            continue
+        fields = {f.name: f for f in spec_fields(cls)}
+        spec = {"dexpi": {}, "custom": {}}
+        for x, y, value in atts:
+            if not value or re.fullmatch(r"[#X\-.]+", value):
+                continue
+            row = [t for t in texts if abs(t[1] - y) < 1.5]
+            left = max((t for t in row if t[0] < x), key=lambda t: t[0], default=None)
+            # the unit: every short text right of the value, together ("m" + superscript "3" = "m3")
+            drawn_unit = "".join(t[2] for t in sorted(row, key=lambda t: t[0]) if t[0] > x and len(t[2]) <= 3)
+            drawn_unit = drawn_unit.replace("³", "3").replace("²", "2").replace(" ", "")
+            if left is None:
+                continue
+            for rx, name, unit in TABLE_FIELDS:
+                if rx.search(left[2]):
+                    f = fields.get(name)
+                    if f is not None and f.kind == "quantity":
+                        num = value.replace(",", ".")
+                        use = next((u for u in (drawn_unit, unit) if u in f.units), f.units[0])
+                        try:
+                            v = {"value": float(num), "unit": use}
+                        except ValueError:
+                            break
+                        spec["custom" if f.custom else "dexpi"][name] = v
+                    else:
+                        v, problem = to_value(f, value)
+                        if not problem:
+                            spec["custom" if f is None or f.custom else "dexpi"][name] = v
+                    break
+        spec = {k: v for k, v in spec.items() if v}
+        if spec:
+            out[tag] = spec
+    return out
 
 
 def read_lines(doc, items: list[Item]) -> list[dict]:
@@ -230,10 +332,9 @@ def read_lines(doc, items: list[Item]) -> list[dict]:
             continue  # a "//" stroke on a signal line
         if any(all(_inside(p, box, -0.5) for p in pts) for box in equipment):
             continue  # inside an equipment outline: its internals
-        lt = e.dxf.linetype if e.dxf.hasattr("linetype") else "BYLAYER"
-        if lt.upper() == "BYLAYER":
-            lt = layer_lt.get(e.dxf.layer, "")
-        out.append({"pts": pts, "dashed": bool(DASHED.search(lt or ""))})
+        dashed, grey = _look(doc, e)
+        # dashed and grey: a planned / out-of-service pipe; dashed in colour: a signal line
+        out.append({"pts": pts, "dashed": dashed and not grey, "future": dashed and grey})
     return out
 
 
@@ -258,7 +359,8 @@ def join_pieces(pieces: list[dict]) -> list[dict]:
             while True:
                 tip = pts[-1] if direction == 1 else pts[0]
                 here = ends.get(_key(tip), [])
-                nxt = [(j, e) for j, e in here if j not in used and pieces[j]["dashed"] == dashed]
+                nxt = [(j, e) for j, e in here if j not in used and pieces[j]["dashed"] == dashed
+                       and pieces[j].get("future") == pieces[i].get("future")]
                 if len(here) != 2 or len(nxt) != 1:
                     break
                 j, e = nxt[0]
@@ -268,15 +370,22 @@ def join_pieces(pieces: list[dict]) -> list[dict]:
                     pts.extend(seg[1:])
                 else:
                     pts[:0] = seg[::-1][:-1]
-        chains.append({"pts": pts, "dashed": dashed, "a": None, "b": None})
+        chains.append({"pts": pts, "dashed": dashed, "future": pieces[i].get("future", False), "a": None, "b": None})
     return chains
 
 
 def attach(chains: list[dict], items: list[Item]) -> None:
     """A chain end within ATTACH mm of a symbol's outline is on that symbol (the nearest)."""
+    def dist(p, it):
+        if it.kind != "unit":
+            return _dist_to_box(p, it.box)
+        b = it.box   # a unit is a frame: only its border counts (things drawn inside are its own)
+        if _inside(p, b):
+            return min(p[0] - b[0], b[2] - p[0], p[1] - b[1], b[3] - p[1])
+        return _dist_to_box(p, b)
     for c in chains:
         for end, p in (("a", c["pts"][0]), ("b", c["pts"][-1])):
-            best = min(((_dist_to_box(p, it.box), it.id) for it in items), default=(None, None))
+            best = min(((dist(p, it), it.id) for it in items), default=(None, None))
             if best[0] is not None and best[0] <= ATTACH:
                 c[end] = best[1]
 
@@ -531,6 +640,19 @@ def dxf_to_drawio(doc, title: str = "drawing") -> tuple[str, dict]:
             n_on = sum(1 for c in chains for e in ("a", "b") if c[e] == it.id)
             if n_on == 1:
                 it.kind, it.why = "stream", "text where a pipe ends: a stream"
+    ends_on = {c[e] for c in chains for e in ("a", "b") if c[e]}
+    units = [it for it in items if it.kind == "unit"]
+    for u in units:
+        if u.id not in ends_on:
+            items.remove(u)   # a frame only (nothing piped to it)
+            continue
+        for it in items:   # what is drawn inside it is part of it
+            if it is not u and _inside(((it.box[0] + it.box[2]) / 2, (it.box[1] + it.box[3]) / 2), u.box):
+                it.section = u.tag
+    tables = read_tables(doc)
+    for it in items:
+        if it.kind == "equipment" and it.tag in tables:
+            it.specs = tables[it.tag]
     through = pass_through(chains, items)
     bridged = bridge_ends(chains, items)
     with_flow = flow_from_arrows(chains, items)
@@ -547,6 +669,7 @@ def dxf_to_drawio(doc, title: str = "drawing") -> tuple[str, dict]:
             it.cls, it.why = "CustomPipingComponent", f"tag {it.tag} not recognised"
     ends_on = {c[e] for c in chains for e in ("a", "b") if c[e]}
     items = [it for it in items if it.kind not in ("unknown", "inline") or it.id in ends_on]
+    items.sort(key=lambda it: it.kind != "unit")   # units first: drawn under what is inside them
     ids = {it.id for it in items}
     for c in chains:
         c["a"] = c["a"] if c["a"] in ids else None
@@ -560,10 +683,12 @@ def dxf_to_drawio(doc, title: str = "drawing") -> tuple[str, dict]:
     frame = {}   # item id -> (centre x, centre y, unrotated w, h, clockwise rotation) in draw.io units
     for it in items:
         _, label = _style(it)
-        svg = base64.b64encode(symbol_svg(it.ents, it.box).encode()).decode()
+        svg = base64.b64encode(symbol_svg(it.ents, it.box, it.future or it.kind == "unit").encode()).decode()
         style = (f"shape=image;image=data:image/svg+xml,{svg};imageAspect=0;html=1;fontSize=10;"
                  + ("verticalLabelPosition=middle;verticalAlign=middle;" if it.kind == "instrument"
-                    else "verticalLabelPosition=bottom;verticalAlign=top;"))
+                    else "verticalLabelPosition=middle;verticalAlign=top;align=center;" if it.kind == "unit"
+                    else "verticalLabelPosition=bottom;verticalAlign=top;")
+                 + ("fontColor=#8a8a8a;" if it.future else ""))
         if not it.ents:   # a stream drawn as text only: stays a text label
             style = "text;html=1;align=center;verticalAlign=middle;fontSize=11;"
         it.cls = _dexpi_class(it)
@@ -583,6 +708,14 @@ def dxf_to_drawio(doc, title: str = "drawing") -> tuple[str, dict]:
         geo = f'<mxGeometry x="{round(x, 1)}" y="{round(y, 1)}" width="{round(w, 1)}" height="{round(h, 1)}" as="geometry"/>'
         if it.cls and it.ents:   # its class, kept as the editor keeps a person's choice (review._apply_editor_data)
             data = {"label": label, "dexpi_class": it.cls, "dexpi_auto": "0", "notes": it.why}
+            if it.future:
+                data.update(in_dexpi="0", notes=it.why + "; drawn dashed and grey: planned or out of service, "
+                                                        "left out of DEXPI (tick In DEXPI to include it)")
+            if it.section:
+                data["section"] = it.section
+            if it.specs:
+                import json
+                data["specs"] = json.dumps(it.specs, sort_keys=True)
             if it.tag:
                 data.update(tag=it.tag, tag_auto="0")
             attrs = " ".join(f"{k}={quoteattr(v)}" for k, v in data.items())
@@ -597,7 +730,8 @@ def dxf_to_drawio(doc, title: str = "drawing") -> tuple[str, dict]:
     for c in kept:
         pts = c["pts"]
         style = ("endArrow=block;endFill=1;endSize=4;" if c.get("flow") else "endArrow=none;") + \
-            "html=1;rounded=0;edgeStyle=none;" + ("dashed=1;" if c["dashed"] else "")
+            "html=1;rounded=0;edgeStyle=none;" + ("dashed=1;" if c["dashed"] else "") + \
+            ("strokeColor=#9a9a9a;dashPattern=6 4;" if c.get("future") else "")
         # each end exactly where it touches its symbol in the CAD drawing - not draw.io's own
         # choice (towards the shape's centre), which drew slanted pipes
         for end, side, q in (("a", "exit", pts[0]), ("b", "entry", pts[-1])):
@@ -610,6 +744,14 @@ def dxf_to_drawio(doc, title: str = "drawing") -> tuple[str, dict]:
         src, tgt = c["a"], c["b"]
         terms = (f' source="{src}"' if src else "") + (f' target="{tgt}"' if tgt else "")
         inner = "".join(f'<mxPoint x="{X(p[0])}" y="{Y(p[1])}"/>' for p in pts[1:-1])
+        if c.get("future"):   # a planned / out-of-service pipe: in the drawing, left out of DEXPI
+            note = "drawn dashed and grey: planned or out of service, left out of DEXPI"
+            cells.append(f'<object id="{c["id"]}" in_dexpi="0" notes={quoteattr(note)}><mxCell style="{style}" edge="1" parent="1"{terms}>'
+                         f'<mxGeometry relative="1" as="geometry">'
+                         f'<mxPoint x="{X(pts[0][0])}" y="{Y(pts[0][1])}" as="sourcePoint"/>'
+                         f'<mxPoint x="{X(pts[-1][0])}" y="{Y(pts[-1][1])}" as="targetPoint"/>'
+                         + (f'<Array as="points">{inner}</Array>' if inner else "") + "</mxGeometry></mxCell></object>")
+            continue
         cells.append(f'<mxCell id="{c["id"]}" style="{style}" edge="1" parent="1"{terms}><mxGeometry relative="1" as="geometry">'
                      f'<mxPoint x="{X(pts[0][0])}" y="{Y(pts[0][1])}" as="sourcePoint"/>'
                      f'<mxPoint x="{X(pts[-1][0])}" y="{Y(pts[-1][1])}" as="targetPoint"/>'
@@ -622,5 +764,7 @@ def dxf_to_drawio(doc, title: str = "drawing") -> tuple[str, dict]:
         kinds[it.kind] = kinds.get(it.kind, 0) + 1
     report = {"symbols": kinds, "pipes": sum(1 for c in chains if not c["dashed"]),
               "signal_lines": sum(1 for c in chains if c["dashed"]), "through": through, "bridged": bridged, "tees": tees, "flow_from_arrows": with_flow,
+              "units": [it.tag for it in items if it.kind == "unit"], "future": sum(it.future for it in items),
+              "tables": sorted(tables),
               "frames": len(frames), "unrecognised": sorted({it.tag or it.block for it in items if it.cls})}
     return xml, report
