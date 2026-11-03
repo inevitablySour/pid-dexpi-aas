@@ -299,7 +299,17 @@ def pass_through(chains: list[dict], items: list[Item]) -> list[str]:
             p2 = c2["pts"] if e2 == "a" else c2["pts"][::-1]   # runs out of it
             far1 = c1["a"] if e1 == "b" else c1["b"]
             far2 = c2["b"] if e2 == "a" else c2["a"]
-            c1.update(pts=p1 + p2, a=far1, b=far2)
+            votes = ({v if e1 == "b" else -v for v in c1.get("votes", set())}
+                     | {v if e2 == "a" else -v for v in c2.get("votes", set())})
+            d = _pointing(it.ents) if not it.tag else None
+            if d is not None:   # a flow arrow the pipe was cut for: its way along the joined pipe
+                run = (p2[0][0] - p1[-1][0], p2[0][1] - p1[-1][1])
+                if math.hypot(*run) < 1e-6 and len(p2) > 1:
+                    run = (p2[1][0] - p2[0][0], p2[1][1] - p2[0][1])
+                dot = d[0] * run[0] + d[1] * run[1]
+                if abs(dot) > 1e-9:
+                    votes.add(1 if dot > 0 else -1)
+            c1.update(pts=p1 + p2, a=far1, b=far2, votes=votes)
             chains.remove(c2)
             del by_id[it.id]
             gone.append(it.tag or it.block)
@@ -321,6 +331,14 @@ def bridge_ends(chains: list[dict], items: list[Item]) -> list[str]:
         others = [(_box_gap(it.box, o.box), o) for o in items if o is not it and o.kind != "inline"]
         gap, near = min(others, key=lambda t: t[0], default=(None, None))
         c, end = on[0]
+        d = _pointing(it.ents)
+        if d is not None and len(c["pts"]) > 1:   # an arrow at the pipe's end: flow to or from it
+            q, r = (c["pts"][0], c["pts"][1]) if end == "a" else (c["pts"][-1], c["pts"][-2])
+            inward = (r[0] - q[0], r[1] - q[1])
+            dot = d[0] * inward[0] + d[1] * inward[1]
+            if abs(dot) > 1e-9:
+                out = dot < 0   # points out through this end
+                c.setdefault("votes", set()).add((1 if out else -1) if end == "b" else (-1 if out else 1))
         c[end] = near.id if near is not None and gap <= 2 * ATTACH else None
         items.remove(it)
         gone.append(it.block)
@@ -360,6 +378,101 @@ def _fraction(p, frame) -> tuple[float, float]:
     ux, uy = dx * math.cos(t) - dy * math.sin(t), dx * math.sin(t) + dy * math.cos(t)
     clamp = lambda v: round(min(1.0, max(0.0, v)), 3)
     return clamp(0.5 + ux / w), clamp(0.5 + uy / h)
+
+
+def _pointing(ents):
+    """Which way a small arrow symbol points (a unit vector), or None: an open chevron (two
+    strokes meeting at the tip) or a small closed triangle (the apex opposite its shortest side)."""
+    segs, tris = [], []
+    for e in ents:
+        t = e.dxftype()
+        if t == "LINE":
+            segs.append(((e.dxf.start.x, e.dxf.start.y), (e.dxf.end.x, e.dxf.end.y)))
+        elif t == "LWPOLYLINE":
+            pts = [(p[0], p[1]) for p in e.get_points()]
+            if e.closed and len(pts) == 3:
+                tris.append(pts)
+            elif not e.closed:
+                segs += list(zip(pts, pts[1:]))
+        elif t in ("SOLID", "HATCH", "POINT"):
+            continue
+        else:
+            return None
+    if tris and segs and len(tris) > 1:
+        segs = []   # the shaft of a filled arrow
+    tip = base = None
+    if len(segs) == 2 and not tris:
+        ends = [q for sg in segs for q in sg]
+        pairs = [(i, j) for i in range(4) for j in range(i + 1, 4) if i // 2 != j // 2 and math.dist(ends[i], ends[j]) < 0.1]
+        if len(pairs) != 1:
+            return None
+        i, j = pairs[0]
+        tip = ends[i]
+        others = [ends[k] for k in range(4) if k not in (i, j)]
+        base = ((others[0][0] + others[1][0]) / 2, (others[0][1] + others[1][1]) / 2)
+    elif len(tris) > 1:
+        # a filled arrowhead built of several triangles (plus a shaft): along its length, the end
+        # where it narrows to a point is the tip, the wide end its base
+        pts = [q for t in tris for q in t]
+        xs, ys = [q[0] for q in pts], [q[1] for q in pts]
+        horizontal = (max(xs) - min(xs)) >= (max(ys) - min(ys))
+        along = (lambda q: q[0]) if horizontal else (lambda q: q[1])
+        across = (lambda q: q[1]) if horizontal else (lambda q: q[0])
+        lo, hi = min(map(along, pts)), max(map(along, pts))
+        if hi - lo < 0.5:
+            return None
+        spread = lambda end: (lambda c: max(c) - min(c))([across(q) for q in pts if abs(along(q) - end) < 0.15 * (hi - lo)])
+        s_lo, s_hi = spread(lo), spread(hi)
+        if max(s_lo, s_hi) < 0.3 or abs(s_lo - s_hi) < 0.3:
+            return None
+        sign = 1 if s_hi < s_lo else -1   # the narrow end is the tip
+        return (sign, 0.0) if horizontal else (0.0, sign)
+    elif len(tris) == 1 and not segs:
+        v = tris[0]
+        sides = [math.dist(v[(k + 1) % 3], v[(k + 2) % 3]) for k in range(3)]   # side opposite vertex k
+        k = min(range(3), key=lambda n: sides[n])
+        if sorted(sides)[1] < 1.15 * sides[k]:
+            return None   # about equilateral: no clear apex
+        tip, a, b = v[k], v[(k + 1) % 3], v[(k + 2) % 3]
+        base = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+    else:
+        return None
+    dx, dy = tip[0] - base[0], tip[1] - base[1]
+    n = math.hypot(dx, dy)
+    return (dx / n, dy / n) if n > 1e-6 else None
+
+
+def flow_from_arrows(chains: list[dict], items: list[Item]) -> int:
+    """Flow arrows lying on a pipe set its direction: c["flow"] = +1 (as drawn, a -> b) or -1.
+    Arrows on one pipe that disagree leave it unknown."""
+    votes: dict = {}
+    for it in items:
+        w, h = it.box[2] - it.box[0], it.box[3] - it.box[1]
+        if it.kind != "inline" or it.tag or max(w, h) > 6.0:
+            continue
+        d = _pointing(it.ents)
+        if d is None:
+            continue
+        centre = ((it.box[0] + it.box[2]) / 2, (it.box[1] + it.box[3]) / 2)
+        best = None
+        for k, c in enumerate(chains):
+            for q, r in zip(c["pts"], c["pts"][1:]):
+                dist = _seg_dist(centre, q, r)
+                if dist <= max(w, h) / 2 + 0.3 and (best is None or dist < best[0]):
+                    best = (dist, k, (r[0] - q[0], r[1] - q[1]))
+        if best is None:
+            continue
+        _, k, along = best
+        dot = d[0] * along[0] + d[1] * along[1]
+        if abs(dot) > 1e-6:
+            chains[k].setdefault("votes", set()).add(1 if dot > 0 else -1)
+    n = 0
+    for c in chains:
+        v = c.get("votes") or set()
+        if len(v) == 1:
+            c["flow"] = next(iter(v))
+            n += 1
+    return n
 
 
 def _box_gap(a, b) -> float:
@@ -420,6 +533,12 @@ def dxf_to_drawio(doc, title: str = "drawing") -> tuple[str, dict]:
                 it.kind, it.why = "stream", "text where a pipe ends: a stream"
     through = pass_through(chains, items)
     bridged = bridge_ends(chains, items)
+    with_flow = flow_from_arrows(chains, items)
+    for c in chains:   # drawn the way it flows: draw.io's arrowhead at the end the flow reaches
+        if c.get("flow") == -1:
+            c["pts"].reverse()
+            c["a"], c["b"] = c["b"], c["a"]
+            c["flow"] = 1
     for it in items:   # what is left unknown keeps its place, typed as generically as DEXPI allows
         n_on = sum(1 for c in chains for e in ("a", "b") if c[e] == it.id)
         if it.kind == "inline" and n_on:
@@ -477,7 +596,8 @@ def dxf_to_drawio(doc, title: str = "drawing") -> tuple[str, dict]:
     tees = _ends_on_pipes(kept)
     for c in kept:
         pts = c["pts"]
-        style = "endArrow=none;html=1;rounded=0;edgeStyle=none;" + ("dashed=1;" if c["dashed"] else "")
+        style = ("endArrow=block;endFill=1;endSize=4;" if c.get("flow") else "endArrow=none;") + \
+            "html=1;rounded=0;edgeStyle=none;" + ("dashed=1;" if c["dashed"] else "")
         # each end exactly where it touches its symbol in the CAD drawing - not draw.io's own
         # choice (towards the shape's centre), which drew slanted pipes
         for end, side, q in (("a", "exit", pts[0]), ("b", "entry", pts[-1])):
@@ -501,6 +621,6 @@ def dxf_to_drawio(doc, title: str = "drawing") -> tuple[str, dict]:
     for it in items:
         kinds[it.kind] = kinds.get(it.kind, 0) + 1
     report = {"symbols": kinds, "pipes": sum(1 for c in chains if not c["dashed"]),
-              "signal_lines": sum(1 for c in chains if c["dashed"]), "through": through, "bridged": bridged, "tees": tees,
+              "signal_lines": sum(1 for c in chains if c["dashed"]), "through": through, "bridged": bridged, "tees": tees, "flow_from_arrows": with_flow,
               "frames": len(frames), "unrecognised": sorted({it.tag or it.block for it in items if it.cls})}
     return xml, report

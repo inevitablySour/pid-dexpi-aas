@@ -29,6 +29,9 @@ def drawing():
     _block(doc, "STREAM", lambda b: b.add_lwpolyline([(-10, -3), (8, -3), (10, 0), (8, 3), (-10, 3)], close=True), ["NAME"])
     _block(doc, "FLANGE", lambda b: (b.add_line((-1, -3), (-1, 3)), b.add_line((1, -3), (1, 3))))
     _block(doc, "LABEL", lambda b: None, ["NAME"])
+    # a filled flow arrow built of three triangles (tip at +x), lying on the pipe
+    _block(doc, "ARROW", lambda b: [b.add_lwpolyline(t, close=True) for t in (
+        [(-1.5, -1.25), (-1.5, -0.4), (1.5, 0)], [(-1.5, -0.4), (-1.5, 0.4), (1.5, 0)], [(-1.5, 0.4), (-1.5, 1.25), (1.5, 0)])])
 
     def put(name, at, *values):
         ins = msp.add_blockref(name, at)
@@ -37,6 +40,7 @@ def drawing():
         return ins
 
     put("STREAM", (10, 50), "FEED")
+    put("ARROW", (28, 50))   # FEED flows into the plant
     put("VALVE", (40, 50), "AFS001")
     put("FLANGE", (60, 50))
     put("PUMP", (80, 50), "%%UP101")
@@ -74,3 +78,12 @@ def test_decoration_and_signal_lines(drawing):
     xml, report = drawing
     assert report["signal_lines"] == 1 and "dashed=1" in xml
     assert xml.count('edge="1"') == 6   # 4 process pipes (one through the flange), the tap, the outlet... and the signal line
+
+
+def test_flow_from_an_arrow_on_the_pipe(drawing):
+    xml, report = drawing
+    ids = dict(re.findall(r'<(?:mxCell|object) id="(b\d+|q\d+)" (?:value|label)="([^"]*)"', xml))
+    by_tag = {v: k for k, v in ids.items()}
+    edge = re.search(r'<mxCell id="l\d+" style="([^"]*)" edge="1" parent="1" source="%s" target="%s"' % (by_tag["FEED"], by_tag["AFS001"]), xml)
+    assert edge and "endArrow=block" in edge.group(1)   # drawn FEED -> valve, arrowhead at the valve
+    assert report["flow_from_arrows"] == 1
