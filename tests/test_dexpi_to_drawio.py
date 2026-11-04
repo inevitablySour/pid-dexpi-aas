@@ -52,3 +52,21 @@ def test_the_drawing_gives_the_same_plant_back(round_trip):
     xml, _, _, again = round_trip
     a, b = read_plant(xml)["model"].conceptualModel, read_plant(again)["model"].conceptualModel
     assert _plant(a) == _plant(b)
+
+
+def test_a_dexpi_file_with_its_drawing_is_drawn_as_drawn(tmp_path):
+    """A DEXPI file with its drawing (Proteus graphics): each item where the file puts it, with
+    its own catalogue symbol - and the drawing through the draw.io route gives the same plant."""
+    from pid_dexpi_aas.dexpi.graphics import add_drawing
+    review = from_drawio(parse_drawio_xml_resolved(decode_drawio(DRAWING)[0], source_file=DRAWING.name,
+                                                   drawio_path=DRAWING))
+    diagram, result = to_dexpi(review)
+    with tempfile.TemporaryDirectory() as tmp:
+        save_and_verify(result.model, Path(tmp), "m")
+        xml = add_drawing((Path(tmp) / "m.xml").read_bytes(), diagram, result, review.drawio)
+    drawio, report = dexpi_to_drawio(xml, "drawn")
+    assert drawio.count("shape=image;image=data:image/svg+xml,") >= 4   # the file's own symbols
+    path = tmp_path / "drawn.drawio"
+    path.write_text(drawio)
+    a, b = read_plant(xml)["model"].conceptualModel, read_plant(_dexpi(path))["model"].conceptualModel
+    assert _plant(a) == _plant(b)

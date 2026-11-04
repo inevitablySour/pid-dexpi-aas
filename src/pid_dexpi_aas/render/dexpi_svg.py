@@ -28,8 +28,9 @@ def has_drawing(xml: bytes) -> bool:
     return root.find("ShapeCatalogue") is not None or any(True for _ in root.iter("CenterLine"))
 
 
-def dexpi_svg(xml: bytes, margin: float = 5.0) -> str | None:
-    """SVG text of the drawing in DEXPI file `xml`; None when the file has no drawing."""
+def dexpi_svg(xml: bytes, margin: float = 5.0, view=None, background: bool = True) -> str | None:
+    """SVG text of the drawing in DEXPI file `xml`; None when the file has no drawing.
+    view: (x0, y0, x1, y1) in the file's units (Y up) to show exactly, instead of all of it."""
     root = ET.fromstring(xml)
     catalogue = {}
     cat = root.find("ShapeCatalogue")
@@ -145,12 +146,15 @@ def dexpi_svg(xml: bytes, margin: float = 5.0) -> str | None:
 
     if not out:
         return None
-    x0, x1 = min(xs) - margin, max(xs) + margin
-    y0, y1 = min(ys) - margin, max(ys) + margin
-    w, h = x1 - x0, y1 - y0
+    if view:
+        x0, y0, x1, y1 = view
+    else:
+        x0, x1 = min(xs) - margin, max(xs) + margin
+        y0, y1 = min(ys) - margin, max(ys) + margin
+    w, h = max(x1 - x0, 0.1), max(y1 - y0, 0.1)
     return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{x0:.2f} {-y1:.2f} {w:.2f} {h:.2f}" '
-            f'width="{w:.1f}mm" height="{h:.1f}mm" stroke-linecap="round" stroke-linejoin="round">'
-            f'<rect x="{x0:.2f}" y="{-y1:.2f}" width="{w:.2f}" height="{h:.2f}" fill="#fff"/>'
+            f'width="{w:.1f}mm" height="{h:.1f}mm" stroke-linecap="round" stroke-linejoin="round" overflow="visible">'
+            + (f'<rect x="{x0:.2f}" y="{-y1:.2f}" width="{w:.2f}" height="{h:.2f}" fill="#fff"/>' if background else "")
             + "".join(out) + "</svg>")
 
 

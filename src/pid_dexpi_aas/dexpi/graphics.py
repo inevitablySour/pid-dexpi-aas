@@ -376,6 +376,48 @@ def add_drawing(xml: bytes, diagram, result, source=None) -> bytes:
             segs = [sg for sg in result.edge_segments[k] if sg is not None]
             if segs:
                 lines += attach(by_id.get(segs[0].id), centre_lines([e.id]))
+    # tees: where their network's lines meet on the drawing (a junction point), so a reader
+    # can place them - each tee at the free junction point nearest the items it joins
+    junctions: dict[str, list] = {}   # net -> [(point, {objects its two lines reach})]
+    by_edge = {e.id: e for e in edges}
+    sobj = lambda sid: id(result.shape_objects[sid]) if sid in result.shape_objects else None
+    for e in edges:
+        net, r = e.merged_into, routes.get(e.id)
+        if not net or not r:
+            continue
+        for attached, p, line in ((e.source, r[0], e.source_junction), (e.target, r[-1], e.target_junction)):
+            if attached is None:
+                f = by_edge.get(line)
+                reach = {sobj(x) for x in (e.source, e.target, *((f.source, f.target) if f else ())) if x}
+                junctions.setdefault(net, []).append((p, reach - {None}))
+    shape_xy = {s.id: (s.x + (s.width or 0) / 2, s.y + (s.height or 0) / 2) for s in diagram.shapes}
+    obj_xy = {id(result.shape_objects[sid]): p for sid, p in shape_xy.items() if sid in result.shape_objects}
+    tees_placed = 0
+    nets_free = {net: list(js) for net, js in junctions.items()}
+    for key, segs in result.edge_segments.items():
+        net = key.split(":", 1)[0]
+        free = nets_free.get(net, [])
+        for sg in segs or []:
+            if sg is None:
+                continue
+            for it in getattr(sg, "items", None) or []:
+                el = by_id.get(getattr(it, "id", None))
+                if type(it).__name__ != "PipeTee" or el is None or el.find("Position") is not None or not free:
+                    continue
+                near = set()
+                for c in getattr(sg, "connections", None) or []:
+                    for a, b in ((c.sourceItem, c.targetItem), (c.targetItem, c.sourceItem)):
+                        if a is it and b is not None:
+                            near.add(id(b))
+                pts = [obj_xy[n] for n in near if n in obj_xy]
+                cx = sum(p[0] for p in pts) / len(pts) if pts else free[0][0][0]
+                cy = sum(p[1] for p in pts) / len(pts) if pts else free[0][0][1]
+                # the junction whose lines reach most of this tee's neighbours, then the nearest
+                p, reach = min(free, key=lambda j: (-len(j[1] & near), math.dist(j[0], (cx, cy))))
+                free.remove((p, reach))
+                el.insert(0, _position(X(p[0]), Y(p[1])))
+                el.insert(0, _extent([X(p[0]) - 0.5, X(p[0]) + 0.5], [Y(p[1]) - 0.5, Y(p[1]) + 0.5]))
+                tees_placed += 1
     signals = 0
     for key, flows in result.edge_signals.items():
         for f in (flows if isinstance(flows, list) else [flows]):
@@ -393,5 +435,5 @@ def add_drawing(xml: bytes, diagram, result, source=None) -> bytes:
     root.insert(at + 1, catalogue)
     ET.indent(root, "  ")
     add_drawing.last = {"symbols": placed, "shapes_in_catalogue": len(symbols), "pipe_lines": lines,
-                        "signal_lines": signals, "labels": len(drawing.findall("Label"))}
+                        "signal_lines": signals, "labels": len(drawing.findall("Label")), "tees": tees_placed}
     return b'<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="utf-8")

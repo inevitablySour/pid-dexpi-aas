@@ -160,12 +160,20 @@ def read_plant(xml: bytes) -> dict:
         for seg in system.segments or []:
             for it in seg.items or []:
                 items.setdefault(it.id, it)
-            for c in seg.connections or []:
-                a, b = node(c.sourceItem), node(c.targetItem)
-                for o in (c.sourceItem, c.targetItem):
+            pairs = [(c.sourceItem, c.targetItem) for c in seg.connections or []]
+            # pyDEXPI's reader does not always give a segment's links to its two ends back as
+            # connections: the chain source -> items -> target says them too
+            chain = [o for o in [getattr(seg, "sourceItem", None), *(seg.items or []), getattr(seg, "targetItem", None)]
+                     if o is not None]
+            pairs += list(zip(chain, chain[1:]))
+            seen = set()
+            for sa, sb in pairs:
+                a, b = node(sa), node(sb)
+                for o in (sa, sb):
                     if o is not None and o.id not in owner:
                         items.setdefault(o.id, o)
-                if a and b and a != b:
+                if a and b and a != b and (a, b) not in seen and (b, a) not in seen:
+                    seen.add((a, b))
                     pipes.append((a, b, seg))
     measure, signals = [], []
     for pif in cm.processInstrumentationFunctions or []:
@@ -304,16 +312,155 @@ def layout(plant: dict) -> dict:
 
 
 # ------------------------------------------------------------------ draw.io output ---
+def _seg_dist(p, a, b) -> float:
+    ax, ay = b[0] - a[0], b[1] - a[1]
+    L = ax * ax + ay * ay
+    t = 0.0 if L == 0 else max(0.0, min(1.0, ((p[0] - a[0]) * ax + (p[1] - a[1]) * ay) / L))
+    return math.dist(p, (a[0] + t * ax, a[1] + t * ay))
+
+
+def _centre_line(own: dict, seg, a, b, xy) -> list | None:
+    """The drawn centre line of `seg` that runs from item a to item b (its ends on their
+    boxes, within a few units), oriented a -> b; None if the drawing has none."""
+    def box_dist(p, i):
+        if i not in xy:
+            return 1e9
+        cx, cy = xy[i]
+        w, h = own["size"].get(i, (6, 6))
+        return math.hypot(max(abs(p[0] - cx) - w / 2, 0), max(abs(p[1] - cy) - h / 2, 0))
+    def fit(lines, tol):
+        best = None
+        for pl in lines:
+            for line in (pl, pl[::-1]):
+                d = box_dist(line[0], a) + box_dist(line[-1], b)
+                if best is None or d < best[0]:
+                    best = (d, line)
+        return best[1] if best and best[0] <= tol else None
+    # its own segment's lines first; a network's lines can sit on a neighbouring segment
+    # (then only one that ends right on both)
+    return fit(own["lines"].get(getattr(seg, "proteusId", None) or "", []), 16) or fit(own["every"], 4)
+
+
 def _class(obj) -> str:
     cls = type(obj).__name__
     return "(off-page connector)" if cls in ("FlowInPipeOffPageConnector", "FlowOutPipeOffPageConnector") else cls
 
 
+UNITS = 4.0   # draw.io units per mm (the file's drawing is in mm)
+
+
+def drawn(xml: bytes, plant: dict) -> dict | None:
+    """The file's own drawing, when it has one (Proteus graphics): {"xy": {item: centre},
+    "size": {item: (w, h)}, "style": {item: draw.io style with its catalogue symbol},
+    "lines": {segment proteusId: [polyline]}} in draw.io units; None without one."""
+    import base64
+    import xml.etree.ElementTree as ET
+
+    from pid_dexpi_aas.render.dexpi_svg import dexpi_svg
+    root = ET.fromstring(xml)
+    cat = root.find("ShapeCatalogue")
+    catalogue = {e.get("ComponentName") or e.get("ID"): e for e in (cat if cat is not None else [])}
+    by_id = {el.get("ID"): el for el in root.iter() if el.get("ID")}
+    num = lambda e, k: float(e.get(k, 0) or 0)
+    tops = [num(m, "Y") for m in root.iter("Max")]
+    if not tops:
+        return None
+    H = max(tops)
+    P = lambda x, y: (x * UNITS, (H - y) * UNITS)
+    out = {"xy": {}, "size": {}, "style": {}, "lines": {}}
+    symbols = {}
+    for i, obj in plant["items"].items():
+        el = by_id.get(getattr(obj, "proteusId", None) or "")
+        if el is None:
+            continue
+        loc = el.find("Position/Location")
+        ext = el.find("Extent")
+        if loc is None:
+            continue
+        lx, ly = num(loc, "X"), num(loc, "Y")
+        if ext is not None and ext.find("Min") is not None:
+            mn, mx = ext.find("Min"), ext.find("Max")
+            x0, y0, x1, y1 = num(mn, "X"), num(mn, "Y"), num(mx, "X"), num(mx, "Y")
+        else:
+            x0, y0, x1, y1 = lx - 4, ly - 4, lx + 4, ly + 4
+        (cx, cy) = P((x0 + x1) / 2, (y0 + y1) / 2)
+        out["xy"][i] = (cx, cy)
+        out["size"][i] = (max((x1 - x0) * UNITS, 4), max((y1 - y0) * UNITS, 4))
+        sym = catalogue.get(el.get("ComponentName"))
+        if sym is None:
+            continue
+        pos = el.find("Position")
+        key = (el.get("ComponentName"), ET.tostring(pos), round(x0 - lx, 2), round(y0 - ly, 2), round(x1 - lx, 2), round(y1 - ly, 2))
+        if key not in symbols:   # the symbol on its own, cut out at the item's extent
+            pm = ET.Element("PlantModel")
+            ET.SubElement(pm, "ShapeCatalogue").append(sym)
+            ET.SubElement(pm, "Item", ComponentName=el.get("ComponentName")).append(pos)
+            mini = ET.tostring(pm)
+            cat.append(sym) if sym not in list(cat) else None   # (append moved it out of the catalogue)
+            el.insert(0, pos) if pos not in list(el) else None
+            svg = dexpi_svg(mini, view=(x0, y0, x1, y1), background=False)
+            symbols[key] = base64.b64encode(svg.encode()).decode() if svg else None
+        if symbols[key]:
+            out["style"][i] = (f"shape=image;image=data:image/svg+xml,{symbols[key]};imageAspect=0;html=1;fontSize=10;"
+                               "verticalLabelPosition=bottom;verticalAlign=top;")
+    for el in root.iter("PipingNetworkSegment"):
+        lines = [[P(num(c, "X"), num(c, "Y")) for c in cl.findall("Coordinate")] for cl in el.findall("CenterLine")]
+        out["lines"][el.get("ID")] = [ln for ln in lines if len(ln) >= 2]
+    out["every"] = [ln for ls in out["lines"].values() for ln in ls]
+    out["signal_lines"] = []   # (polyline, measuring?) of instrument lines (InformationFlow)
+    for el in root.iter("InformationFlow"):
+        measuring = el.get("ComponentClass") == "MeasuringLineFunction"
+        for cl in el.findall("CenterLine"):
+            ln = [P(num(c, "X"), num(c, "Y")) for c in cl.findall("Coordinate")]
+            if len(ln) >= 2:
+                out["signal_lines"].append((ln, measuring))
+    if len(out["xy"]) < 0.5 * max(1, len(plant["items"])):
+        return None   # too little of a drawing to go by
+    return out
+
+
 def dexpi_to_drawio(xml: bytes, title: str = "from DEXPI") -> tuple[str, dict]:
-    """(draw.io XML, report) for DEXPI file `xml`: laid out from the plant data."""
+    """(draw.io XML, report) for DEXPI file `xml`: drawn as its own drawing has it when it has
+    one, else laid out from the plant data."""
     plant = read_plant(xml)
     items = plant["items"]
     xy = layout(plant)
+    own = drawn(xml, plant)
+    if own:
+        # where the drawing puts things; a tee, where its pipes' centre lines meet
+        placed = own["xy"]
+        for i, obj in items.items():
+            if i in placed:
+                xy[i] = placed[i]
+            elif type(obj).__name__ == "PipeTee" and "position" not in own.get("tees", {}).get(i, {}):
+                # where one of its pipes' drawn ends lands on another drawn pipe, away from any
+                # item - the junction nearest the items it joins
+                legs = [(a, b, seg) for a, b, seg in plant["pipes"] if i in (a, b)]
+                every = own["every"]
+                near_ids = [b if a == i else a for a, b, _ in legs]
+                def touches(pl):
+                    return any(math.hypot(max(abs(q[0] - placed[n][0]) - own["size"][n][0] / 2, 0),
+                                          max(abs(q[1] - placed[n][1]) - own["size"][n][1] / 2, 0)) <= 6
+                               for n in near_ids if n in placed and n in own["size"] for q in (pl[0], pl[-1]))
+                lines = [pl for pl in every if touches(pl)]
+                near = [b if a == i else a for a, b, _ in legs]
+                anchors = [placed[n] for n in near if n in placed]
+                def off_items(p):
+                    return all(math.hypot(max(abs(p[0] - placed[n][0]) - own["size"][n][0] / 2, 0),
+                                          max(abs(p[1] - placed[n][1]) - own["size"][n][1] / 2, 0)) > 6
+                               for n in placed if n in own["size"])
+                cands = [p for pl in lines for p in (pl[0], pl[-1])
+                         if off_items(p) and any(_seg_dist(p, q, r) < 2 for ln in every if p not in (ln[0], ln[-1])
+                                                 for q, r in zip(ln, ln[1:]))]
+                if cands:
+                    cx = sum(p[0] for p in anchors) / len(anchors) if anchors else 0
+                    cy = sum(p[1] for p in anchors) / len(anchors) if anchors else 0
+                    best = min(cands, key=lambda p: math.hypot(p[0] - cx, p[1] - cy))
+                    reach = max((math.hypot(p[0] - cx, p[1] - cy) for p in anchors), default=0)
+                    # never far from what it joins: else between them
+                    xy[i] = best if math.hypot(best[0] - cx, best[1] - cy) <= max(reach, 40) else (cx, cy)
+                elif anchors:
+                    xy[i] = (sum(p[0] for p in anchors) / len(anchors), sum(p[1] for p in anchors) / len(anchors))
     cells = ['<mxCell id="0"/>', '<mxCell id="1" parent="0"/>']
     ids = {}
     streams = defaultdict(int)
@@ -336,6 +483,11 @@ def dexpi_to_drawio(xml: bytes, title: str = "from DEXPI") -> tuple[str, dict]:
                 style = style.replace("mounting=field", "mounting=room")
         else:
             label = html.escape(tag)
+        if own and i in own["style"]:
+            style = own["style"][i] + ("verticalLabelPosition=middle;verticalAlign=middle;"
+                                       if cls == "ProcessInstrumentationFunction" else "")
+        if own and i in own["size"]:
+            w, h = own["size"][i]
         x, y = xy[i]
         cid = f"d{k}"
         ids[i] = cid
@@ -423,6 +575,18 @@ def dexpi_to_drawio(xml: bytes, title: str = "from DEXPI") -> tuple[str, dict]:
                         for side, n in (("source", src), ("target", tgt)))
         geo = "".join(f'<mxPoint x="{tee_pt(n)[0]:.1f}" y="{tee_pt(n)[1]:.1f}" as="{side}Point"/>'
                       for side, n in (("source", src), ("target", tgt)) if n in tees)
+        if own:   # as drawn: each piece along the centre line that runs between its two ends
+            drawn_pts, ok = [], True
+            for n_i, kk in enumerate(ks):
+                a_, b_ = seq[n_i], seq[n_i + 1]
+                pl = _centre_line(own, pieces[kk][2], a_, b_, xy)
+                if pl is None:
+                    ok = False
+                    break
+                drawn_pts += pl[1:-1] + ([xy[b_]] if n_i < len(ks) - 1 else [])
+            if ok:
+                pts = drawn_pts
+                style = style.replace("edgeStyle=orthogonalEdgeStyle;", "edgeStyle=none;")
         if pts:
             geo += '<Array as="points">' + "".join(f'<mxPoint x="{x:.1f}" y="{y:.1f}"/>' for x, y in pts) + "</Array>"
         cells.append(f'<object id="p{k0}" label={quoteattr(label)}{attrs}><mxCell style="{style}" edge="1" parent="1"{terms}>'

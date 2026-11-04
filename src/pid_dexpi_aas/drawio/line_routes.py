@@ -85,6 +85,10 @@ def _raw_routes(text: str) -> dict[str, Route]:
             continue
         p = g.find(f".//{_SVG}path")
         if p is None or not p.get("d"):
+            img = g.find(f".//{_SVG}image")   # a symbol drawn as a picture: its box's corners
+            if img is not None and img.get("width"):
+                x, y = float(img.get("x", 0)), float(img.get("y", 0))
+                raw[cid] = [(x, y), (x + float(img.get("width")), y + float(img.get("height", 0)))]
             continue
         # M/L give the corners; a Q (rounded corner) contributes its end point.
         d = p.get("d")
