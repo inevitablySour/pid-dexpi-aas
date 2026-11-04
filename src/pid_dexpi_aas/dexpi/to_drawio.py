@@ -304,6 +304,26 @@ def layout(plant: dict) -> dict:
     for i in items:
         if is_inst(i):
             put(i)
+    # an instrument with nothing to place it by: beside an item of its loop (the same loop
+    # number in its tag - ISA 5.1: PSV 0101 for FI 0101), else in a row underneath
+    import re as _re
+    def number(i):
+        m = _re.search(r"(\d{2,})\s*$", _tag(items[i]) or "")
+        return m.group(1) if m else None
+    by_number = defaultdict(list)
+    for j in xy:
+        if number(j):
+            by_number[number(j)].append(j)
+    for i in items:
+        if i in xy or not is_inst(i) or not number(i):
+            continue
+        mates = by_number.get(number(i))
+        if mates:
+            at = sorted(mates, key=lambda j: (not is_inst(j), j))[0]
+            ax, ay = xy[at]
+            stack[at] += 1
+            xy[i] = (ax + 52 * stack[at], ay)
+            by_number[number(i)].append(i)
     rest = [i for i in items if i not in xy]
     bottom = max((p[1] for p in xy.values()), default=0) + DY
     for k, i in enumerate(rest):   # nothing to place them by: a row underneath
