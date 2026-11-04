@@ -284,3 +284,221 @@ def find_dash_chains(edges, routes: dict[str, Route], max_piece: float = 16.0, m
     for i in ids:
         groups.setdefault(root(i), []).append(i)
     return [g for g in groups.values() if len(g) >= min_pieces]
+
+
+# --- the shapes as draw.io draws them --------------------------------------------------
+# Each symbol's own geometry from the same SVG export (its <g data-cell-id> group): paths,
+# ellipses, rectangles, polylines - not its text. So a DEXPI file's drawing and the "after"
+# picture use the very symbol on the drawing (the draw.io P&ID stencil as drawn), not a
+# stand-in. A stroke is (points, closed, filled) in draw.io coordinates.
+
+def _matrix(t: str):
+    """An SVG transform attribute as (a, b, c, d, e, f)."""
+    m = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+
+    def mul(p, q):
+        a, b, c, d, e, f = p
+        A, B, C, D, E, F = q
+        return (a * A + c * B, b * A + d * B, a * C + c * D, b * C + d * D, a * E + c * F + e, b * E + d * F + f)
+    for name, args in re.findall(r"(\w+)\(([^)]*)\)", t or ""):
+        v = [float(x) for x in re.split(r"[\s,]+", args.strip()) if x]
+        if name == "translate":
+            q = (1, 0, 0, 1, v[0], v[1] if len(v) > 1 else 0)
+        elif name == "scale":
+            q = (v[0], 0, 0, v[1] if len(v) > 1 else v[0], 0, 0)
+        elif name == "rotate":
+            a = math.radians(v[0])
+            cx, cy = (v[1], v[2]) if len(v) > 2 else (0, 0)
+            q = mul(mul((1, 0, 0, 1, cx, cy), (math.cos(a), math.sin(a), -math.sin(a), math.cos(a), 0, 0)),
+                    (1, 0, 0, 1, -cx, -cy))
+        elif name == "matrix" and len(v) == 6:
+            q = tuple(v)
+        else:
+            continue
+        m = mul(m, q)
+    return m
+
+
+def _path_points(d: str) -> list[tuple[list, bool]]:
+    """An SVG path's subpaths as ([(x, y)...], closed), curves and arcs flattened."""
+    toks = re.findall(r"[A-Za-z]|-?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?", d or "")
+    out, pts = [], []
+    x = y = sx = sy = 0.0
+    lc = None   # last control point (for S/T)
+    i, cmd = 0, None
+
+    def num():
+        nonlocal i
+        i += 1
+        return float(toks[i - 1])
+    while i < len(toks):
+        if re.match(r"[A-Za-z]", toks[i]):
+            cmd = toks[i]
+            i += 1
+            if cmd in "Zz":
+                if pts:
+                    out.append((pts, True))
+                pts, x, y = [], sx, sy
+                continue
+        if cmd is None:
+            break
+        rel = cmd.islower()
+        C = cmd.upper()
+        ox, oy = (x, y) if rel else (0.0, 0.0)
+        if C == "M":
+            if len(pts) > 1:
+                out.append((pts, False))
+            x, y = ox + num(), oy + num()
+            sx, sy, pts = x, y, [(x, y)]
+            cmd = "l" if rel else "L"
+        elif C == "L":
+            x, y = ox + num(), oy + num()
+            pts.append((x, y))
+        elif C == "H":
+            x = (x if rel else 0) + num()
+            pts.append((x, y))
+        elif C == "V":
+            y = (y if rel else 0) + num()
+            pts.append((x, y))
+        elif C in "CSQT":
+            if C == "C":
+                c1 = (ox + num(), oy + num())
+                c2 = (ox + num(), oy + num())
+            elif C == "S":
+                c1 = (2 * x - lc[0], 2 * y - lc[1]) if lc else (x, y)
+                c2 = (ox + num(), oy + num())
+            elif C == "Q":
+                q = (ox + num(), oy + num())
+                c1 = (x + 2 / 3 * (q[0] - x), y + 2 / 3 * (q[1] - y))
+                c2 = None
+            else:
+                q = (2 * x - lc[0], 2 * y - lc[1]) if lc else (x, y)
+                c1, c2 = None, None
+            ex, ey = ox + num(), oy + num()
+            if C in "QT":
+                q = q if C == "T" else q
+                c1 = (x + 2 / 3 * (q[0] - x), y + 2 / 3 * (q[1] - y))
+                c2 = (ex + 2 / 3 * (q[0] - ex), ey + 2 / 3 * (q[1] - ey))
+                lc = q
+            else:
+                lc = c2
+            for k in range(1, 13):
+                t = k / 12
+                u = 1 - t
+                pts.append((u ** 3 * x + 3 * u * u * t * c1[0] + 3 * u * t * t * c2[0] + t ** 3 * ex,
+                            u ** 3 * y + 3 * u * u * t * c1[1] + 3 * u * t * t * c2[1] + t ** 3 * ey))
+            x, y = ex, ey
+            continue
+        elif C == "A":
+            rx, ry, phi, large, sweep = abs(num()), abs(num()), math.radians(num()), num(), num()
+            ex, ey = ox + num(), oy + num()
+            pts.extend(_arc(x, y, rx, ry, phi, bool(large), bool(sweep), ex, ey))
+            x, y = ex, ey
+        else:
+            i += 1
+        lc = None
+    if len(pts) > 1:
+        out.append((pts, False))
+    return out
+
+
+def _arc(x1, y1, rx, ry, phi, large, sweep, x2, y2):
+    """An SVG elliptical arc as points (SVG spec, F.6.5)."""
+    if rx == 0 or ry == 0:
+        return [(x2, y2)]
+    c, s = math.cos(phi), math.sin(phi)
+    dx, dy = (x1 - x2) / 2, (y1 - y2) / 2
+    x1p, y1p = c * dx + s * dy, -s * dx + c * dy
+    lam = (x1p / rx) ** 2 + (y1p / ry) ** 2
+    if lam > 1:
+        rx, ry = rx * math.sqrt(lam), ry * math.sqrt(lam)
+    num_ = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p
+    den = rx * rx * y1p * y1p + ry * ry * x1p * x1p
+    k = math.sqrt(max(0.0, num_ / den)) if den else 0.0
+    if large == sweep:
+        k = -k
+    cxp, cyp = k * rx * y1p / ry, -k * ry * x1p / rx
+    cx, cy = c * cxp - s * cyp + (x1 + x2) / 2, s * cxp + c * cyp + (y1 + y2) / 2
+    ang = lambda ux, uy, vx, vy: math.atan2(ux * vy - uy * vx, ux * vx + uy * vy)
+    t1 = ang(1, 0, (x1p - cxp) / rx, (y1p - cyp) / ry)
+    dt = ang((x1p - cxp) / rx, (y1p - cyp) / ry, (-x1p - cxp) / rx, (-y1p - cyp) / ry)
+    if not sweep and dt > 0:
+        dt -= 2 * math.pi
+    elif sweep and dt < 0:
+        dt += 2 * math.pi
+    n = max(4, int(abs(dt) / (math.pi / 16)))
+    return [(cx + rx * math.cos(t1 + dt * j / n) * c - ry * math.sin(t1 + dt * j / n) * s,
+             cy + rx * math.cos(t1 + dt * j / n) * s + ry * math.sin(t1 + dt * j / n) * c) for j in range(1, n + 1)]
+
+
+def _filled(el) -> bool:
+    fill = (el.get("fill") or "").lower()
+    style = (el.get("style") or "").lower()
+    m = re.search(r"fill:\s*([^;]+)", style)
+    fill = m.group(1).strip() if m and "var(" not in m.group(1) else fill
+    return fill not in ("", "none", "transparent", "#ffffff", "#fff", "white") and not fill.startswith("url")
+
+
+def _shape_strokes(group) -> list:
+    """The drawn strokes of one cell's <g>: [(points, closed, filled)] in export pixels."""
+    out = []
+
+    def walk(el, m):
+        tag = el.tag.split("}")[-1]
+        if tag in ("foreignObject", "text", "image", "switch"):
+            return
+        m = _mul(m, _matrix(el.get("transform")))
+        if (el.get("stroke") in ("none", "transparent") and not _filled(el)) or el.get("visibility") == "hidden":
+            return
+        P = lambda p: (m[0] * p[0] + m[2] * p[1] + m[4], m[1] * p[0] + m[3] * p[1] + m[5])
+        f = lambda k: float(el.get(k, 0) or 0)
+        if tag == "path":
+            for pts, closed in _path_points(el.get("d")):
+                out.append(([P(p) for p in pts], closed, closed and _filled(el)))
+        elif tag in ("ellipse", "circle"):
+            rx, ry = (f("r"), f("r")) if tag == "circle" else (f("rx"), f("ry"))
+            pts = [(f("cx") + rx * math.cos(t * math.pi / 18), f("cy") + ry * math.sin(t * math.pi / 18)) for t in range(36)]
+            out.append(([P(p) for p in pts], True, _filled(el)))
+        elif tag == "rect":
+            x, y, w, h = f("x"), f("y"), f("width"), f("height")
+            out.append(([P(p) for p in ((x, y), (x + w, y), (x + w, y + h), (x, y + h))], True, _filled(el)))
+        elif tag in ("polyline", "polygon"):
+            v = [float(t) for t in re.split(r"[\s,]+", (el.get("points") or "").strip()) if t]
+            pts = list(zip(v[::2], v[1::2]))
+            if len(pts) > 1:
+                out.append(([P(p) for p in pts], tag == "polygon", tag == "polygon" and _filled(el)))
+        elif tag == "line":
+            out.append(([P((f("x1"), f("y1"))), P((f("x2"), f("y2")))], False, False))
+        for ch in el:
+            walk(ch, m)
+    walk(group, (1.0, 0.0, 0.0, 1.0, 0.0, 0.0))
+    return out
+
+
+def _mul(p, q):
+    a, b, c, d, e, f = p
+    A, B, C, D, E, F = q
+    return (a * A + c * B, b * A + d * B, a * C + c * D, b * C + d * D, a * E + c * F + e, b * E + d * F + f)
+
+
+def shapes_for(drawio_path: str | Path, edges, shapes=()) -> dict[str, list] | None:
+    """{shape id: [(points, closed, filled)]} - each symbol as draw.io draws it, in draw.io
+    coordinates (the same export and shift as routes_for); None without the draw.io app."""
+    text = _export_svg(Path(drawio_path))
+    if text is None:
+        return None
+    shift = _shift(_raw_routes(text), edges, shapes)
+    if shift is None:
+        return None
+    dx, dy = shift
+    ids = {s.id for s in shapes}
+    root = ET.fromstring(text)
+    out = {}
+    for g in root.iter():
+        cid = g.get("data-cell-id")
+        if g.tag.split("}")[-1] != "g" or cid not in ids or cid in out:
+            continue
+        strokes = [([(x - dx, y - dy) for x, y in pts], closed, filled) for pts, closed, filled in _shape_strokes(g)]
+        if strokes:
+            out[cid] = strokes
+    return out

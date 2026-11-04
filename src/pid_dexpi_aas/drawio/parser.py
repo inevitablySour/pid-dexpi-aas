@@ -114,6 +114,9 @@ class ParsedDiagram:
     # the drawing's own details (DEXPI MetaData fields: drawingNumber, revisionNumber, ...),
     # kept as data on draw.io's root cell (the diagram's "Edit Data")
     metadata: dict = field(default_factory=dict)
+    # {shape id: [(points, closed, filled)]}: each symbol as draw.io draws it (line_routes.shapes_for),
+    # for the DEXPI file's drawing - the drawing's own symbols, not stand-ins
+    symbols: dict = field(default_factory=dict)
     # plant sections drawn as frames around groups of items (sections.py)
     sections: list = field(default_factory=list)
 
@@ -665,6 +668,11 @@ def parse_drawio_xml_resolved(xml_text: str, source_file: str, drawio_path: str 
     if drawio_path is not None:
         from pid_dexpi_aas.drawio.line_routes import find_junctions, routes_for
         routes = routes_for(drawio_path, diagram.edges, diagram.shapes)
+        try:
+            from pid_dexpi_aas.drawio.line_routes import shapes_for
+            diagram.symbols = shapes_for(drawio_path, diagram.edges, diagram.shapes) or {}
+        except Exception:   # the symbols are a nicety: never fail the parse for them
+            diagram.symbols = {}
         if routes:
             _ends_on_lines(diagram, routes)
             # section frames first: closed lines around groups of items are not pipes

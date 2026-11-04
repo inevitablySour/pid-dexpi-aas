@@ -393,13 +393,21 @@ def check_aasx(data: bytes) -> tuple[bool, list[str]]:
     return not problems, problems
 
 
-def drawing_svg(diagram, result) -> bytes | None:
-    """The P&ID re-drawn from the DEXPI model (ModelRepresentation), as SVG bytes."""
+def drawing_svg(diagram, result, source=None, xml: bytes | None = None) -> bytes | None:
+    """The P&ID re-drawn from the DEXPI model (ModelRepresentation), as SVG bytes: the DEXPI
+    file's own drawing (`xml` when made already; render/dexpi_svg.py), else generic symbols."""
     import tempfile
 
     from pid_dexpi_aas.render.build_diagram import build_diagram
+    from pid_dexpi_aas.render.dexpi_svg import dexpi_svg, drawing_of
     from pid_dexpi_aas.render.render_svg import render_diagram_svg
 
+    try:
+        svg = dexpi_svg(xml or drawing_of(diagram, result, source))
+        if svg:
+            return svg.encode()
+    except Exception:
+        pass
     try:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "model.svg"

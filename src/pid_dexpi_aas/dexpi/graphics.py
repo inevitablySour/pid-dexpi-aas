@@ -201,6 +201,22 @@ def add_connector_references(xml: bytes, diagram, result) -> bytes:
     return b'<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="utf-8")
 
 
+def _pipe_end(routes: dict, p) -> tuple | None:
+    """The pipe end nearest point p (draw.io coordinates), within 30 units: (end point, unit
+    direction of the flow there, whether the pipe leaves the sheet there)."""
+    best = None
+    for r in routes.values():
+        if len(r) < 2:
+            continue
+        for end, prev, leaving in ((r[-1], r[-2], True), (r[0], r[1], False)):
+            d = math.dist(end, p)
+            if best is None or d < best[0]:
+                v = (end[0] - prev[0], end[1] - prev[1]) if leaving else (prev[0] - end[0], prev[1] - end[1])
+                n = math.hypot(*v) or 1.0
+                best = (d, end, (v[0] / n, v[1] / n), leaving)
+    return best[1:] if best and best[0] <= 30 else None
+
+
 def add_drawing(xml: bytes, diagram, result, source=None) -> bytes:
     """`xml` (a DEXPI file from dexpi/serialize.py) with the drawing of `diagram` (the
     reviewed draw.io diagram it was built from) and `result` (its BuildResult) added.
@@ -208,6 +224,7 @@ def add_drawing(xml: bytes, diagram, result, source=None) -> bytes:
     (a CAD symbol) where the reviewed rows carry only their DEXPI class."""
     root = ET.fromstring(xml)
     drawn = {s.id: s.style for s in (source.shapes if source is not None else [])}
+    drawio_symbols = getattr(source, "symbols", None) or getattr(diagram, "symbols", None) or {}
     els = element_map(root, diagram, result)
     by_id = {}
     for el in root.iter():
@@ -237,19 +254,46 @@ def add_drawing(xml: bytes, diagram, result, source=None) -> bytes:
         w, h = X(s.width or 40), (s.height or 40) * MM
         cx, cy = X(s.x + (s.width or 40) / 2), Y(s.y + (s.height or 40) / 2)
         m = _SVG_IMAGE.search(s.style or "") or _SVG_IMAGE.search(drawn.get(s.id) or "")
-        if m:   # the CAD symbol itself
+        own = None if m else drawio_symbols.get(s.id)
+        angle = _rotation(s.style)
+        stream = type(obj).__name__ in _CONNECTORS and not m and not own
+        if stream:   # a stream with no symbol drawn (a loose pipe end, a text label): the usual
+            # stream arrow at the pipe's end, pointing the way it flows
+            end = _pipe_end(routes, (s.x + (s.width or 0) / 2, s.y + (s.height or 0) / 2))
+            w, h = 10.0, 5.0
+            if end:
+                (px, py), (ux, uy), leaving = end
+                ex, ey = X(px), Y(py)
+                ux, uy = ux, -uy   # draw.io Y down -> DEXPI Y up
+                k = 1 if leaving else -1   # past the end of a pipe that leaves; before one that enters
+                cx, cy = ex + k * ux * w / 2, ey + k * uy * w / 2
+                angle = math.atan2(uy, ux)
+            key = "STREAM_ARROW"
+        if stream:
+            pass
+        elif m:   # the CAD symbol itself
             key = "CAD_" + hashlib.sha1(f"{m.group(1)}|{w:.2f}|{h:.2f}".encode()).hexdigest()[:10]
+        elif own:   # the symbol as draw.io draws it on this drawing
+            local = [([(round(X(x) - cx, 3), round(Y(y) - cy, 3)) for x, y in pts], closed, filled)
+                     for pts, closed, filled in own]
+            key = "DRAWIO_" + hashlib.sha1(repr(local).encode()).hexdigest()[:10]
         else:
             key = f"{type(obj).__name__}_{w:.1f}x{h:.1f}".replace(".", "_")
+        if key not in symbols and stream:
+            strokes = [_polyline([(-5, -2.5), (2.5, -2.5), (5, 0), (2.5, 2.5), (-5, 2.5)], closed=True)]
+            sym = ET.SubElement(catalogue, "PipeOffPageConnector", ID=key, ComponentName=key)
+            sym.extend(strokes)
+            symbols[key] = key
         if key not in symbols:
             strokes = (_svg_strokes(base64.b64decode(m.group(1)).decode("utf-8", "replace"), w, h) if m
-                       else _library_strokes(type(obj).__name__, w, h))
+                       else [_polyline(pts, closed=closed, filled=filled) for pts, closed, filled in local if len(pts) > 1]
+                       if own else _library_strokes(type(obj).__name__, w, h))
             sym = ET.SubElement(catalogue, el.tag, ID=key, ComponentName=key)
             sym.extend(strokes)
             symbols[key] = key
         el.set("ComponentName", key)
         graphics = [_extent([cx - w / 2, cx + w / 2], [cy - h / 2, cy + h / 2]),
-                    _position(cx, cy, _rotation(s.style)), ET.Element("Scale", X="1", Y="1", Z="1")]
+                    _position(cx, cy, angle), ET.Element("Scale", X="1", Y="1", Z="1")]
         at = 1 if len(el) and el[0].tag == "PersistentID" else 0
         for k, g in enumerate(graphics):
             el.insert(at + k, g)
@@ -260,12 +304,22 @@ def add_drawing(xml: bytes, diagram, result, source=None) -> bytes:
         tag = getattr(obj, "tagName", None) or (s.text or "").replace("\n", " ").strip()
         if tag and not tag.startswith("<"):
             inside = type(obj).__name__ == "ProcessInstrumentationFunction"
-            lx, ly = cx, (cy if inside else cy - h / 2 - 2.5)
+            lx, ly = cx, (cy if inside else cy - (max(w, h) if stream else h) / 2 - 2.5)
             label = ET.SubElement(drawing, "Label", ID=f"Label-{obj.id}", ComponentClass="Label", ComponentName="Tag")
             label.append(_extent([lx], [ly]))
             label.append(_position(lx, ly))
+            if inside and " " in tag:   # an instrument bubble: letters above, number below
+                letters, number = tag.split(" ", 1)
+                size = min(3.0, max(1.5, h * 0.25))
+                for part, dy in ((letters, size * 0.6), (number, -size * 0.6)):
+                    t = ET.SubElement(label, "Text", Justification="CenterCenter", Width="0", Height=_f(size),
+                                      Font="Arial", String=part, ItemID=el.get("ID"))
+                    t.append(_presentation(0))
+                    t.append(_extent([lx], [ly + dy]))
+                    t.append(_position(lx, ly + dy))
+                continue
             text = ET.SubElement(label, "Text", Justification="CenterCenter" if inside else "CenterTop",
-                                 Width="0", Height=_f(min(2.5, max(1.2, h * 0.25)) if inside else 2.5),
+                                 Width="0", Height=_f(min(3.0, max(1.5, h * 0.3)) if inside else 2.5),
                                  Font="Arial", String=tag, ItemID=el.get("ID"))
             text.append(_presentation(0))
             text.append(_extent([lx], [ly]))

@@ -147,15 +147,25 @@ CAIRO_MISSING = ("The re-drawn P&ID needs the Cairo graphics library (README: In
                  "Everything else works without it.")
 
 
-def render_after_png(diagram: ParsedDiagram, result: BuildResult, width: int = 1600) -> bytes | None:
-    """The P&ID re-drawn from the built DEXPI model (generic symbols), as a PNG - None when the
-    Cairo library cairosvg draws with is not installed (common on Windows), so the app and the
-    check sheet still work without it."""
+def render_after_png(diagram: ParsedDiagram, result: BuildResult, width: int = 1600, source=None,
+                     xml: bytes | None = None) -> bytes | None:
+    """The P&ID re-drawn from the DEXPI file - its own drawing (render/dexpi_svg.py: the uploaded
+    drawing's symbols at their positions, the pipe and signal routes, the tags) - as a PNG.
+    `xml`: the DEXPI file with its drawing when already made; `source`: the diagram as uploaded
+    (review.drawio, for its CAD symbols). None when the Cairo library cairosvg draws with is not
+    installed (common on Windows), so the app and the check sheet still work without it."""
     try:
         import cairosvg
     except (ImportError, OSError):
         return None
-    with tempfile.TemporaryDirectory() as tmp:
+    from pid_dexpi_aas.render.dexpi_svg import dexpi_svg, drawing_of
+    try:
+        svg = dexpi_svg(xml or drawing_of(diagram, result, source))
+    except Exception:
+        svg = None
+    if svg:
+        return cairosvg.svg2png(bytestring=svg.encode(), output_width=width, background_color="white")
+    with tempfile.TemporaryDirectory() as tmp:   # no drawing could be made: the generic re-drawing
         svg = Path(tmp) / "after.svg"
         render_diagram_svg(build_diagram(diagram, result, result.model), svg)
         return cairosvg.svg2png(url=str(svg), output_width=width, background_color="white")
@@ -303,15 +313,15 @@ def build_check_sheet(review: ReviewDiagram, result: BuildResult, mode: str,
         bws.cell(row + 1, 1, "No picture was given for this conversion - compare against your own copy of the "
                              "draw.io drawing.").font = Font(name=FONT, italic=True)
         row += 3
-    bws.cell(row, 1, "AFTER - what the DEXPI file the tool produced contains, drawn with standard symbols at the "
-                     "drawing's positions and pipe routes. An item or pipe missing here is missing from the DEXPI file. "
-                     "Instruments are drawn with their line to where they measure; signal lines (dashed) are in the DEXPI file but not drawn."
+    bws.cell(row, 1, "AFTER - the drawing in the DEXPI file the tool produced: the drawing's own symbols at their "
+                     "positions, the pipes and signal lines (dashed) along their routes, and the tags. An item or pipe "
+                     "missing here is missing from the DEXPI file."
              ).font = Font(name=FONT, bold=True)
     bws.cell(row, 1).alignment = Alignment(wrap_text=True)
     bws.row_dimensions[row].height = 32
     if diagram is not None:
         try:
-            after = render_after_png(diagram, result)
+            after = render_after_png(diagram, result, source=review.drawio)
             if after is None:
                 bws.cell(row + 1, 1, CAIRO_MISSING)
             else:

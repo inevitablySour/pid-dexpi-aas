@@ -2521,7 +2521,7 @@ if build_clicked:
                            help="The same data plus the P&ID drawing, as P&ID tools write it (DEXPI 1.3 / Proteus "
                                 "graphics): each item's position and symbol, every pipe's route, the tags.")
     with st.spinner("Packaging the AAS..."):
-        aas_in = DexpiModelInput(stem, xml_bytes, drawing_svg(diagram, result),
+        aas_in = DexpiModelInput(stem, xml_bytes, drawing_svg(diagram, result, review.drawio, drawn_bytes),
                                  {k: v for k, v in aas_model_meta.items() if v})
         aas_data = aasx_bytes([aas_in], {k: v for k, v in aas_plant.items() if v}, version=aas_version,
                               base_iri=aas_base or None)
@@ -2530,7 +2530,7 @@ if build_clicked:
                        help="Asset Administration Shell with the IDTA 02012-1-0 DEXPI Submodel: the DEXPI file, the "
                             "drawing as SVG, and every tagged item mapped to a global id.")
     d3.button("Add this drawing to the plant AAS", key="plant_add", width="stretch", on_click=_plant_add,
-              args=(stem, xml_bytes, drawing_svg(diagram, result), {k: v for k, v in aas_model_meta.items() if v}),
+              args=(stem, xml_bytes, drawing_svg(diagram, result, review.drawio, drawn_bytes), {k: v for k, v in aas_model_meta.items() if v}),
               help="Several drawings of one plant in one AAS (below: 'Plant AAS')")
     n_mapped = len(mapping_entries(xml_bytes))
     if aas_ok:
@@ -2559,10 +2559,10 @@ if build_clicked:
         else:
             st.info("No picture uploaded - compare with your draw.io drawing.")
     with after_col:
-        st.caption("After: what the DEXPI file contains, drawn at the drawing's positions and pipe routes. "
-                   "Instruments are drawn with their line to where they measure; signal lines (dashed) are in the DEXPI file but not drawn.")
+        st.caption("After: the drawing in the DEXPI file (the download with drawing), with the drawing's own "
+                   "symbols at their positions, the pipes and signal lines (dashed) along their routes, and the tags.")
         try:
-            after = render_after_png(diagram, result)
+            after = render_after_png(diagram, result, source=review.drawio, xml=drawn_bytes)
             if after is None:
                 st.info(CAIRO_MISSING)
             else:
