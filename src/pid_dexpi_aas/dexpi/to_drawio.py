@@ -332,6 +332,19 @@ def layout(plant: dict) -> dict:
 
 
 # ------------------------------------------------------------------ draw.io output ---
+def _nearest_on(path: list, p) -> tuple:
+    """The point of a polyline nearest p."""
+    best = None
+    for a, b in (zip(path, path[1:]) if len(path) > 1 else [(path[0], path[0])]):
+        ax, ay = b[0] - a[0], b[1] - a[1]
+        L = ax * ax + ay * ay
+        t = 0.0 if L == 0 else max(0.0, min(1.0, ((p[0] - a[0]) * ax + (p[1] - a[1]) * ay) / L))
+        q = (a[0] + t * ax, a[1] + t * ay)
+        if best is None or math.dist(q, p) < best[0]:
+            best = (math.dist(q, p), q)
+    return best[1]
+
+
 def _square_ends(pts, src, tgt, xy, tees) -> list:
     """Corner points so a line that ends on another line (a branch onto its tee) meets it at a
     right angle: draw.io's orthogonal routing does not route an end attached to a line."""
@@ -587,6 +600,7 @@ def dexpi_to_drawio(xml: bytes, title: str = "from DEXPI") -> tuple[str, dict]:
                 seq, ks = seq[::-1], ks[::-1]
             runs.append((seq, ks))
     through = {t: f"p{k0}" for k0, (seq, _ks) in enumerate(runs) for t in seq[1:-1]}   # tee -> its run
+    run_path = {}   # run id -> its drawn path (for lines that end on it)
     run_of_seg = {}
     for k0, (seq, ks) in enumerate(runs):
         for kk in ks:
@@ -627,8 +641,18 @@ def dexpi_to_drawio(xml: bytes, title: str = "from DEXPI") -> tuple[str, dict]:
             if ok:
                 pts = drawn_pts
                 style = style.replace("edgeStyle=orthogonalEdgeStyle;", "edgeStyle=none;")
+                # each end where the drawn line meets its item (not aimed at the item's centre)
+                first = _centre_line(own, pieces[ks[0]][2], seq[0], seq[1], xy)
+                last = _centre_line(own, pieces[ks[-1]][2], seq[-2], seq[-1], xy)
+                for n, p_end, side in ((src, first[0] if first else None, "exit"), (tgt, last[-1] if last else None, "entry")):
+                    if p_end and n in ids and n in own["size"]:
+                        (cx, cy), (w, h) = xy[n], own["size"][n]
+                        fx = min(max((p_end[0] - (cx - w / 2)) / w, 0.0), 1.0)
+                        fy = min(max((p_end[1] - (cy - h / 2)) / h, 0.0), 1.0)
+                        style += f"{side}X={fx:.4f};{side}Y={fy:.4f};{side}Dx=0;{side}Dy=0;{side}Perimeter=0;"
         if "edgeStyle=orthogonalEdgeStyle" in style:
             pts = _square_ends(pts, src, tgt, xy, tees)
+        run_path[f"p{k0}"] = [xy[n] for n in (src,) if n in xy] + list(pts) + [xy[n] for n in (tgt,) if n in xy]
         if pts:
             geo += '<Array as="points">' + "".join(f'<mxPoint x="{x:.1f}" y="{y:.1f}"/>' for x, y in pts) + "</Array>"
         cells.append(f'<object id="p{k0}" label={quoteattr(label)}{attrs}><mxCell style="{style}" edge="1" parent="1"{terms}>'
@@ -639,9 +663,18 @@ def dexpi_to_drawio(xml: bytes, title: str = "from DEXPI") -> tuple[str, dict]:
             run = run_of_seg.get(at[1])
             if inst in ids and run:
                 pid, seq = run
-                pts = [xy[n] for n in seq if n in xy]
-                x, y = ((pts[0][0] + pts[1][0]) / 2, (pts[0][1] + pts[1][1]) / 2) if len(pts) > 1 else pts[0]
                 ix, iy = xy[inst]
+                path = run_path.get(pid) or [xy[n] for n in seq if n in xy]
+                # the point of the pipe nearest the instrument
+                best = None
+                for a_, b_ in zip(path, path[1:]) if len(path) > 1 else [(path[0], path[0])]:
+                    ax, ay = b_[0] - a_[0], b_[1] - a_[1]
+                    L = ax * ax + ay * ay
+                    t = 0.0 if L == 0 else max(0.0, min(1.0, ((ix - a_[0]) * ax + (iy - a_[1]) * ay) / L))
+                    q = (a_[0] + t * ax, a_[1] + t * ay)
+                    if best is None or math.dist(q, (ix, iy)) < best[0]:
+                        best = (math.dist(q, (ix, iy)), q)
+                x, y = best[1]
                 cells.append(f'<object id="m{k}" label="" on_line_target="{pid}"><mxCell style="endArrow=none;html=1;rounded=0;'
                              f'edgeStyle=orthogonalEdgeStyle;" edge="1" parent="1" source="{ids[inst]}">'
                              f'<mxGeometry relative="1" as="geometry"><mxPoint x="{x:.1f}" y="{y:.1f}" as="targetPoint"/>'
@@ -651,10 +684,13 @@ def dexpi_to_drawio(xml: bytes, title: str = "from DEXPI") -> tuple[str, dict]:
             cells.append(f'<mxCell id="m{k}" style="endArrow=none;html=1;rounded=0;edgeStyle=orthogonalEdgeStyle;" edge="1" '
                          f'parent="1" source="{ids[inst]}" target="{ids[at]}"><mxGeometry relative="1" as="geometry"/></mxCell>')
         elif inst in ids and at in through:   # measuring on the pipe where a tee was: onto that pipe
-            x, y = tee_pt(at)
-            cells.append(f'<mxCell id="m{k}" style="endArrow=none;html=1;rounded=0;edgeStyle=orthogonalEdgeStyle;" edge="1" '
-                         f'parent="1" source="{ids[inst]}" target="{through[at]}"><mxGeometry relative="1" as="geometry">'
-                         f'<mxPoint x="{x:.1f}" y="{y:.1f}" as="targetPoint"/></mxGeometry></mxCell>')
+            pid = through[at]
+            x, y = _nearest_on(run_path.get(pid) or [tee_pt(at)], xy[inst])
+            ix, iy = xy[inst]
+            cells.append(f'<object id="m{k}" label="" on_line_target="{pid}"><mxCell style="endArrow=none;html=1;rounded=0;'
+                         f'edgeStyle=orthogonalEdgeStyle;" edge="1" parent="1" source="{ids[inst]}">'
+                         f'<mxGeometry relative="1" as="geometry"><mxPoint x="{x:.1f}" y="{y:.1f}" as="targetPoint"/>'
+                         f'<Array as="points"><mxPoint x="{ix:.1f}" y="{y:.1f}"/></Array></mxGeometry></mxCell></object>')
     for k, (a, b) in enumerate(plant["signals"]):
         if a in ids and b in ids:
             cells.append(f'<mxCell id="s{k}" style="endArrow=none;dashed=1;html=1;rounded=0;edgeStyle=orthogonalEdgeStyle;" '
