@@ -332,6 +332,23 @@ def layout(plant: dict) -> dict:
 
 
 # ------------------------------------------------------------------ draw.io output ---
+def _square_ends(pts, src, tgt, xy, tees) -> list:
+    """Corner points so a line that ends on another line (a branch onto its tee) meets it at a
+    right angle: draw.io's orthogonal routing does not route an end attached to a line."""
+    pts = list(pts)
+    if tgt in tees and tgt in xy:
+        prev = pts[-1] if pts else xy.get(src)
+        end = xy[tgt]
+        if prev and abs(prev[0] - end[0]) > 1 and abs(prev[1] - end[1]) > 1:
+            pts.append((end[0], prev[1]))   # across, then straight into the junction
+    if src in tees and src in xy:
+        start = xy[src]
+        nxt = pts[0] if pts else xy.get(tgt)
+        if nxt and abs(nxt[0] - start[0]) > 1 and abs(nxt[1] - start[1]) > 1:
+            pts.insert(0, (start[0], nxt[1]))   # straight out of the junction, then across
+    return pts
+
+
 def _seg_dist(p, a, b) -> float:
     ax, ay = b[0] - a[0], b[1] - a[1]
     L = ax * ax + ay * ay
@@ -591,8 +608,11 @@ def dexpi_to_drawio(xml: bytes, title: str = "from DEXPI") -> tuple[str, dict]:
         if label:
             style += "fontSize=9;labelBackgroundColor=#ffffff;"
         # a branch ends on the pipe running through its tee: attached to that line itself
-        terms = "".join(f' {side}="{ids[n]}"' if n in ids else f' {side}="{through[n]}"' if n in through else ""
-                        for side, n in (("source", src), ("target", tgt)))
+        # (as a hint the draw.io route reads, so draw.io itself still routes the end at a right
+        # angle to the exact junction point - it does not route an end attached to a line)
+        terms = "".join(f' {side}="{ids[n]}"' for side, n in (("source", src), ("target", tgt)) if n in ids)
+        attrs += "".join(f' on_line_{side}="{through[n]}"' for side, n in (("source", src), ("target", tgt))
+                         if n not in ids and n in through)
         geo = "".join(f'<mxPoint x="{tee_pt(n)[0]:.1f}" y="{tee_pt(n)[1]:.1f}" as="{side}Point"/>'
                       for side, n in (("source", src), ("target", tgt)) if n in tees)
         if own:   # as drawn: each piece along the centre line that runs between its two ends
@@ -607,6 +627,8 @@ def dexpi_to_drawio(xml: bytes, title: str = "from DEXPI") -> tuple[str, dict]:
             if ok:
                 pts = drawn_pts
                 style = style.replace("edgeStyle=orthogonalEdgeStyle;", "edgeStyle=none;")
+        if "edgeStyle=orthogonalEdgeStyle" in style:
+            pts = _square_ends(pts, src, tgt, xy, tees)
         if pts:
             geo += '<Array as="points">' + "".join(f'<mxPoint x="{x:.1f}" y="{y:.1f}"/>' for x, y in pts) + "</Array>"
         cells.append(f'<object id="p{k0}" label={quoteattr(label)}{attrs}><mxCell style="{style}" edge="1" parent="1"{terms}>'
@@ -619,9 +641,11 @@ def dexpi_to_drawio(xml: bytes, title: str = "from DEXPI") -> tuple[str, dict]:
                 pid, seq = run
                 pts = [xy[n] for n in seq if n in xy]
                 x, y = ((pts[0][0] + pts[1][0]) / 2, (pts[0][1] + pts[1][1]) / 2) if len(pts) > 1 else pts[0]
-                cells.append(f'<mxCell id="m{k}" style="endArrow=none;html=1;rounded=0;edgeStyle=orthogonalEdgeStyle;" '
-                             f'edge="1" parent="1" source="{ids[inst]}" target="{pid}"><mxGeometry relative="1" as="geometry">'
-                             f'<mxPoint x="{x:.1f}" y="{y:.1f}" as="targetPoint"/></mxGeometry></mxCell>')
+                ix, iy = xy[inst]
+                cells.append(f'<object id="m{k}" label="" on_line_target="{pid}"><mxCell style="endArrow=none;html=1;rounded=0;'
+                             f'edgeStyle=orthogonalEdgeStyle;" edge="1" parent="1" source="{ids[inst]}">'
+                             f'<mxGeometry relative="1" as="geometry"><mxPoint x="{x:.1f}" y="{y:.1f}" as="targetPoint"/>'
+                             f'<Array as="points"><mxPoint x="{ix:.1f}" y="{y:.1f}"/></Array></mxGeometry></mxCell></object>')
             continue
         if inst in ids and at in ids:
             cells.append(f'<mxCell id="m{k}" style="endArrow=none;html=1;rounded=0;edgeStyle=orthogonalEdgeStyle;" edge="1" '

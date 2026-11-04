@@ -753,6 +753,9 @@ def _ends_on_lines(diagram: ParsedDiagram, routes: dict) -> None:
             continue
         # which line it is attached to is kept: find_junctions joins it to that one, not to
         # whatever other line happens to cross the same point
+        for end, key in ((0, "on_line_source"), (1, "on_line_target")):   # a file's hint: the line
+            if (e.data or {}).get(key) in line_ids:                         # this end is on
+                e.data = {**e.data, f"_on_line_{end}": e.data[key]}
         if e.source in line_ids:
             e.data = {**(e.data or {}), "_on_line_0": e.source}
             e.source, e.source_point, e.source_resolution = None, r[0], "unresolved"
