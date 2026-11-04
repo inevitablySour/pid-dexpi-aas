@@ -288,6 +288,13 @@ def svg_viewer(svg: str, height: int = 560) -> None:
     components.html(page, height=height + 4)
 
 
+@st.cache_data(show_spinner="Laying out the DEXPI file...", max_entries=4)
+def dexpi_to_drawio_cached(data: bytes, name: str) -> tuple[str, dict]:
+    """A DEXPI file as a draw.io P&ID (dexpi/to_drawio.py), laid out from its plant data."""
+    from pid_dexpi_aas.dexpi.to_drawio import dexpi_to_drawio
+    return dexpi_to_drawio(data, Path(name).stem)
+
+
 def load_legends() -> dict:
     out = {}
     for f in sorted(LEGENDS.glob("*.json")) if LEGENDS.exists() else []:
@@ -335,8 +342,9 @@ with st.sidebar:
     st.header("Input")
     in_drawio, in_picture, in_editor = st.tabs(["draw.io file", "Picture", "Editor"])
     with in_drawio:
-        uploaded_drawio = st.file_uploader("draw.io or AutoCAD file", type=["drawio", "xml", "dwg", "dxf"],
-                                           help="An AutoCAD P&ID (.dwg or .dxf) is turned into a draw.io drawing: "
+        uploaded_drawio = st.file_uploader("draw.io, AutoCAD or DEXPI file", type=["drawio", "xml", "dwg", "dxf"],
+                                           help="A DEXPI file (.xml) is drawn as a P&ID, laid out in flow order. "
+                                                "An AutoCAD P&ID (.dwg or .dxf) is turned into a draw.io drawing: "
                                                 "symbols with their tags, equipment outlines, pipes and streams. "
                                                 "Check it in the editor - unknown symbols are flagged.")
         if uploaded_drawio is not None and uploaded_drawio.name.lower().endswith((".dwg", ".dxf")):
@@ -368,6 +376,17 @@ with st.sidebar:
                 uploaded_drawio = UploadedPicture(Path(uploaded_drawio.name).stem + ".drawio", cad_xml.encode())
             except Exception as exc:
                 st.error(f"This CAD file can't be read: {exc}")
+                uploaded_drawio = None
+        if uploaded_drawio is not None and uploaded_drawio.name.lower().endswith(".xml") \
+                and b"<PlantModel" in uploaded_drawio.getvalue()[:4000]:
+            # a DEXPI file: back to a P&ID (laid out from its plant data), then on as a draw.io drawing
+            try:
+                dexpi_xml, dexpi_report = dexpi_to_drawio_cached(uploaded_drawio.getvalue(), uploaded_drawio.name)
+                st.caption(f"Read from DEXPI: {dexpi_report['items']} items, {dexpi_report['pipes']} pipes, "
+                           f"{dexpi_report['instruments']} instruments - laid out in flow order. Check it in the editor.")
+                uploaded_drawio = UploadedPicture(Path(uploaded_drawio.name).stem + ".drawio", dexpi_xml.encode())
+            except Exception as exc:
+                st.error(f"This DEXPI file can't be read: {exc}")
                 uploaded_drawio = None
         if uploaded_drawio is None or not uploaded_drawio.name.lower().endswith(".drawio") \
                 or not isinstance(uploaded_drawio, UploadedPicture):
