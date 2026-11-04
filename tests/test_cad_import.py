@@ -182,3 +182,25 @@ def test_legend_choices_apply(tmp_path):
     assert xml.count('dexpi_class="BallValve"') == 2
     _, out = dxf_to_drawio(doc, "t", {"THING": "(leave out)"})
     assert {r["block"]: r["dexpi_class"] for r in out["legend"]}["THING"] == "(leave out)"
+
+
+def test_a_grey_line_with_ticks_is_a_planned_signal_line():
+    """A dashed grey line carrying "//" marks between two instruments is a planned signal line
+    (not a pipe), drawn dashed; its end a little short of a bubble (a dashed line's gap) is on it."""
+    doc = ezdxf.new()
+    doc.linetypes.add("HIDDEN", pattern=[5, 3, -2])
+    doc.layers.add("PLANNED", linetype="HIDDEN", color=252)
+    msp = doc.modelspace()
+    _block(doc, "BUBBLE", lambda b: b.add_circle((0, 0), 4), ["LETTERS", "NUMBER"])
+    _block(doc, "TICK", lambda b: (b.add_line((-1.2, -1), (0.2, 1)), b.add_line((-0.2, -1), (1.2, 1))))
+    msp.add_lwpolyline([(-50, -150), (250, -150), (250, 150), (-50, 150)], close=True)   # the sheet's frame
+    planned = {"layer": "PLANNED"}
+    msp.add_blockref("BUBBLE", (0, 0), dxfattribs=planned).add_auto_attribs({"LETTERS": "FI", "NUMBER": "201"})
+    msp.add_blockref("BUBBLE", (100, 0), dxfattribs=planned).add_auto_attribs({"LETTERS": "IC", "NUMBER": "104"})
+    msp.add_line((6, 0), (96, 0), dxfattribs=planned)   # 2 mm short of FI's bubble
+    for x in (30, 60):
+        msp.add_blockref("TICK", (x, 0), dxfattribs=planned)
+    xml, report = dxf_to_drawio(doc, "t")
+    assert report["signal_lines"] == 1
+    edge = re.search(r'<mxCell style="([^"]*)" edge="1" parent="1" source="(\w+)" target="(\w+)"', xml)
+    assert edge and "dashed=1" in edge.group(1)

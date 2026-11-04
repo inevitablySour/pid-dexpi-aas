@@ -15,7 +15,8 @@ plant P&ID from AutoCAD 2023, symbols as blocks with their tags as attributes):
   - a symbol without text, or a size change ("80/50"), with a pipe on each side is in-line
     (flange, flow arrow, reducer): the pipe runs through it;
   - a dashed line type is a signal line; short diagonal strokes on a line ("//") are its
-    decoration; lines inside an equipment outline are its internals.
+    decoration, and make it a signal line also when it is drawn grey (a planned signal line);
+    lines inside an equipment outline are its internals.
 
 Line pieces are joined where exactly two meet; a pipe end on a symbol (within ATTACH mm of its
 outline) is attached to it; a pipe end on another pipe is left on it, which the draw.io route
@@ -33,6 +34,7 @@ from xml.sax.saxutils import quoteattr
 from pid_dexpi_aas.dexpi.mapping import classify_tag
 
 ATTACH = 1.5   # mm: a pipe end this close to a symbol's outline is on it
+AIM = 3.0      # mm: ... or this close when the line runs straight at it (a dashed line's gap)
 SNAP = 0.3     # mm: two line ends this close are one point
 SCALE = 4.0    # draw.io units per mm (an A0 sheet ~ 4800 x 3400)
 DASHED = re.compile(r"HIDDEN|DASH|DOT|CENTER|PHANTOM", re.I)
@@ -409,11 +411,59 @@ def attach(chains: list[dict], items: list[Item]) -> None:
         if _inside(p, b):
             return min(p[0] - b[0], b[2] - p[0], p[1] - b[1], b[3] - p[1])
         return _dist_to_box(p, b)
+    def aims_at(p, q, it):   # the line's last stretch q -> p, carried on, runs into the box
+        d = math.dist(p, q)
+        if d == 0 or it.kind == "unit":
+            return False
+        ux, uy = (p[0] - q[0]) / d, (p[1] - q[1]) / d
+        return any(_inside((p[0] + ux * s, p[1] + uy * s), it.box, 0.3) for s in (0.5, 1, 1.5, 2, 2.5, 3))
     for c in chains:
-        for end, p in (("a", c["pts"][0]), ("b", c["pts"][-1])):
-            best = min(((dist(p, it), it.id) for it in items), default=(None, None))
-            if best[0] is not None and best[0] <= ATTACH:
+        pts = c["pts"]
+        for end, p, q in (("a", pts[0], pts[1]), ("b", pts[-1], pts[-2])):
+            best = min(((dist(p, it), it.id, it) for it in items), default=(None, None, None), key=lambda t: t[0])
+            if best[0] is not None and (best[0] <= ATTACH or (best[0] <= AIM and aims_at(p, q, best[2]))):
                 c[end] = best[1]
+
+
+def _is_tick(it) -> bool:
+    """A "//" mark: a small text-free symbol of short diagonal strokes only."""
+    w, h = it.box[2] - it.box[0], it.box[3] - it.box[1]
+    if it.tag or max(w, h) > 4 or not it.ents:
+        return False
+    for e in it.ents:
+        if e.dxftype() != "LINE":
+            return False
+        a, b = e.dxf.start, e.dxf.end
+        if not (abs(a.x - b.x) > 0.2 and abs(a.y - b.y) > 0.2):
+            return False
+    return True
+
+
+def signal_by_ticks(chains: list[dict], items: list[Item]) -> int:
+    """A line carrying "//" marks is a signal line, whatever its colour (a grey one: planned)."""
+    ticks = [((it.box[0] + it.box[2]) / 2, (it.box[1] + it.box[3]) / 2) for it in items if _is_tick(it)]
+    n = 0
+    for c in chains:
+        if c["dashed"]:
+            continue
+        segs = list(zip(c["pts"], c["pts"][1:]))
+        if any(_seg_dist(t, a, b) < 1.0 for t in ticks for a, b in segs):
+            c["dashed"] = True
+            n += 1
+    # a planned line branching off a planned signal line is one too (not one meeting it at an
+    # instrument: that can be the instrument's tap on a planned pipe)
+    changed = True
+    while changed:
+        changed = False
+        sig = [c for c in chains if c["dashed"] and c.get("future")]
+        for c in chains:
+            if c["dashed"] or not c.get("future"):
+                continue
+            ends = [c["pts"][0], c["pts"][-1]]
+            if any(_seg_dist(p, a, b) < 0.5 for p in ends for s in sig for a, b in zip(s["pts"], s["pts"][1:])):
+                c["dashed"] = changed = True
+                n += 1
+    return n
 
 
 def pass_through(chains: list[dict], items: list[Item]) -> list[str]:
@@ -688,6 +738,7 @@ def dxf_to_drawio(doc, title: str = "drawing", legend: dict | None = None) -> tu
     pieces = read_lines(doc, items)
     chains = join_pieces(pieces)
     attach(chains, items)
+    signal_by_ticks(chains, items)
     found = [(it, sum(1 for c in chains for e in ("a", "b") if c[e] == it.id)) for it in every if it.block]
     # unknown text where a pipe ends: a stream in or out of the drawing; else a note
     ends_on = {c[e] for c in chains for e in ("a", "b") if c[e]}
@@ -852,7 +903,7 @@ def dxf_to_drawio(doc, title: str = "drawing", legend: dict | None = None) -> tu
         pts = c["pts"]
         style = ("endArrow=block;endFill=1;endSize=4;" if c.get("flow") else "endArrow=none;") + \
             "html=1;rounded=0;edgeStyle=none;" + ("dashed=1;" if c["dashed"] else "") + \
-            ("strokeColor=#9a9a9a;dashPattern=6 4;" if c.get("future") else "")
+            ("strokeColor=#9a9a9a;dashed=1;dashPattern=6 4;" if c.get("future") else "")
         # each end exactly where it touches its symbol in the CAD drawing - not draw.io's own
         # choice (towards the shape's centre), which drew slanted pipes
         for end, side, q in (("a", "exit", pts[0]), ("b", "entry", pts[-1])):
