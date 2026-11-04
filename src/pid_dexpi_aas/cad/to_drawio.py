@@ -158,8 +158,10 @@ def _within(e, box) -> bool:
     return ext.has_data and _inside(ext.extmin, box, 0.01) and _inside(ext.extmax, box, 0.01)
 
 
-def symbol_svg(ents, box, faded: bool = False) -> str:
-    """The symbol as drawn in the CAD file, as an SVG image of exactly its box (y up -> down)."""
+def symbol_svg(ents, box, faded: bool = False, thumb: bool = False) -> str:
+    """The symbol as drawn in the CAD file, as an SVG image of exactly its box (y up -> down).
+
+    thumb: for the legend table - a white tile and lines thick enough to read at thumbnail size."""
     from ezdxf import path as dpath
     w, h = max(box[2] - box[0], 0.5), max(box[3] - box[1], 0.5)
     pad = 0.3
@@ -177,8 +179,10 @@ def symbol_svg(ents, box, faded: bool = False) -> str:
             d = "M" + " L".join(f"{p.x - box[0] + pad:.2f},{box[3] - p.y + pad:.2f}" for p in pts)
             shapes.append(f'<path d="{d}{" Z" if filled else ""}" fill="{"#000" if filled else "none"}"/>')
     vw, vh = w + 2 * pad, h + 2 * pad
+    sw = max(0.25, max(vw, vh) / 45) if thumb else 0.25
+    tile = f'<rect width="{vw:.2f}" height="{vh:.2f}" fill="#fff"/>' if thumb else ""
     return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {vw:.2f} {vh:.2f}" width="{vw:.2f}mm" '
-            f'height="{vh:.2f}mm"><g stroke="{"#8a8a8a" if faded else "#000"}" stroke-width="0.25" '
+            f'height="{vh:.2f}mm">{tile}<g stroke="{"#8a8a8a" if faded else "#000"}" stroke-width="{sw:.2f}" '
             f'{"stroke-dasharray=\"1.2,0.8\" " if faded else ""}stroke-linecap="round" '
             f'stroke-linejoin="round">{"".join(shapes)}</g></svg>')
 
@@ -901,7 +905,7 @@ def dxf_to_drawio(doc, title: str = "drawing", legend: dict | None = None) -> tu
             became = LEAVE_OUT
         row["became"][became] += 1
         if row["svg"] is None and it.ents:
-            row["svg"] = symbol_svg(it.ents, it.box)
+            row["svg"] = symbol_svg(it.ents, it.box, thumb=True)
         if not row["example"] and it.tag:
             row["example"] = it.tag
     legend_rows = []
