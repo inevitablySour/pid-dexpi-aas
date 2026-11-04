@@ -197,7 +197,10 @@ def read_plant(xml: bytes) -> dict:
                     ids.append(None)   # the measuring line: drawn from what it measures
                 elif type(o).__name__ == "ActuatingFunction":   # acts on a valve: the line goes to it
                     loc = getattr(o, "actuatingLocation", None)
-                    ids.append(node(loc) if loc is not None else None)
+                    if loc is not None and hasattr(loc, "connections"):   # on a pipe: onto that pipe
+                        ids.append(("segment", id(loc), node((loc.items or [None])[0])))
+                    else:
+                        ids.append(node(loc) if loc is not None else None)
                 else:
                     ids.append(node(o))
             if ids[0] and ids[1] and ids[0] != ids[1]:
@@ -212,7 +215,7 @@ def read_plant(xml: bytes) -> dict:
 
 
 # ------------------------------------------------------------------ the layout ---
-def layout(plant: dict) -> dict:
+def layout(plant: dict, loops: str = "order") -> dict:
     """{item id: (x, y)} - process items left to right by flow, instruments above."""
     import networkx as nx
     items = plant["items"]
@@ -224,17 +227,36 @@ def layout(plant: dict) -> dict:
     for a, b, _ in plant["pipes"]:
         if a in G and b in G:
             G.add_edge(a, b)
-    # cycles (recycle loops): the edges that close one go backwards; the rest is a DAG
-    D = nx.DiGraph(G)
-    while True:
-        try:
-            cyc = nx.find_cycle(D)
-        except nx.NetworkXNoCycle:
-            break
-        D.remove_edge(*cyc[-1][:2])
+    # cycles (recycle loops): an order of the items that as few pipes as possible run against
+    # (Eades-Lin-Smyth: sources first - feeds, inlets -, sinks last, else the item that feeds
+    # most more than it is fed); pipes against that order are the recycle lines
+    if loops == "order":
+        order = _flow_order(G, items)
+        rank = {v: k for k, v in enumerate(order)}
+        D = nx.DiGraph()
+        D.add_nodes_from(G)
+        D.add_edges_from((a, b) for a, b in G.edges if rank[a] < rank[b])
+    else:   # "cut": the pipe that closes each loop found is the recycle line
+        D = nx.DiGraph(G)
+        while True:
+            try:
+                cyc = nx.find_cycle(D)
+            except nx.NetworkXNoCycle:
+                break
+            D.remove_edge(*cyc[-1][:2])
     layer = {}
     for v in nx.topological_sort(D):
         layer[v] = max((layer[u] + 1 for u in D.predecessors(v)), default=0)
+    # an item only fed through a recycle line (a pump or heater in a loop) is no start of the
+    # process: right after what feeds it
+    for _ in range(3):
+        for v in nx.topological_sort(D):
+            if not list(D.predecessors(v)) and list(G.predecessors(v)):
+                want = max(layer[u] for u in G.predecessors(v)) + 1
+                succ = [layer[w] for w in D.successors(v)]
+                layer[v] = min([want] + [w - 1 for w in succ]) if succ and min(succ) - 1 >= 0 else want
+            elif list(D.predecessors(v)):
+                layer[v] = max(layer[v], max(layer[u] + 1 for u in D.predecessors(v)))
     last = max(layer.values(), default=0)
     for v in D:
         if type(items[v]).__name__ == "FlowOutPipeOffPageConnector" and not list(D.successors(v)):
@@ -283,6 +305,7 @@ def layout(plant: dict) -> dict:
     for inst, at in plant["measure"]:
         anchor.setdefault(inst, at[2] if isinstance(at, tuple) else at)
     for a, b in plant["signals"]:
+        a, b = (a[2] if isinstance(a, tuple) else a), (b[2] if isinstance(b, tuple) else b)
         for i, j in ((b, a), (a, b)):
             if i in items and is_inst(i) and i not in anchor and j in items:
                 anchor[i] = j
@@ -298,8 +321,14 @@ def layout(plant: dict) -> dict:
         if at in xy:
             ax, ay = xy[at]
             stack[at] += 1
-            xy[i] = (ax + (stack[at] - 1) * 0 if not is_inst(at) else ax + 50 * (stack[at] - 1),
-                     ay - INST_DY * (1 if not is_inst(at) else 1) * (stack[at] if not is_inst(at) else 1))
+            cat = type(items[at]).__name__
+            if not is_inst(at) and any(w in cat for w in ("Vessel", "Tank", "Column", "Silo")):
+                # on a vessel: beside it, down its side (how real P&IDs draw them most)
+                vw, vh = _shape(_class(items[at]))[1:]
+                xy[i] = (ax + vw / 2 + 70, ay - vh / 2 + 20 + 46 * (stack[at] - 1))   # (a lane for its pipes)
+            else:
+                xy[i] = (ax + (stack[at] - 1) * 0 if not is_inst(at) else ax + 50 * (stack[at] - 1),
+                         ay - INST_DY * (1 if not is_inst(at) else 1) * (stack[at] if not is_inst(at) else 1))
             placed.add(i)
     for i in items:
         if is_inst(i):
@@ -308,7 +337,7 @@ def layout(plant: dict) -> dict:
     # number in its tag - ISA 5.1: PSV 0101 for FI 0101), else in a row underneath
     import re as _re
     def number(i):
-        m = _re.search(r"(\d{2,})\s*$", _tag(items[i]) or "")
+        m = _re.search(r"(\d{2,})(?:\s*/\s*\d+)?\s*$", _tag(items[i]) or "")
         return m.group(1) if m else None
     by_number = defaultdict(list)
     for j in xy:
@@ -324,6 +353,23 @@ def layout(plant: dict) -> dict:
             stack[at] += 1
             xy[i] = (ax + 52 * stack[at], ay)
             by_number[number(i)].append(i)
+    # nothing on top of anything: an instrument that would sit on another symbol moves to the
+    # nearest free spot beside it (process items keep their place in the flow)
+    size = lambda v: _shape(_class(items[v]))[1:]
+    def box(v, p=None):
+        (x, y), (w, h) = p or xy[v], size(v)
+        return (x - w / 2 - 8, y - h / 2 - 8, x + w / 2 + 8, y + h / 2 + 8)
+    overlap = lambda a, b: a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+    settled = [v for v in xy if not is_inst(v)]
+    for v in [v for v in xy if is_inst(v)]:
+        x, y = xy[v]
+        for k in range(0, 40):
+            dx = ((k + 1) // 2) * 46 * (1 if k % 2 else -1) if k else 0
+            cand = (x + dx, y)
+            if not any(overlap(box(v, cand), box(u)) for u in settled):
+                xy[v] = cand
+                break
+        settled.append(v)
     rest = [i for i in items if i not in xy]
     bottom = max((p[1] for p in xy.values()), default=0) + DY
     for k, i in enumerate(rest):   # nothing to place them by: a row underneath
@@ -332,6 +378,177 @@ def layout(plant: dict) -> dict:
 
 
 # ------------------------------------------------------------------ draw.io output ---
+def _flow_order(G, items) -> list:
+    """Eades-Lin-Smyth greedy order of a directed graph: few edges run backwards."""
+    H = G.copy()
+    H.remove_edges_from(nx_selfloops(H))
+    left, right = [], []
+    inflow = lambda v: type(items[v]).__name__ == "FlowInPipeOffPageConnector"
+    outflow = lambda v: type(items[v]).__name__ == "FlowOutPipeOffPageConnector"
+    while H:
+        changed = True
+        while changed:
+            changed = False
+            for v in [v for v in H if H.out_degree(v) == 0 and not inflow(v)]:
+                right.append(v); H.remove_node(v); changed = True
+            for v in [v for v in H if H.in_degree(v) == 0 and not outflow(v)]:
+                left.append(v); H.remove_node(v); changed = True
+        if H:
+            v = max(H, key=lambda v: (H.out_degree(v) - H.in_degree(v) + (5 if inflow(v) else 0) - (5 if outflow(v) else 0), str(v)))
+            left.append(v); H.remove_node(v)
+    return left + right[::-1]
+
+
+def nx_selfloops(H):
+    return [(a, b) for a, b in H.edges if a == b]
+
+
+class Router:
+    """Right-angle routes on a grid that go around the symbols (not through them), with few
+    bends, preferring not to run along a route already drawn - what draw.io's own orthogonal
+    style does not do. Coordinates in draw.io units."""
+    G = 10
+    BEND = 8   # real P&IDs: 64% of pipes straight, 82% with at most one bend
+
+    def __init__(self, boxes: dict, kinds: dict | None = None):
+        self.boxes = boxes   # item id -> (cx, cy, w, h)
+        self.kinds = kinds or {}   # item id -> "vessel" | "pump" | ... (which sides pipes meet it on)
+        self.used: dict = {}
+        self.blocked: dict = {}
+        for i, (cx, cy, w, h) in boxes.items():
+            for c in self._cells(cx - w / 2 - 6, cy - h / 2 - 6, cx + w / 2 + 6, cy + h / 2 + 6):
+                self.blocked.setdefault(c, set()).add(i)
+
+    def _cells(self, x0, y0, x1, y1):
+        g = self.G
+        for gx in range(int(math.floor(x0 / g)), int(math.ceil(x1 / g)) + 1):
+            for gy in range(int(math.floor(y0 / g)), int(math.ceil(y1 / g)) + 1):
+                yield (gx, gy)
+
+    def route(self, a, b, free=()) -> list | None:
+        """Corner points from a to b (both included), around every symbol but those in `free`."""
+        import heapq
+        g = self.G
+        sa, sb = (round(a[0] / g), round(a[1] / g)), (round(b[0] / g), round(b[1] / g))
+        if sa == sb:
+            return [a, b]
+        pad = 60
+        lo_x, hi_x = min(sa[0], sb[0]) - pad, max(sa[0], sb[0]) + pad
+        lo_y, hi_y = min(sa[1], sb[1]) - pad, max(sa[1], sb[1]) + pad
+        free = set(free)
+        def ok(c):
+            return not (self.blocked.get(c, set()) - free)
+        h = lambda c: abs(c[0] - sb[0]) + abs(c[1] - sb[1])
+        start = (sa, None)
+        best = {start: 0}
+        heap = [(h(sa), 0, sa, None)]
+        came = {}
+        found = None
+        steps = 0
+        while heap and steps < 400000:
+            steps += 1
+            f, cost, c, d = heapq.heappop(heap)
+            if c == sb:
+                found = (c, d)
+                break
+            if cost > best.get((c, d), 1e18):
+                continue
+            for nd in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                n = (c[0] + nd[0], c[1] + nd[1])
+                if not (lo_x <= n[0] <= hi_x and lo_y <= n[1] <= hi_y):
+                    continue
+                if n != sb and not ok(n):
+                    continue
+                nc = cost + 1 + (self.BEND if d is not None and nd != d else 0) + 2 * self.used.get(n, 0)
+                if nc < best.get((n, nd), 1e18):
+                    best[(n, nd)] = nc
+                    came[(n, nd)] = (c, d)
+                    heapq.heappush(heap, (nc + h(n), nc, n, nd))
+        if found is None:
+            return None
+        cells, key = [], found
+        while key in came:
+            cells.append(key[0])
+            key = came[key]
+        cells.append(sa)
+        cells.reverse()
+        for c in cells:
+            self.used[c] = self.used.get(c, 0) + 1
+        pts = [a]
+        for prev, c, nxt in zip(cells, cells[1:], cells[2:]):
+            if (c[0] - prev[0], c[1] - prev[1]) != (nxt[0] - c[0], nxt[1] - c[1]):
+                pts.append((c[0] * g, c[1] * g))
+        pts.append(b)
+        # the grid is coarser than the end points: the corners next to each end move onto it,
+        # so the first and last stretch stay straight
+        if len(pts) >= 3:
+            for i_end, i_in in ((0, 1), (-1, -2)):
+                e, c = pts[i_end], pts[i_in]
+                other = pts[i_in - 1] if i_in > 0 else pts[i_in + 1]
+                if abs(c[0] - e[0]) <= abs(c[1] - e[1]):   # the stretch runs up/down: same x
+                    pts[i_in] = (e[0], c[1])
+                    if abs(other[0] - c[0]) < 1e-6:
+                        pts[i_in - 1 if i_in > 0 else i_in + 1] = (e[0], other[1])
+                else:                                       # across: same y
+                    pts[i_in] = (c[0], e[1])
+                    if abs(other[1] - c[1]) < 1e-6:
+                        pts[i_in - 1 if i_in > 0 else i_in + 1] = (other[0], e[1])
+        elif len(pts) == 2 and abs(a[0] - b[0]) > 1 and abs(a[1] - b[1]) > 1:
+            pts.insert(1, (b[0], a[1]))
+        return pts
+
+    def port(self, i, toward) -> tuple:
+        """(point just outside item i on its side facing `toward`, (fx, fy) of that side's middle)."""
+        cx, cy, w, h = self.boxes[i]
+        dx, dy = toward[0] - cx, toward[1] - cy
+        kind = self.kinds.get(i)
+        if kind == "vessel" and abs(dy) > h / 4:
+            dx = 0   # pipes meet a vessel or tank at its top or bottom (45% and 19% on real P&IDs)
+        if kind == "pump" and dy > 0 and abs(dx) * 2 < dy:
+            dy = 0   # never from below: a pump's pipes are on its sides or top
+        if abs(dx) * h >= abs(dy) * w:   # left or right side
+            sx = 1 if dx >= 0 else -1
+            return (cx + sx * (w / 2 + 12), cy), (1.0 if sx > 0 else 0.0, 0.5)
+        sy = 1 if dy >= 0 else -1
+        return (cx, cy + sy * (h / 2 + 12)), (0.5, 1.0 if sy > 0 else 0.0)
+
+    def path(self, points: list, ends=(None, None)) -> tuple:
+        """(corner points through the points - an end, the tees passed, the other end -, exit
+        and entry side fractions): each item end left from its side facing the way it goes."""
+        pts = list(points)
+        exit_f = entry_f = None
+        if ends[0] in self.boxes and len(pts) > 1:
+            pts[0], exit_f = self.port(ends[0], pts[1])
+        if ends[1] in self.boxes and len(pts) > 1:
+            pts[-1], entry_f = self.port(ends[1], pts[-2])
+        free = {e for e in ends if e}
+        out = [pts[0]]
+        for a, b in zip(pts, pts[1:]):
+            leg = self.route(a, b, free=())
+            if leg is None:
+                leg = self.route(a, b, free=free) or [a, (b[0], a[1]), b]
+            out += leg[1:]
+        return out, exit_f, entry_f
+
+
+def _routed_line(cid, style, sid, tid, pa, pb, router, free) -> str:
+    """An instrument or signal line between two items, routed around the others when there is
+    a router (else draw.io's own orthogonal routing)."""
+    if router is not None:
+        pts, ef, nf = router.path([pa, pb], ends=free)
+        for f_, side in ((ef, "exit"), (nf, "entry")):
+            if f_:
+                style += f"{side}X={f_[0]};{side}Y={f_[1]};{side}Dx=0;{side}Dy=0;{side}Perimeter=0;"
+    else:
+        pts = None
+    if pts is None:
+        return (f'<mxCell id="{cid}" style="{style}edgeStyle=orthogonalEdgeStyle;" edge="1" parent="1" source="{sid}" '
+                f'target="{tid}"><mxGeometry relative="1" as="geometry"/></mxCell>')
+    arr = ('<Array as="points">' + "".join(f'<mxPoint x="{x:.1f}" y="{y:.1f}"/>' for x, y in pts) + "</Array>") if pts else ""
+    return (f'<mxCell id="{cid}" style="{style}edgeStyle=none;" edge="1" parent="1" source="{sid}" target="{tid}">'
+            f'<mxGeometry relative="1" as="geometry">{arr}</mxGeometry></mxCell>')
+
+
 def _nearest_on(path: list, p) -> tuple:
     """The point of a polyline nearest p."""
     best = None
@@ -469,12 +686,53 @@ def drawn(xml: bytes, plant: dict) -> dict | None:
     return out
 
 
+def layout_score(drawio: str) -> float:
+    """How readable a laid-out drawing is (lower is better): crossings, bends and length of
+    its lines, and a sheet far from landscape - what makes a hand-drawn P&ID easy to follow."""
+    import re as _re
+    centre = {m.group(1): (float(m.group(2)) + float(m.group(4)) / 2, float(m.group(3)) + float(m.group(5)) / 2)
+              for m in _re.finditer(r'<object id="(d\d+)"[^>]*>.*?<mxGeometry x="([-\d.]+)" y="([-\d.]+)" '
+                                    r'width="([\d.]+)" height="([\d.]+)"', drawio)}
+    paths = []
+    for m in _re.finditer(r'edge="1" parent="1"([^>]*)>(.*?)</mxCell>', drawio):
+        ends = dict(_re.findall(r'(source|target)="(\w+)"', m.group(1)))
+        pts = [(float(a), float(b)) for a, b in _re.findall(r'<mxPoint x="([-\d.]+)" y="([-\d.]+)"', m.group(2))]
+        path = ([centre[ends["source"]]] if ends.get("source") in centre else []) + pts + \
+               ([centre[ends["target"]]] if ends.get("target") in centre else [])
+        if len(path) >= 2:
+            paths.append(path)
+    segs = [(a, b) for p in paths for a, b in zip(p, p[1:])]
+    length = sum(math.dist(a, b) for a, b in segs)
+    bends = sum(max(0, len(p) - 2) for p in paths)
+    def cross(s1, s2):
+        (a, b), (c, d) = s1, s2
+        o = lambda p, q, r: (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+        return o(a, b, c) * o(a, b, d) < 0 and o(c, d, a) * o(c, d, b) < 0
+    crossings = sum(1 for i in range(len(segs)) for j in range(i + 1, len(segs)) if cross(segs[i], segs[j]))
+    xs = [x for p in paths for x, _ in p] or [0]
+    ys = [y for p in paths for _, y in p] or [0]
+    w, h = max(xs) - min(xs) + 1, max(ys) - min(ys) + 1
+    shape = abs(math.log((w / h) / 1.41))   # an A-format sheet, landscape
+    return crossings * 40 + bends * 15 + length / 20 + shape * 400
+
+
 def dexpi_to_drawio(xml: bytes, title: str = "from DEXPI") -> tuple[str, dict]:
     """(draw.io XML, report) for DEXPI file `xml`: drawn as its own drawing has it when it has
-    one, else laid out from the plant data."""
+    one, else laid out from the plant data - both ways of handling recycle loops tried, the
+    more readable one kept (layout_score)."""
     plant = read_plant(xml)
+    if drawn(xml, plant) is None:
+        tries = [_to_drawio(xml, title, plant, loops) for loops in ("order", "cut")]
+        best = min(tries, key=lambda t: layout_score(t[0]))
+        best[1]["layout"] = {"loops": "order" if best is tries[0] else "cut",
+                             "scores": [round(layout_score(t[0])) for t in tries]}
+        return best
+    return _to_drawio(xml, title, plant, "order")
+
+
+def _to_drawio(xml: bytes, title: str, plant: dict, loops: str) -> tuple[str, dict]:
     items = plant["items"]
-    xy = layout(plant)
+    xy = layout(plant, loops)
     own = drawn(xml, plant)
     if own:
         # where the drawing puts things; a tee, where its pipes' centre lines meet
@@ -513,6 +771,7 @@ def dexpi_to_drawio(xml: bytes, title: str = "from DEXPI") -> tuple[str, dict]:
                     xy[i] = (sum(p[0] for p in anchors) / len(anchors), sum(p[1] for p in anchors) / len(anchors))
     cells = ['<mxCell id="0"/>', '<mxCell id="1" parent="0"/>']
     ids = {}
+    sizes = {}
     streams = defaultdict(int)
     for k, (i, obj) in enumerate(items.items()):
         if i not in xy or type(obj).__name__ == "PipeTee":   # a tee: where the pipes meet (below)
@@ -539,6 +798,7 @@ def dexpi_to_drawio(xml: bytes, title: str = "from DEXPI") -> tuple[str, dict]:
         if own and i in own["size"]:
             w, h = own["size"][i]
         x, y = xy[i]
+        sizes[i] = (w, h)
         cid = f"d{k}"
         ids[i] = cid
         data = {"label": label, "dexpi_class": cls, "dexpi_auto": "0", "notes": "from the DEXPI file"}
@@ -599,7 +859,15 @@ def dexpi_to_drawio(xml: bytes, title: str = "from DEXPI") -> tuple[str, dict]:
             if forward * 2 < len(ks):
                 seq, ks = seq[::-1], ks[::-1]
             runs.append((seq, ks))
+    # long pipes first (before the runs get their ids): they get the straight lanes
+    runs.sort(key=lambda r: -sum(math.dist(xy[a], xy[b]) for a, b in zip(r[0], r[0][1:]) if a in xy and b in xy))
     through = {t: f"p{k0}" for k0, (seq, _ks) in enumerate(runs) for t in seq[1:-1]}   # tee -> its run
+    def kind_of(i):
+        c = type(items[i]).__name__
+        return ("vessel" if any(w in c for w in ("Vessel", "Tank", "Column", "Silo")) else
+                "pump" if "Pump" in c or "Compressor" in c else "")
+    router = None if own else Router({i: (*xy[i], *sizes[i]) for i in sizes if i in xy},
+                                     {i: kind_of(i) for i in sizes if i in items})
     run_path = {}   # run id -> its drawn path (for lines that end on it)
     run_of_seg = {}
     for k0, (seq, ks) in enumerate(runs):
@@ -650,7 +918,20 @@ def dexpi_to_drawio(xml: bytes, title: str = "from DEXPI") -> tuple[str, dict]:
                         fx = min(max((p_end[0] - (cx - w / 2)) / w, 0.0), 1.0)
                         fy = min(max((p_end[1] - (cy - h / 2)) / h, 0.0), 1.0)
                         style += f"{side}X={fx:.4f};{side}Y={fy:.4f};{side}Dx=0;{side}Dy=0;{side}Perimeter=0;"
-        if "edgeStyle=orthogonalEdgeStyle" in style:
+        if "edgeStyle=orthogonalEdgeStyle" in style and router is not None and src in xy and tgt in xy:
+            # around the symbols, not through them (the two it joins excepted)
+            full, ef, nf = router.path([xy[src]] + list(pts) + [xy[tgt]],
+                                       ends=(src if src in ids else None, tgt if tgt in ids else None))
+            pts = full if src not in tees and tgt not in tees else full[1:] if src in tees and tgt not in tees else \
+                full[:-1] if tgt in tees and src not in tees else full[1:-1]
+            if src in ids:
+                pts = full[:]   # (its port is a waypoint; the line leaves the pinned side)
+            style = style.replace("edgeStyle=orthogonalEdgeStyle;", "edgeStyle=none;")
+            pts = [q for q in pts if not (src in tees and q == xy[src]) and not (tgt in tees and q == xy[tgt])]
+            for f_, side in ((ef, "exit"), (nf, "entry")):
+                if f_:
+                    style += f"{side}X={f_[0]};{side}Y={f_[1]};{side}Dx=0;{side}Dy=0;{side}Perimeter=0;"
+        elif "edgeStyle=orthogonalEdgeStyle" in style:
             pts = _square_ends(pts, src, tgt, xy, tees)
         run_path[f"p{k0}"] = [xy[n] for n in (src,) if n in xy] + list(pts) + [xy[n] for n in (tgt,) if n in xy]
         if pts:
@@ -681,8 +962,8 @@ def dexpi_to_drawio(xml: bytes, title: str = "from DEXPI") -> tuple[str, dict]:
                              f'<Array as="points"><mxPoint x="{ix:.1f}" y="{y:.1f}"/></Array></mxGeometry></mxCell></object>')
             continue
         if inst in ids and at in ids:
-            cells.append(f'<mxCell id="m{k}" style="endArrow=none;html=1;rounded=0;edgeStyle=orthogonalEdgeStyle;" edge="1" '
-                         f'parent="1" source="{ids[inst]}" target="{ids[at]}"><mxGeometry relative="1" as="geometry"/></mxCell>')
+            cells.append(_routed_line(f"m{k}", "endArrow=none;html=1;rounded=0;", ids[inst], ids[at], xy[inst], xy[at],
+                                      router, (inst, at)))
         elif inst in ids and at in through:   # measuring on the pipe where a tee was: onto that pipe
             pid = through[at]
             x, y = _nearest_on(run_path.get(pid) or [tee_pt(at)], xy[inst])
@@ -692,9 +973,13 @@ def dexpi_to_drawio(xml: bytes, title: str = "from DEXPI") -> tuple[str, dict]:
                          f'<mxGeometry relative="1" as="geometry"><mxPoint x="{x:.1f}" y="{y:.1f}" as="targetPoint"/>'
                          f'<Array as="points"><mxPoint x="{ix:.1f}" y="{y:.1f}"/></Array></mxGeometry></mxCell></object>')
     for k, (a, b) in enumerate(plant["signals"]):
+        if isinstance(b, tuple) or isinstance(a, tuple):
+            # acting on a pipe, not a valve: the draw.io route reads a line onto a pipe as a
+            # measuring tap, so it is left out of the drawing (it stays in the plant data)
+            continue
         if a in ids and b in ids:
-            cells.append(f'<mxCell id="s{k}" style="endArrow=none;dashed=1;html=1;rounded=0;edgeStyle=orthogonalEdgeStyle;" '
-                         f'edge="1" parent="1" source="{ids[a]}" target="{ids[b]}"><mxGeometry relative="1" as="geometry"/></mxCell>')
+            cells.append(_routed_line(f"s{k}", "endArrow=none;dashed=1;html=1;rounded=0;", ids[a], ids[b], xy[a], xy[b],
+                                      router, (a, b)))
             n_sig += 1
     body = "".join(cells)
     xml_out = (f'<mxfile><diagram name={quoteattr(title)} id="dexpi"><mxGraphModel dx="0" dy="0" grid="1" gridSize="10" '
