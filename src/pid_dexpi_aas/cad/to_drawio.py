@@ -427,6 +427,7 @@ def read_symbols(doc) -> tuple[list[Item], list, list]:
     # an open outline (three sides, a U) with an equipment name inside: equipment too - a drip
     # tray (lekbak) or bund under a tank; pipes end on its drawn sides, not its whole box
     taken = {f[0] for it in items for f in [[it.tag]]}
+    eq_layers = {it.ents[0].dxf.layer for it in items if it.kind == "equipment" and it.id.startswith("q")}
     for k, pl in enumerate(msp.query("LWPOLYLINE")):
         if pl.closed:
             continue
@@ -434,11 +435,17 @@ def read_symbols(doc) -> tuple[list[Item], list, list]:
         if len(pts) < 4 or math.dist(pts[0], pts[-1]) < 1:
             continue
         box = (min(p[0] for p in pts), min(p[1] for p in pts), max(p[0] for p in pts), max(p[1] for p in pts))
-        if box[2] - box[0] < 10 or box[3] - box[1] < 5 or (box[2] - box[0]) > 0.25 * W:
+        w, h = box[2] - box[0], box[3] - box[1]
+        if max(w, h) < 10 or min(w, h) < 4 or w > 0.25 * W:
             continue
         names = [f for (x, y, f) in labels if _inside((x, y), box, 6) and f[0] not in taken
                  and not re.search(r"leiding|line", f[0], re.I)]
-        if len(names) != 1:
+        if len(names) > 1 or (not names and pl.dxf.layer not in eq_layers):
+            continue
+        if not names:   # unnamed, on the layer the equipment outlines are drawn on (a level standpipe)
+            items.append(Item(f"o{k}", "equipment", box, cls="CustomEquipment", ents=[pl], outline=pts,
+                              why="an open outline on the equipment layer, not named: please name it",
+                              future=_is_future(doc, [pl])))
             continue
         tag = names[0][0]
         cls = "CustomVessel" if re.search(r"lekbak|drip|bund|opvang|tray", tag, re.I) else (classify_tag(tag)[1] or "CustomEquipment")
@@ -563,10 +570,13 @@ def read_lines(doc, items: list[Item]) -> list[dict]:
     """Line pieces: [{"pts": [(x, y), ...], "dashed": bool}], without decoration and internals."""
     msp = doc.modelspace()
     layer_lt = {l.dxf.name: (l.dxf.linetype or "") for l in doc.layers}
-    equipment = [it.box for it in items if it.kind == "equipment"]
+    equipment = [it.box for it in items if it.kind == "equipment" and not it.outline]
+    outlined = {it.ents[0].dxf.handle for it in items if it.outline}
     out = []
     inner = [e for it in items for e in it.lines]   # piping drawn inside assembly blocks
     for e in list(msp.query("LINE LWPOLYLINE")) + inner:
+        if e.dxftype() == "LWPOLYLINE" and e.dxf.get("handle") in outlined:
+            continue  # an open outline read as equipment (read_symbols)
         if e.dxftype() == "LINE":
             pts = [(e.dxf.start.x, e.dxf.start.y), (e.dxf.end.x, e.dxf.end.y)]
         else:
@@ -584,7 +594,44 @@ def read_lines(doc, items: list[Item]) -> list[dict]:
             continue  # inside an equipment outline: its internals
         dashed, grey = _look(doc, e)
         # dashed and grey: a planned / out-of-service pipe; dashed in colour: a signal line
-        out.append({"pts": pts, "dashed": dashed and not grey, "future": dashed and grey})
+        out.append({"pts": pts, "dashed": dashed and not grey, "future": dashed and grey,
+                    "layer": e.dxf.layer, "ent": e})
+    # a nozzle drawn as short lines on the equipment's own layer against its outline (stubs and
+    # a flange plate), touching no other symbol, is part of the equipment's drawing: a pipe that
+    # ends on it ends on the equipment
+    others = [it for it in items if it.kind != "equipment"]
+    for it in items:
+        if it.kind != "equipment" or not it.ents or it.ents[0].dxftype() != "LWPOLYLINE":
+            continue
+        lay = it.ents[0].dxf.layer
+        length = lambda pc: sum(math.dist(a, b) for a, b in zip(pc["pts"], pc["pts"][1:]))
+        near = [pc for pc in out if pc["layer"] == lay and length(pc) < 15
+                and all(_dist_to_box(p, it.box) <= 8 for p in pc["pts"])
+                and not all(_inside(p, it.box) for p in pc["pts"])]
+        # within a nozzle a flange pair is drawn with a small gap (2-3 mm) between its plates
+        touching = lambda pc, c: any(_seg_dist(q, a, b) <= 3.0 for q in (pc["pts"][0], pc["pts"][-1])
+                                     for a, b in zip(c["pts"], c["pts"][1:]))
+        seeds = [pc for pc in near if any(_dist_to_box(q, it.box) <= SNAP for q in (pc["pts"][0], pc["pts"][-1]))]
+        done = []
+        for seed in seeds:   # each nozzle on its own: the stubs and plate connected to one stub
+            if any(seed in c for c in done):
+                continue
+            cluster, grown = [seed], True
+            while grown:
+                grown = False
+                for pc in near:
+                    if pc not in cluster and any(touching(pc, c) or touching(c, pc) for c in cluster):
+                        cluster.append(pc)
+                        grown = True
+            done.append(cluster)
+            if any(_dist_to_box(q, o.box) <= ATTACH for pc in cluster for q in pc["pts"] for o in others):
+                continue   # a stub to a flange or valve: a pipe of its own
+            for pc in cluster:
+                if pc in out:
+                    out.remove(pc)
+                it.ents.append(pc["ent"])
+                xs, ys = [q[0] for q in pc["pts"]], [q[1] for q in pc["pts"]]
+                it.box = (min(it.box[0], *xs), min(it.box[1], *ys), max(it.box[2], *xs), max(it.box[3], *ys))
     return out
 
 
@@ -627,7 +674,9 @@ def join_pieces(pieces: list[dict]) -> list[dict]:
 def attach(chains: list[dict], items: list[Item]) -> None:
     """A chain end within ATTACH mm of a symbol's outline is on that symbol (the nearest)."""
     def dist(p, it):
-        if it.outline:   # an open outline: its drawn sides only
+        if it.outline:   # an open outline: its drawn sides, or inside it (a dip pipe), after others
+            if _inside(p, it.box):
+                return 0.01
             return min(_seg_dist(p, a, b) for a, b in zip(it.outline, it.outline[1:]))
         if it.kind != "unit":
             return _dist_to_box(p, it.box)
@@ -1347,5 +1396,7 @@ def dxf_to_drawio(doc, title: str = "drawing", legend: dict | None = None) -> tu
               "units": [it.tag for it in items if it.kind == "unit"], "future": sum(it.future for it in items),
               "tables": sorted(tables), "line_numbers": line_numbers, "taps_added": taps,
               "legend": legend_rows,
-              "frames": len(frames), "unrecognised": sorted({it.tag or it.block for it in items if it.cls})}
+              "frames": len(frames), "unrecognised": sorted({it.tag or it.block or it.id for it in items
+                                       if it.cls in ("CustomPipeFitting", "CustomPipingComponent")
+                                       or (it.cls == "CustomEquipment" and not it.tag)})}
     return xml, report
