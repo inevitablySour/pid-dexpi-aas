@@ -202,6 +202,12 @@ def find_junctions(edges, routes: dict[str, Route], tol: float = 8.0, gap: float
                 loose.append((e.id, end, stored or (r[0] if end == 0 else r[-1]), _out_dir(r, end)))
     joins: dict[tuple[str, int], str] = {}
     straight_through = set()
+    # an end attached to a line in the file (parser._ends_on_lines): on that line, no guessing
+    on_line = {(e.id, end): (e.data or {}).get(f"_on_line_{end}") for e in live for end in (0, 1)}
+    for (eid, end), line in on_line.items():
+        if line and line in routes:
+            joins[(eid, end)] = line
+    loose = [lo for lo in loose if (lo[0], lo[1]) not in joins]
     # 0. A pipe drawn with a GAP where it crosses another line (a "line jump"): two loose
     #    ends facing each other on one straight line, up to `gap` apart. LightUp draws the
     #    GV101/GV102 drops into V101 this way across the XV101-XV102 line; without this the

@@ -173,9 +173,10 @@ def read_plant(xml: bytes) -> dict:
         for g in pif.processSignalGeneratingFunctions or []:
             loc = getattr(g, "sensingLocation", None)
             if loc is not None:
+                if hasattr(loc, "connections"):   # measuring on a pipe segment: onto that pipe
+                    measure.append((pif.id, ("segment", id(loc), node((loc.items or [None])[0]))))
+                    continue
                 at = node(loc)
-                if at not in items and hasattr(loc, "items"):   # a segment: its first item
-                    at = node((loc.items or [None])[0])
                 if at in items or at in owner.values():
                     measure.append((pif.id, at))
         for f in pif.signalConveyingFunctions or []:
@@ -186,14 +187,18 @@ def read_plant(xml: bytes) -> dict:
                     ids.append(None)
                 elif type(o).__name__ == "ProcessSignalGeneratingFunction":
                     ids.append(None)   # the measuring line: drawn from what it measures
+                elif type(o).__name__ == "ActuatingFunction":   # acts on a valve: the line goes to it
+                    loc = getattr(o, "actuatingLocation", None)
+                    ids.append(node(loc) if loc is not None else None)
                 else:
                     ids.append(node(o))
             if ids[0] and ids[1] and ids[0] != ids[1]:
                 signals.append((ids[0], ids[1]))
         for af in pif.actuatingFunctions or []:
-            for sysobj in getattr(af, "systems", None) or []:
-                for comp in getattr(sysobj, "operatedValves", None) or []:
-                    signals.append((pif.id, node(comp)))
+            loc = getattr(af, "actuatingLocation", None)
+            reached = any(getattr(f, "target", None) is af for f in pif.signalConveyingFunctions or [])
+            if loc is not None and not reached:
+                signals.append((pif.id, node(loc)))
     return {"items": items, "pipes": pipes, "measure": measure, "signals": signals, "model": model,
             "extra": extra}
 
@@ -268,7 +273,7 @@ def layout(plant: dict) -> dict:
     # instruments: above what they measure, stacked; one fed by an instrument, above that one
     anchor = {}
     for inst, at in plant["measure"]:
-        anchor.setdefault(inst, at)
+        anchor.setdefault(inst, at[2] if isinstance(at, tuple) else at)
     for a, b in plant["signals"]:
         for i, j in ((b, a), (a, b)):
             if i in items and is_inst(i) and i not in anchor and j in items:
@@ -368,44 +373,38 @@ def dexpi_to_drawio(xml: bytes, title: str = "from DEXPI") -> tuple[str, dict]:
         pair = (ins[0], outs[0]) if ins and outs else tuple(legs[:2]) if len(legs) >= 2 else None
         if pair:
             partner[(pair[0], t)], partner[(pair[1], t)] = pair[1], pair[0]
-    used, line_numbers = set(), set()
+    line_numbers = set()
     tee_pt = lambda t: xy[t]
-    for k0 in range(len(pieces)):
-        if k0 in used:
-            continue
-        # walk back to the start of the run this piece is in, then along it
-        k, came = k0, None
-        for _ in range(len(pieces)):
-            a, b, _s = pieces[k]
-            back = next(((partner[(k, t)], t) for t in (a, b) if t in tees and (k, t) in partner and t != came
-                         and partner[(k, t)] not in used), None)
-            if back is None or back[0] == k0:
-                break
-            k, came = back[0], back[1]
-            if k == k0:
-                break
-        run, ends, k, came = [], [], k, came
-        # the run's first end: the end of piece k not shared with `came`
-        a, b, _s = pieces[k]
-        first = a if b == came or (came is None and not ((k, b) in partner and b in tees and (k, a) not in partner)) else b
-        if came is None and (k, first) in partner:
-            first = b if first == a else a
-        node, segs, pts = first, [], []
+    # runs: pieces joined through the tees they pass, walked from an end no run continues past
+    runs, used = [], set()
+    def walk(k, node):
+        seq, ks = [node], []
         while k is not None and k not in used:
             used.add(k)
-            a, b, seg = pieces[k]
+            a, b, _s = pieces[k]
             other = b if node == a else a
-            segs.append(seg)
-            nxt = partner.get((k, other)) if other in tees else None
-            if nxt is not None and nxt not in used:
-                pts.append(tee_pt(other))
-                node, k = other, nxt
-            else:
-                ends = (first, other)
-                k = None
-        if not ends:
-            continue
-        src, tgt = ends
+            seq.append(other)
+            ks.append(k)
+            node, k = other, (partner.get((k, other)) if other in tees else None)
+        return seq, ks
+    starts = [(k, e) for k, (a, b, _s) in enumerate(pieces) for e in (a, b)
+              if not (e in tees and (k, e) in partner)]
+    for k, e in starts + [(k, pieces[k][0]) for k in range(len(pieces))]:
+        if k not in used:
+            seq, ks = walk(k, e)
+            # the way most of its pieces flow (source -> target)
+            forward = sum(1 for i, kk in enumerate(ks) if pieces[kk][0] == seq[i])
+            if forward * 2 < len(ks):
+                seq, ks = seq[::-1], ks[::-1]
+            runs.append((seq, ks))
+    through = {t: f"p{k0}" for k0, (seq, _ks) in enumerate(runs) for t in seq[1:-1]}   # tee -> its run
+    run_of_seg = {}
+    for k0, (seq, ks) in enumerate(runs):
+        for kk in ks:
+            run_of_seg.setdefault(id(pieces[kk][2]), (f"p{k0}", seq))
+    for k0, (seq, ks) in enumerate(runs):
+        src, tgt, pts = seq[0], seq[-1], [tee_pt(t) for t in seq[1:-1]]
+        segs = [pieces[kk][2] for kk in ks]
         seg = segs[0]
         flow = getattr(seg, "flowDirection", None)
         arrow = ("endArrow=block;endFill=1;endSize=5;startArrow=block;startFill=1;startSize=5;" if flow == Flow.DualFlowPipingNetworkSegment
@@ -419,7 +418,9 @@ def dexpi_to_drawio(xml: bytes, title: str = "from DEXPI") -> tuple[str, dict]:
         line_numbers.add(label)
         if label:
             style += "fontSize=9;labelBackgroundColor=#ffffff;"
-        terms = "".join(f' {side}="{ids[n]}"' for side, n in (("source", src), ("target", tgt)) if n in ids)
+        # a branch ends on the pipe running through its tee: attached to that line itself
+        terms = "".join(f' {side}="{ids[n]}"' if n in ids else f' {side}="{through[n]}"' if n in through else ""
+                        for side, n in (("source", src), ("target", tgt)))
         geo = "".join(f'<mxPoint x="{tee_pt(n)[0]:.1f}" y="{tee_pt(n)[1]:.1f}" as="{side}Point"/>'
                       for side, n in (("source", src), ("target", tgt)) if n in tees)
         if pts:
@@ -428,9 +429,24 @@ def dexpi_to_drawio(xml: bytes, title: str = "from DEXPI") -> tuple[str, dict]:
                      f'<mxGeometry relative="1" as="geometry">{geo}</mxGeometry></mxCell></object>')
         n_pipes += 1
     for k, (inst, at) in enumerate(plant["measure"]):
+        if isinstance(at, tuple):   # on a pipe segment: the line attached to that pipe
+            run = run_of_seg.get(at[1])
+            if inst in ids and run:
+                pid, seq = run
+                pts = [xy[n] for n in seq if n in xy]
+                x, y = ((pts[0][0] + pts[1][0]) / 2, (pts[0][1] + pts[1][1]) / 2) if len(pts) > 1 else pts[0]
+                cells.append(f'<mxCell id="m{k}" style="endArrow=none;html=1;rounded=0;edgeStyle=orthogonalEdgeStyle;" '
+                             f'edge="1" parent="1" source="{ids[inst]}" target="{pid}"><mxGeometry relative="1" as="geometry">'
+                             f'<mxPoint x="{x:.1f}" y="{y:.1f}" as="targetPoint"/></mxGeometry></mxCell>')
+            continue
         if inst in ids and at in ids:
             cells.append(f'<mxCell id="m{k}" style="endArrow=none;html=1;rounded=0;edgeStyle=orthogonalEdgeStyle;" edge="1" '
                          f'parent="1" source="{ids[inst]}" target="{ids[at]}"><mxGeometry relative="1" as="geometry"/></mxCell>')
+        elif inst in ids and at in through:   # measuring on the pipe where a tee was: onto that pipe
+            x, y = tee_pt(at)
+            cells.append(f'<mxCell id="m{k}" style="endArrow=none;html=1;rounded=0;edgeStyle=orthogonalEdgeStyle;" edge="1" '
+                         f'parent="1" source="{ids[inst]}" target="{through[at]}"><mxGeometry relative="1" as="geometry">'
+                         f'<mxPoint x="{x:.1f}" y="{y:.1f}" as="targetPoint"/></mxGeometry></mxCell>')
     for k, (a, b) in enumerate(plant["signals"]):
         if a in ids and b in ids:
             cells.append(f'<mxCell id="s{k}" style="endArrow=none;dashed=1;html=1;rounded=0;edgeStyle=orthogonalEdgeStyle;" '

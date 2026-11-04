@@ -668,43 +668,63 @@ def _build_segments(build_result, links, system) -> None:
             seg_items.insert(0, start); src = None
         if end is not None and is_component(end) and len(adj.get(id(end), [])) == 1:
             seg_items.append(end); tgt = None
-        # A connector that is also an item must be the first (source) / last (target) item;
-        # anything else (a loop back onto an item) is left unconnected on that end.
-        if src is not None and any(src is i for i in seg_items) and seg_items[0] is not src:
-            src = None
+        # A connector that is also an item must be the first (source) / last (target) item. A
+        # loop back onto one of the segment's own items (a ring of pipes) is split in two: the
+        # first half ends on the second's first item, the second ends on the looped item - so
+        # the ring keeps every link (a segment may end on an item of another segment).
+        parts = [(seg_items, src, tgt)]
         if tgt is not None and any(tgt is i for i in seg_items) and seg_items[-1] is not tgt:
-            tgt = None
-        # pyDEXPI: one connection per gap - between items, plus one to each end that is
-        # NOT itself an item (an off-page connector end is both connector and item).
-        n_conn = len(seg_items) + 1 - (src is not None and any(src is i for i in seg_items)) \
-            - (tgt is not None and any(tgt is i for i in seg_items))
+            j = next(k for k, i in enumerate(seg_items) if i is tgt)
+            if j + 1 < len(seg_items):
+                m = (j + 1 + len(seg_items)) // 2
+                parts = [(seg_items[:m], src, seg_items[m]), (seg_items[m:], None, tgt)]
+            else:
+                parts = [(seg_items, src, None)]
+        elif src is not None and any(src is i for i in seg_items) and seg_items[0] is not src:
+            j = next(k for k, i in enumerate(seg_items) if i is src)
+            m = max(1, j // 2) if j >= 1 else 0
+            parts = ([(seg_items[m:], seg_items[m - 1], tgt), (seg_items[:m], src, None)] if m >= 1
+                     else [(seg_items, None, tgt)])
         edge_ids = [e for i in seg_links for e in links[i].edge_ids]
-        try:
-            segment = pt.construct_new_segment(
-                segment_items=seg_items,
-                segment_connections=[piping.PipingConnection() for _ in range(max(n_conn, 1))],
-                source_connector_item=src, target_connector_item=tgt,
-                connectivity_convention=pt.PipingConnectionConvention.USE_ITEMS,
-            )
-        except Exception as exc:  # pyDEXPI raises DexpiConnectionException & friends
+        built = []
+        for seg_items, src, tgt in parts:
+            if src is not None and any(src is i for i in seg_items) and seg_items[0] is not src:
+                src = None
+            if tgt is not None and any(tgt is i for i in seg_items) and seg_items[-1] is not tgt:
+                tgt = None
+            # pyDEXPI: one connection per gap - between items, plus one to each end that is
+            # NOT itself an item (an off-page connector end is both connector and item).
+            n_conn = len(seg_items) + 1 - (src is not None and any(src is i for i in seg_items)) \
+                - (tgt is not None and any(tgt is i for i in seg_items))
             try:
-                segment = _segment_by_hand(seg_items, src, tgt)
-            except Exception:
-                for eid in dict.fromkeys(edge_ids):
-                    build_result.records.append(BuildRecord(eid, "edge", "skipped", None, f"piping_toolkit error: {exc}"))
-                continue
-        # DEXPI's flow classification: a two-way pipe on the drawing (arrowheads at both ends) is
-        # "dual flow"; a pipe with a known direction "single flow"; unknown stays unset
-        from pydexpi.dexpi_classes.pydantic_classes import PipingNetworkSegmentFlowClassification as FlowClass
-        if any(links[i].basis == "both" for i in seg_links):
-            segment.flowDirection, basis = FlowClass.DualFlowPipingNetworkSegment, "both ways (two-way pipe)"
-        elif any(links[i].dir for i in seg_links):
-            segment.flowDirection = FlowClass.SingleFlowPipingNetworkSegment
-        segment.customAttributes = list(segment.customAttributes or []) + [CustomStringAttribute(
-            attributeName="FlowDirectionBasis", attributeURI="urn:pid-dexpi-aas:flow-direction-basis", value=basis)]
-        system.segments.append(segment)
-        for eid in dict.fromkeys(edge_ids):
-            build_result.edge_segments.setdefault(eid, []).append(segment)
+                segment = pt.construct_new_segment(
+                    segment_items=seg_items,
+                    segment_connections=[piping.PipingConnection() for _ in range(max(n_conn, 1))],
+                    source_connector_item=src, target_connector_item=tgt,
+                    connectivity_convention=pt.PipingConnectionConvention.USE_ITEMS,
+                )
+            except Exception as exc:  # pyDEXPI raises DexpiConnectionException & friends
+                try:
+                    segment = _segment_by_hand(seg_items, src, tgt)
+                except Exception:
+                    for eid in dict.fromkeys(edge_ids):
+                        build_result.records.append(BuildRecord(eid, "edge", "skipped", None, f"piping_toolkit error: {exc}"))
+                    continue
+            # DEXPI's flow classification: a two-way pipe on the drawing (arrowheads at both ends) is
+            # "dual flow"; a pipe with a known direction "single flow"; unknown stays unset
+            from pydexpi.dexpi_classes.pydantic_classes import PipingNetworkSegmentFlowClassification as FlowClass
+            if any(links[i].basis == "both" for i in seg_links):
+                segment.flowDirection, basis = FlowClass.DualFlowPipingNetworkSegment, "both ways (two-way pipe)"
+            elif any(links[i].dir for i in seg_links):
+                segment.flowDirection = FlowClass.SingleFlowPipingNetworkSegment
+            segment.customAttributes = list(segment.customAttributes or []) + [CustomStringAttribute(
+                attributeName="FlowDirectionBasis", attributeURI="urn:pid-dexpi-aas:flow-direction-basis", value=basis)]
+            system.segments.append(segment)
+            built.append(segment)
+            for eid in dict.fromkeys(edge_ids):
+                build_result.edge_segments.setdefault(eid, []).append(segment)
+        if not built:
+            continue
         for i in seg_links:
             ln = links[i]
             if ln.edge is not None:
