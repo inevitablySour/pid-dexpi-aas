@@ -64,6 +64,7 @@ from pid_dexpi_aas.review import (  # noqa: E402
 )
 from pid_dexpi_aas.dexpi.serialize import save_and_verify  # noqa: E402
 from pid_dexpi_aas.dexpi.graphics import add_connector_references, add_drawing  # noqa: E402
+from pid_dexpi_aas.render.dexpi_svg import dexpi_svg  # noqa: E402
 from pid_dexpi_aas.dexpi.proteus_patch import PatchedProteusSerializer  # noqa: E402
 from pid_dexpi_aas.dexpi.validate_by_counting import report_for_diagram  # noqa: E402
 
@@ -257,6 +258,34 @@ def cad_to_drawio(data: bytes, name: str, legend_json: str = "") -> tuple[str, d
 # Symbol legends, one per company: {block name: DEXPI type or a special choice}, confirmed by a
 # person and reused on that company's next drawings. Only symbol names and types - no drawing.
 LEGENDS = ROOT / "data" / "legends"
+
+
+def svg_viewer(svg: str, height: int = 560) -> None:
+    """An SVG drawing in a box that zooms (scroll, or the buttons) and pans (drag); double-click
+    fits it again. Vector, so it stays sharp at any zoom - unlike a PNG."""
+    import streamlit.components.v1 as components
+    page = """<div id="v" style="position:relative;height:HEIGHTpx;overflow:hidden;border:1px solid #d0d4da;
+      border-radius:6px;background:#fff;cursor:grab">
+      <div id="c" style="transform-origin:0 0;position:absolute;left:0;top:0">SVG_HERE</div>
+      <div style="position:absolute;right:8px;top:8px;display:flex;gap:4px">
+        <button onclick="z(1.4)">+</button><button onclick="z(1/1.4)">&minus;</button><button onclick="fit()">Fit</button></div>
+    </div>
+    <style>button{font:14px sans-serif;width:34px;height:28px;border:1px solid #c4c8ce;border-radius:4px;background:#f7f8fa;cursor:pointer}</style>
+    <script>
+    const v=document.getElementById('v'), c=document.getElementById('c'), g=c.querySelector('svg');
+    let s=1,x=0,y=0,drag=null;
+    const vb=g.viewBox.baseVal, W=vb.width, H=vb.height;
+    g.setAttribute('width', W*4); g.setAttribute('height', H*4);   // 4 px per mm at zoom 1
+    const put=()=>{c.style.transform=`translate(${x}px,${y}px) scale(${s})`;};
+    function fit(){ s=Math.min(v.clientWidth/(W*4), v.clientHeight/(H*4)); x=(v.clientWidth-W*4*s)/2; y=(v.clientHeight-H*4*s)/2; put(); }
+    function z(k,px,py){ px=px??v.clientWidth/2; py=py??v.clientHeight/2; x=px-(px-x)*k; y=py-(py-y)*k; s*=k; put(); }
+    v.addEventListener('wheel',e=>{e.preventDefault(); const r=v.getBoundingClientRect(); z(e.deltaY<0?1.15:1/1.15,e.clientX-r.left,e.clientY-r.top);},{passive:false});
+    v.addEventListener('mousedown',e=>{drag=[e.clientX-x,e.clientY-y]; v.style.cursor='grabbing';});
+    window.addEventListener('mouseup',()=>{drag=null; v.style.cursor='grab';});
+    window.addEventListener('mousemove',e=>{if(drag){x=e.clientX-drag[0]; y=e.clientY-drag[1]; put();}});
+    v.addEventListener('dblclick',fit); fit();
+    </script>""".replace("HEIGHT", str(height)).replace("SVG_HERE", svg)
+    components.html(page, height=height + 4)
 
 
 def load_legends() -> dict:
@@ -2562,11 +2591,17 @@ if build_clicked:
         st.caption("After: the drawing in the DEXPI file (the download with drawing), with the drawing's own "
                    "symbols at their positions, the pipes and signal lines (dashed) along their routes, and the tags.")
         try:
-            after = render_after_png(diagram, result, source=review.drawio, xml=drawn_bytes)
-            if after is None:
-                st.info(CAIRO_MISSING)
+            after_svg = dexpi_svg(drawn_bytes) if drawn_bytes else None
+            if after_svg:   # vector: sharp at any zoom (scroll to zoom, drag to move)
+                svg_viewer(after_svg, height=560)
+                st.download_button("Download this drawing (.svg)", after_svg.encode(), file_name=f"{stem}_after.svg",
+                                   mime="image/svg+xml", help="Full quality, opens in any browser, Inkscape or Illustrator.")
             else:
-                st.image(Image.open(io.BytesIO(after)), width="stretch")
+                after = render_after_png(diagram, result, source=review.drawio, xml=drawn_bytes, width=3200)
+                if after is None:
+                    st.info(CAIRO_MISSING)
+                else:
+                    st.image(Image.open(io.BytesIO(after)), width="stretch")
         except Exception as exc:
             st.warning(f"Could not re-draw from the DEXPI file: {exc}")
     if report.skipped_details:

@@ -321,7 +321,7 @@ def build_check_sheet(review: ReviewDiagram, result: BuildResult, mode: str,
     bws.row_dimensions[row].height = 32
     if diagram is not None:
         try:
-            after = render_after_png(diagram, result, source=review.drawio)
+            after = render_after_png(diagram, result, width=3200, source=review.drawio)
             if after is None:
                 bws.cell(row + 1, 1, CAIRO_MISSING)
             else:
