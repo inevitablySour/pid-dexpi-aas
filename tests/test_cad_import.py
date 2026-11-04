@@ -204,3 +204,82 @@ def test_a_grey_line_with_ticks_is_a_planned_signal_line():
     assert report["signal_lines"] == 1
     edge = re.search(r'<mxCell style="([^"]*)" edge="1" parent="1" source="(\w+)" target="(\w+)"', xml)
     assert edge and "dashed=1" in edge.group(1)
+
+
+def test_drawing_conventions():
+    """Heat tracing beside a pipe, valve bodies with a spring or an actuator, vents and funnels at
+    open pipe ends, two valves in one block, a drip tray drawn as an open outline, a vessel with
+    rounded heads, and the details written beside symbols (alarms, LC, a stream's drawing number,
+    the title block) - each read by the general P&ID conventions."""
+    doc = ezdxf.new()
+    doc.linetypes.add("HIDDEN", pattern=[5, 3, -2])
+    doc.layers.add("TRACING", linetype="HIDDEN")
+    msp = doc.modelspace()
+    def blk(name, draw, prompts=()):
+        b = doc.blocks.new(name)
+        draw(b)
+        for k, (tag, q) in enumerate(prompts):
+            b.add_attdef(tag, (0, -6 - 3 * k), dxfattribs={"height": 2, "prompt": q})
+    def put(name, at, **values):
+        ins = msp.add_blockref(name, at)
+        if values:
+            ins.add_auto_attribs(values)
+        return ins
+    bow = [(-3, 1.8), (-3, -1.8), (3, 1.8), (3, -1.8)]
+    blk("STREAM", lambda b: b.add_lwpolyline([(-10, -3), (8, -3), (10, 0), (8, 3), (-10, 3)], close=True),
+        [("NAME", "Omschrijving?"), ("PID", "PID nummer?")])
+    blk("SAFETY", lambda b: b.add_lwpolyline([(0, 6), (0, 5), (2, 4), (-2, 3), (0, 2), (0, 0)] + bow[::-1] + [(0, 0)]))
+    blk("CONTROL", lambda b: b.add_lwpolyline([(3, -1.8), (3, 1.8), (-3, -1.8), (-3, 1.8), (0, 0), (0, 4)]))
+    blk("VENT", lambda b: b.add_lwpolyline([(-3, 0), (0, 3), (3, 0)]))
+    blk("FUNNEL", lambda b: b.add_lwpolyline([(-3, 0), (0, -3), (3, 0)]))
+    blk("VALVE", lambda b: b.add_lwpolyline([(-4, -2), (4, 2), (4, -2), (-4, 2)], close=True), [("TAG", "Code?"), ("LOCK", "LO/LC?")])
+    blk("TWO", lambda b: (b.add_lwpolyline([(-12, 7), (-8, 13), (-8, 7), (-12, 13)], close=True),
+                          b.add_lwpolyline([(8, 7), (12, 13), (12, 7), (8, 13)], close=True),
+                          b.add_line((-10, 7), (-10, 0)), b.add_line((10, 7), (10, 0))),
+        [("A", "Code?"), ("B", "Code?")])
+    blk("BUBBLE", lambda b: b.add_ellipse((0, 0), (6, 0), 0.75), [("F", "Function Identifier"), ("L", "Loop Identifier"), ("H", "Alarm High")])
+    blk("DCS", lambda b: (b.add_ellipse((0, 0), (6, 0), 0.75), b.add_lwpolyline([(-6, -4.5), (6, -4.5), (6, 4.5), (-6, 4.5)], close=True)),
+        [("F", "Function Identifier"), ("L", "Loop Identifier")])
+    blk("LABEL", lambda b: None, [("NAME", "Apparaatnaam?")])
+    blk("SUPPLY", lambda b: b.add_lwpolyline([(-3, -2), (3, -2), (3, 2), (-3, 2)], close=True), [("C", "Code?")])
+    title = doc.blocks.new("TITLE")
+    for k, q in enumerate(["Geef tek.nummer :", "Geef titel regel 1 :", "Naam tekenaar", "Naam controleur",
+                           "Geef wijzigingsletter:", "Geef wijzigingsletter:", "Geef afdeling :"]):
+        title.add_attdef(f"T{k}", (0, -5 * k), dxfattribs={"height": 2, "prompt": q})
+    msp.add_lwpolyline([(-60, -150), (400, -150), (400, 150), (-60, 150)], close=True)   # the sheet's frame
+    put("TITLE", (300, -100), T0="PID-0042", T1="COOLING WATER", T2="A. DRAFTER", T3="-", T4="A", T5="B", T6="-")
+    # vessel with rounded heads (bulges), a nozzle on the right head
+    msp.add_lwpolyline([(0, 50, 0), (40, 50, -0.8), (40, 30, 0), (0, 30, -0.8)], format="xyb", close=True)
+    put("LABEL", (20, 40), NAME="%%UV001")
+    put("STREAM", (-40, 40), NAME="FEED", PID="0123456")
+    msp.add_line((-30, 40), (-8, 40))                                   # into the left head
+    msp.add_line((48, 40), (70, 40))                                    # out of the right head
+    put("VALVE", (74, 40), TAG="AFS001", LOCK="LC")
+    msp.add_line((78, 40), (120, 40))
+    msp.add_line((70, 38.5), (120, 38.5), dxfattribs={"layer": "TRACING"})   # its heat tracing
+    put("SUPPLY", (95, 30), C="EL")
+    msp.add_line((95, 32), (95, 38.5), dxfattribs={"layer": "TRACING"})
+    put("SAFETY", (120, 46)); msp.add_line((120, 40), (120, 44.2))     # a spring safety valve on the pipe
+    put("CONTROL", (140, 40)); msp.add_line((120, 40), (137, 40)); msp.add_line((143, 40), (160, 40))
+    put("VENT", (160, 60)); msp.add_line((160, 40), (160, 60))         # pipe up to a vent
+    put("FUNNEL", (180, 20)); msp.add_line((160, 40), (180, 40)); msp.add_line((180, 40), (180, 20))
+    put("TWO", (220, 0), A="AFS0206", B="AFS0207"); msp.add_line((200, 0), (240, 0))
+    put("BUBBLE", (100, 70), F="PT", L="001", H="LAH"); msp.add_line((100, 66.25), (100, 40))
+    put("DCS", (100, 90), F="PI", L="001")
+    msp.add_lwpolyline([(-5, 28), (-5, 20), (45, 20), (45, 28)])       # a drip tray under the vessel
+    put("LABEL", (20, 23), NAME="%%ULEKBAK")
+    xml, report = dxf_to_drawio(doc, "t")
+    assert report["title_block"] == {"drawingNumber": "PID-0042", "drawingName": "COOLING WATER",
+                                     "drafterName": "A. DRAFTER", "revisionNumber": "B"}
+    assert 'drawingNumber="PID-0042"' in xml
+    assert report["heat_traced"] >= 1 and "electrical heat tracing system" in xml and 'label="EL"' not in xml
+    assert report["signal_lines"] == 0
+    shaped = report["by_shape"]
+    assert shaped.get("SpringLoadedGlobeSafetyValve") == 1 and shaped.get("OperatedValve") == 1
+    assert shaped.get("VentilationDevice") == 1 and shaped.get("Funnel") == 1
+    assert 'label="AFS0206"' in xml and 'label="AFS0207"' in xml
+    assert re.search(r'label="LEKBAK" dexpi_class="CustomVessel"', xml)
+    assert "locked closed" in xml and "0123456" in xml and "LAH" in xml
+    assert "&quot;location&quot;: &quot;field&quot;" in xml.replace('"', "&quot;") or '"location": "field"' in xml
+    v = re.search(r'<object id="(\w+)" label="V001"', xml).group(1)
+    assert len(re.findall(rf'(?:source|target)="{v}"', xml)) == 2   # both lines end on its heads

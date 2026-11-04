@@ -23,6 +23,9 @@ from pydexpi.dexpi_classes import instrumentation as inst
 from pydexpi.dexpi_classes import piping
 from pydexpi.dexpi_classes.dexpiModel import ConceptualModel, DexpiModel
 from pydexpi.dexpi_classes.pydantic_classes import CustomStringAttribute, MetaData
+
+# the drawing's details DEXPI keeps (text fields of MetaData), e.g. from a CAD title block
+METADATA_FIELDS = {n for n, f in MetaData.model_fields.items() if f.annotation in (str, str | None)} - {"id", "fileName"}
 from pydexpi.toolkits import piping_toolkit as pt
 
 from pid_dexpi_aas.dexpi.mapping import Category, MappingResult, map_shape
@@ -183,7 +186,8 @@ def build_shapes(
     # confirmed against installed pydexpi 1.2.0, these are exporter bugs, not our data.
     model = DexpiModel(
         conceptualModel=ConceptualModel(
-            metaData=MetaData(fileName=diagram.source_file)
+            metaData=MetaData(fileName=diagram.source_file, **{
+                k: v for k, v in getattr(diagram, "metadata", {}).items() if k in METADATA_FIELDS})
         ),
         exportDateTime=datetime.now(timezone.utc),
         originatingSystemName="pid-dexpi-aas",

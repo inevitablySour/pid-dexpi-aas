@@ -111,6 +111,9 @@ class ParsedDiagram:
     # the drawing's own lines, kept when a reviewed diagram is rebuilt from table rows
     # (review.to_dexpi), so the "after" picture can still draw each pipe as drawn
     drawn_edges: list | None = None
+    # the drawing's own details (DEXPI MetaData fields: drawingNumber, revisionNumber, ...),
+    # kept as data on draw.io's root cell (the diagram's "Edit Data")
+    metadata: dict = field(default_factory=dict)
     # plant sections drawn as frames around groups of items (sections.py)
     sections: list = field(default_factory=list)
 
@@ -148,6 +151,9 @@ def parse_drawio_xml(xml_text: str, source_file: str) -> ParsedDiagram:
     members: dict[str, list] = {}  # group id -> its shapes (Shape), each at its page position
 
     for cell, cell_id, value, data in cells:
+        if cell_id == "0" and data:
+            from pid_dexpi_aas.dexpi.build_model import METADATA_FIELDS
+            diagram.metadata = {k: v for k, v in data.items() if k in METADATA_FIELDS and v}
         if cell_id in (None, "0", "1"):
             continue  # the two mxGraph root cells carry no shape data
 

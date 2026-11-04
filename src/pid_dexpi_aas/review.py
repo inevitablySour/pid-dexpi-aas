@@ -923,6 +923,7 @@ def to_dexpi(review: ReviewDiagram) -> tuple[ParsedDiagram, BuildResult]:
                                 _TeeFlow(member_sense) if member_sense else None),
                             routes=({**(base.routes or {}), **traced} if base is not None else (traced or None)),
                             drawn_edges=list(base.edges) if base is not None else None,
+                            metadata=dict(base.metadata) if base is not None else {},
                             sections=list(base.sections) if base is not None else [])
     result = build_model(diagram, overrides, tag_overrides)
     for row, net_edges in tee_rows.items():  # a tee's rows map to its network's segments

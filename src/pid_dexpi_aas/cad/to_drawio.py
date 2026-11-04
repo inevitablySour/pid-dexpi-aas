@@ -68,6 +68,9 @@ class Item:
     future: bool = False   # drawn dashed and grey: planned or out of service, not in DEXPI by default
     section: str = ""      # the unit it is drawn inside (DEXPI plant section)
     specs: dict = field(default_factory=dict)   # {"dexpi": {...}, "custom": {...}} from a data table
+    lines: list = field(default_factory=list)   # piping drawn inside the block (an assembly's lines)
+    prompts: list = field(default_factory=list)  # [(prompt, value)]: what the CAD block asks for each text
+    outline: list = field(default_factory=list)  # an open outline's points (a drip tray): pipes end on it
 
 
 def _look(doc, e) -> tuple[bool, bool]:
@@ -97,6 +100,49 @@ def _fields(ins) -> list[str]:
     return out
 
 
+def _prompted(doc, ins) -> list:
+    """[(prompt, value)] of a block reference's texts: the question the CAD block asks for each
+    ("Pompcode?", "Leidingcode?", "Alarm High", "PID nummer?") - what that text is."""
+    blk = doc.blocks.get(ins.dxf.name)
+    asks = {a.dxf.tag: (a.dxf.get("prompt", "") or "") for a in blk.query("ATTDEF")} if blk is not None else {}
+    return [(asks.get(a.dxf.tag, ""), (a.dxf.text or "").replace("%%U", "").replace("%%u", "").strip())
+            for a in ins.attribs]
+
+
+# a title block's prompts -> DEXPI MetaData fields (Dutch and English CAD templates)
+TITLE_FIELDS = [
+    (re.compile(r"tek(ening)?\.?\s*nummer|drawing\s*(no|num)", re.I), "drawingNumber"),
+    (re.compile(r"titel|title", re.I), "drawingName"),
+    (re.compile(r"wijzigingsletter|revision", re.I), "revisionNumber"),
+    (re.compile(r"tekenaar|drawn|drafter", re.I), "drafterName"),
+    (re.compile(r"controleur|checke", re.I), "checkerName"),
+    (re.compile(r"fabriek|plant", re.I), "processPlantName"),
+    (re.compile(r"bedrijf|company", re.I), "enterpriseName"),
+    (re.compile(r"afdeling|department", re.I), "responsibleDepartmentName"),
+    (re.compile(r"project\s*n", re.I), "projectNumber"),
+]
+_PLACEHOLDER = re.compile(r"^[-#X.\s]*$|^\.\.-\.\.$|^1:X+$", re.I)
+
+
+def read_title_block(doc) -> dict:
+    """The drawing's details from its title block (a block of many prompted texts): DEXPI
+    MetaData fields. The latest revision letter filled in is the revision."""
+    meta: dict = {}
+    for ins in doc.modelspace().query("INSERT"):
+        asked = _prompted(doc, ins)
+        if len(asked) < 6:
+            continue
+        hits = [(f, v) for q, v in asked for rx, f in TITLE_FIELDS if q and rx.search(q)]
+        if len({f for f, _ in hits}) < 3:
+            continue   # an equipment data table, not a title block
+        for f, v in hits:
+            if not v or _PLACEHOLDER.match(v):
+                continue
+            if f == "revisionNumber" or f not in meta:
+                meta[f] = v
+    return meta
+
+
 def _parts(ins, depth=0) -> list:
     """A block reference's drawn geometry in drawing coordinates (nested blocks opened up),
     without its texts."""
@@ -120,6 +166,14 @@ def _parts(ins, depth=0) -> list:
     return out
 
 
+def _pl_points(pl) -> list:
+    """A polyline's points, its arc segments (bulges) flattened."""
+    if not any(b for *_, b in pl.get_points("xyb")):
+        return [(p[0], p[1]) for p in pl.get_points()]
+    from ezdxf import path as dpath
+    return [(v.x, v.y) for v in dpath.make_path(pl).flattening(0.2)]
+
+
 def _geometry_box(ins):
     """(The symbol's outline box, its parts): its drawn geometry, not its attribute texts."""
     from ezdxf import bbox
@@ -130,6 +184,76 @@ def _geometry_box(ins):
     if not ext.has_data:
         return None, []
     return (ext.extmin.x, ext.extmin.y, ext.extmax.x, ext.extmax.y), parts
+
+
+def _is_bowtie(e) -> bool:
+    return _bowtie_box(e) is not None
+
+
+def _bowtie_box(e):
+    """A valve body: two triangles tip to tip - four corners of a rectangle drawn with its two
+    end sides and a diagonal between them (a plain box never steps corner to opposite corner).
+    The body can be part of a longer stroke (a spring or stem drawn on in one go)."""
+    if e.dxftype() != "LWPOLYLINE":
+        return False
+    pts = [(p[0], p[1]) for p in e.get_points()]
+    if e.closed:
+        pts = pts + pts[:3]
+    for q in zip(pts, pts[1:], pts[2:], pts[3:]):
+        if len({(round(x, 2), round(y, 2)) for x, y in q}) != 4:
+            continue
+        c = (sum(x for x, _ in q) / 4, sum(y for _, y in q) / 4)
+        r = [math.dist(p, c) for p in q]
+        if min(r) < 0.5 or max(r) - min(r) > 0.05 * max(r):
+            continue   # not the corners of a rectangle
+        diag = 2 * r[0]
+        sides = sorted(math.dist(a, b) for i, a in enumerate(q) for b in q[i + 1:])[:4]
+        if sides[0] < 0.3 * diag:
+            continue   # a thin bar (a flange), not a body
+        steps = [math.dist(a, b) for a, b in zip(q, q[1:])]
+        if any(abs(d - diag) < 0.05 * diag for d in steps):
+            xs, ys = [x for x, _ in q], [y for _, y in q]
+            return (min(xs), min(ys), max(xs), max(ys))
+    return None
+
+
+def _split_assembly(doc, ins, k, tags) -> list:
+    """A block holding several valves (a double root valve: two tags, two valve bodies and the
+    piping between them) as one valve item per body, named by the tag written nearest it; its
+    lines go in as piping (on the first item), nested symbols as their own items."""
+    from ezdxf import bbox
+    bodies, lines, nested = [], [], []
+    for e in ins.virtual_entities():
+        if e.dxftype() == "INSERT":
+            nested.append(e)
+        elif _is_bowtie(e):
+            bodies.append(e)
+        elif e.dxftype() in ("LINE", "LWPOLYLINE"):
+            if e.dxf.get("layer", "0") == "0":
+                e.dxf.layer = ins.dxf.layer
+            lines.append(e)
+    if len(bodies) < len(tags):
+        return []
+    spots = {a.dxf.text.replace("%%U", "").strip(): (a.dxf.insert.x, a.dxf.insert.y) for a in ins.attribs}
+    out = []
+    for j, b in enumerate(bodies):
+        ext = bbox.extents([b])
+        box = (ext.extmin.x, ext.extmin.y, ext.extmax.x, ext.extmax.y)
+        c = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+        tag = min(tags, key=lambda t: math.dist(spots.get(t, c), c))
+        tags = [t for t in tags if t != tag] or [""]
+        kind, tag, body, extra, why = _classify([tag]) if tag else ("valve", "", "", [], "")
+        out.append(Item(f"b{k}_{j}", "valve", box, tag=tag, block=ins.dxf.name, ents=[b],
+                        why=f"one of {len(bodies)} valves in one block ({why})", future=_is_future(doc, [b]),
+                        style=f"valveType={body};" if body else ""))
+    for j, e in enumerate(nested):
+        parts = _parts(e)
+        ext = bbox.extents(parts) if parts else None
+        if ext is not None and ext.has_data:
+            out.append(Item(f"b{k}_n{j}", "inline", (ext.extmin.x, ext.extmin.y, ext.extmax.x, ext.extmax.y),
+                            block=e.dxf.name, why="symbol without text", ents=parts, future=_is_future(doc, parts)))
+    out[0].lines = lines
+    return out
 
 
 def _text_only(doc, ins) -> bool:
@@ -144,7 +268,8 @@ def _classify(fields: list[str]) -> tuple[str, str, str, list, str]:
     tag = fields[0]
     if _REDUCER.match(tag):
         return "reducer", tag, "", fields[1:], "size change (reducer)"
-    m = re.match(r"^([A-Z]+)-?\s*\d", tag)
+    # "LC-AFS0221": a valve tag behind a locked-position mark (details() reads the mark)
+    m = re.match(r"^(?:(?:LO|LC|CSO|CSC)[-\s]+)?([A-Z]+)-?\s*\d", tag)
     prefix = m.group(1) if m else ""
     if prefix in VALVE_WORDS:
         return "valve", tag, VALVE_WORDS[prefix], fields[1:], f"valve abbreviation {prefix}"
@@ -152,6 +277,26 @@ def _classify(fields: list[str]) -> tuple[str, str, str, list, str]:
     if kind:
         return kind, tag, "", fields[1:], f"tag prefix ({cls})"
     return "unknown", tag, "", fields[1:], "tag not recognised"
+
+
+# what a block's prompt says its text is (when the text itself is not a known tag)
+PROMPT_KINDS = [
+    (re.compile(r"pomp|pump", re.I), "equipment", "Pump"),
+    (re.compile(r"apparaat|equipment|vessel|vat\b", re.I), "equipment", ""),
+    (re.compile(r"function identifier|instrument", re.I), "instrument", ""),
+    (re.compile(r"verloop|reducer", re.I), "reducer", ""),
+    (re.compile(r"omschrijving|description|destination|bestemming", re.I), "stream", ""),
+]
+
+
+def _by_prompt(asked, kind, why):
+    for q, v in asked:
+        if not v:
+            continue
+        for rx, k, _ in PROMPT_KINDS:
+            if q and rx.search(q):
+                return k, f"the CAD block asks for it as '{q.strip()}'"
+    return kind, why
 
 
 def _within(e, box) -> bool:
@@ -222,12 +367,21 @@ def read_symbols(doc) -> tuple[list[Item], list, list]:
             items.append(Item(iid, "inline", box, block=ins.dxf.name, why="symbol without text",
                               rot=round(ins.dxf.rotation) % 360, ents=parts, future=_is_future(doc, parts)))
             continue
+        valve_tags = [f for f in fields if _classify([f])[0] == "valve"]
+        if len(valve_tags) >= 2:
+            split = _split_assembly(doc, ins, k, valve_tags)
+            if split:
+                items += split
+                continue
         if len(fields) >= 3 and not (_LETTERS.match(fields[0]) and _NUMBER.match(fields[1])):
             databoxes.append((box, fields))   # a data box beside a symbol (a safety valve's set pressure)
             continue
         kind, tag, body, extra, why = _classify(fields)
+        asked = _prompted(doc, ins)
+        if kind == "unknown":
+            kind, why = _by_prompt(asked, kind, why)
         items.append(Item(iid, kind, box, tag=tag, extra=extra, block=ins.dxf.name, why=why, rot=round(ins.dxf.rotation) % 360, ents=parts,
-                          future=_is_future(doc, parts),
+                          future=_is_future(doc, parts), prompts=asked,
                           style=f"valveType={body};" if body else ""))
     # a data box touching an untagged symbol names it: "PSV-0001 / 1-12345 / 5 BARG" on a
     # safety valve's symbol makes it PSV-0001, set at 5 bar
@@ -250,9 +404,10 @@ def read_symbols(doc) -> tuple[list[Item], list, list]:
     for k, pl in enumerate(msp.query("LWPOLYLINE")):
         if not pl.closed:
             continue
-        pts = [(p[0], p[1]) for p in pl.get_points()]
+        pts = _pl_points(pl)   # with its arcs (a vessel's heads are bulges), not only its corners
         box = (min(p[0] for p in pts), min(p[1] for p in pts), max(p[0] for p in pts), max(p[1] for p in pts))
-        inside_syms = [it for it in items if _inside(((it.box[0] + it.box[2]) / 2, (it.box[1] + it.box[3]) / 2), box)]
+        # well inside: a nozzle's flange on the outline is not "inside" it
+        inside_syms = [it for it in items if _inside(((it.box[0] + it.box[2]) / 2, (it.box[1] + it.box[3]) / 2), box, -3)]
         names = [f for (x, y, f) in labels if _inside((x, y), box)]
         if len(inside_syms) >= 2:
             frames.append(box)
@@ -269,7 +424,73 @@ def read_symbols(doc) -> tuple[list[Item], list, list]:
                 items.append(Item(f"q{k}", "equipment", box, tag=f[0], extra=f[1:], why=f"outline named {f[0]}",
                                   ents=[pl] + inner, future=_is_future(doc, [pl])))
                 break
+    # an open outline (three sides, a U) with an equipment name inside: equipment too - a drip
+    # tray (lekbak) or bund under a tank; pipes end on its drawn sides, not its whole box
+    taken = {f[0] for it in items for f in [[it.tag]]}
+    for k, pl in enumerate(msp.query("LWPOLYLINE")):
+        if pl.closed:
+            continue
+        pts = _pl_points(pl)
+        if len(pts) < 4 or math.dist(pts[0], pts[-1]) < 1:
+            continue
+        box = (min(p[0] for p in pts), min(p[1] for p in pts), max(p[0] for p in pts), max(p[1] for p in pts))
+        if box[2] - box[0] < 10 or box[3] - box[1] < 5 or (box[2] - box[0]) > 0.25 * W:
+            continue
+        names = [f for (x, y, f) in labels if _inside((x, y), box, 6) and f[0] not in taken
+                 and not re.search(r"leiding|line", f[0], re.I)]
+        if len(names) != 1:
+            continue
+        tag = names[0][0]
+        cls = "CustomVessel" if re.search(r"lekbak|drip|bund|opvang|tray", tag, re.I) else (classify_tag(tag)[1] or "CustomEquipment")
+        items.append(Item(f"o{k}", "equipment", box, tag=tag, extra=names[0][1:], cls=cls, ents=[pl], outline=pts,
+                          why="an open outline named " + tag + (": a drip tray" if cls == "CustomVessel" else ""),
+                          future=_is_future(doc, [pl]),
+                          specs={"custom": {"Description": "drip tray (lekbak)"}} if cls == "CustomVessel" else {}))
+        taken.add(tag)
     return items, labels, frames
+
+
+_ALARM = re.compile(r"^[HL]{1,2}[A-Z]{1,2}$")
+_LOCK = {"LO": "locked open", "LC": "locked closed", "CSO": "car sealed open", "CSC": "car sealed closed"}
+
+
+def details(items: list[Item]) -> dict:
+    """What the drawing writes beside a symbol, carried into DEXPI: an instrument's alarms and
+    where it is read (a plain bubble: field; with a line or a box around it: control room), a
+    valve's locked position (LO/LC), the drawing a stream comes from or goes to."""
+    n = {"alarms": 0, "locked": 0, "drawings": 0, "located": 0}
+    for it in items:
+        custom = it.specs.setdefault("custom", {})
+        if it.kind == "instrument":
+            alarms = [v for v in it.extra if _ALARM.match(v)] + [v for q, v in it.prompts
+                                                                  if re.search(r"alarm", q, re.I) and v and v not in it.extra]
+            if alarms:
+                custom["Alarms"] = ", ".join(dict.fromkeys(alarms))
+                n["alarms"] += 1
+            ring = any(e.dxftype() in ("ELLIPSE", "CIRCLE") for e in it.ents)
+            marked = any(e.dxftype() == "LINE" or (e.dxftype() == "LWPOLYLINE" and e.closed) for e in it.ents)
+            if ring:
+                it.specs.setdefault("dexpi", {})["location"] = "central" if marked else "field"
+                n["located"] += 1
+        elif it.kind == "valve":
+            m = re.match(r"^(LO|LC|CSO|CSC)[-\s]+(.+)$", it.tag)
+            if m:   # "LC-AFS0221": valve AFS0221, locked closed
+                custom["LockedPosition"], it.tag = _LOCK[m.group(1)], m.group(2)
+            lock = [_LOCK[v.upper()] for v in it.extra if v.upper() in _LOCK]
+            if lock:
+                custom["LockedPosition"] = lock[0]
+            n["locked"] += "LockedPosition" in custom
+        elif it.kind == "stream":
+            for q, v in it.prompts:
+                if v and re.search(r"p\s*&?\s*i\s*d|tekening|drawing", q, re.I):
+                    custom["ConnectedDrawing"] = v
+                    n["drawings"] += 1
+            extra = [v for q, v in it.prompts if v and re.search(r"extra|info", q, re.I)]
+            if extra:
+                custom["Note"] = "; ".join(extra)
+        if not custom:
+            it.specs.pop("custom")
+    return n
 
 
 # words in a data table's labels -> (specification field, default unit); Dutch and English
@@ -344,13 +565,14 @@ def read_lines(doc, items: list[Item]) -> list[dict]:
     layer_lt = {l.dxf.name: (l.dxf.linetype or "") for l in doc.layers}
     equipment = [it.box for it in items if it.kind == "equipment"]
     out = []
-    for e in msp.query("LINE LWPOLYLINE"):
+    inner = [e for it in items for e in it.lines]   # piping drawn inside assembly blocks
+    for e in list(msp.query("LINE LWPOLYLINE")) + inner:
         if e.dxftype() == "LINE":
             pts = [(e.dxf.start.x, e.dxf.start.y), (e.dxf.end.x, e.dxf.end.y)]
         else:
             if e.closed:
                 continue  # outlines: equipment and frames (read_symbols)
-            pts = [(p[0], p[1]) for p in e.get_points()]
+            pts = _pl_points(e)
         length = sum(math.dist(a, b) for a, b in zip(pts, pts[1:]))
         if length < 0.8:
             continue
@@ -405,6 +627,8 @@ def join_pieces(pieces: list[dict]) -> list[dict]:
 def attach(chains: list[dict], items: list[Item]) -> None:
     """A chain end within ATTACH mm of a symbol's outline is on that symbol (the nearest)."""
     def dist(p, it):
+        if it.outline:   # an open outline: its drawn sides only
+            return min(_seg_dist(p, a, b) for a, b in zip(it.outline, it.outline[1:]))
         if it.kind != "unit":
             return _dist_to_box(p, it.box)
         b = it.box   # a unit is a frame: only its border counts (things drawn inside are its own)
@@ -437,6 +661,140 @@ def _is_tick(it) -> bool:
         if not (abs(a.x - b.x) > 0.2 and abs(a.y - b.y) > 0.2):
             return False
     return True
+
+
+def _zigzag(e, body=None) -> bool:
+    """A spring: an open polyline zigzagging (sharp turns to alternate sides, 2 or more) outside
+    the valve body (box `body`), whose own outline turns back too; a triangle turns one way."""
+    if e.dxftype() != "LWPOLYLINE" or e.closed:
+        return False
+    pts = [(p[0], p[1]) for p in e.get_points()]
+    sides = []
+    for a, b, c in zip(pts, pts[1:], pts[2:]):
+        if body is not None and _inside(b, body, 0.1):
+            continue
+        u, v = (b[0] - a[0], b[1] - a[1]), (c[0] - b[0], c[1] - b[1])
+        nu, nv = math.hypot(*u), math.hypot(*v)
+        if nu and nv and (u[0] * v[0] + u[1] * v[1]) / (nu * nv) < -0.3:
+            sides.append(u[0] * v[1] - u[1] * v[0] > 0)
+    return len(sides) >= 2 and all(x != y for x, y in zip(sides, sides[1:]))
+
+
+def _chevron(ents):
+    """+1 for an open "^" (apex up), -1 for "v" (apex down), else None: one 3-point open stroke."""
+    if len(ents) != 1 or ents[0].dxftype() != "LWPOLYLINE" or ents[0].closed:
+        return None
+    pts = [(p[0], p[1]) for p in ents[0].get_points()]
+    if len(pts) != 3 or any(b for *_, b in ents[0].get_points("xyb")):
+        return None
+    a, m, c = pts
+    if abs(a[1] - c[1]) > 0.3 or abs(m[0] - (a[0] + c[0]) / 2) > 0.3 or abs(m[1] - a[1]) < 1:
+        return None
+    return 1 if m[1] > a[1] else -1
+
+
+def shape_rules(chains: list[dict], items: list[Item]) -> list[str]:
+    """What an untagged symbol is, from how it is drawn (general P&ID drawing conventions):
+    a valve body (bow tie) with a spring is a safety valve, with an actuator (a stem, or a signal
+    line or arrow onto it) a control valve, else a hand valve; a wave of arcs is a hose; at the open
+    end of a pipe, "^" or a hook is a vent and "v" a funnel. Kept as items (DEXPI classes)."""
+    ends = lambda it: [c for c in chains for e in ("a", "b") if c[e] == it.id]
+    arrows = [it for it in items if it.kind == "inline" and _pointing(it.ents) is not None]
+    found = []
+    for it in items:
+        if it.tag or it.kind not in ("inline", "unknown") or not it.ents:
+            continue
+        on = ends(it)
+        cls = why = ""
+        bodies = [b for b in map(_bowtie_box, it.ents) if b]
+        if bodies:
+            if any(_zigzag(e, bodies[0]) for e in it.ents):
+                cls, why = "SpringLoadedGlobeSafetyValve", "a valve body with a spring: a safety valve"
+            elif (len(it.ents) > 1 or any(c["dashed"] for c in on)
+                  or any(not _inside((p[0], p[1]), bodies[0], 0.3) for e in it.ents
+                         if e.dxftype() == "LWPOLYLINE" for p in e.get_points())
+                  or any(_box_gap(a.box, it.box) <= 0.5 for a in arrows if a is not it)):
+                cls, why = "OperatedValve", "a valve body with an actuator: a control valve"
+            else:
+                cls, why = "GlobeValve", "a valve body (bow tie)"
+        elif sum(e.dxftype() in ("ELLIPSE", "ARC") for e in it.ents) >= 3:
+            cls, why = "Hose", "a wave of arcs: a hose"
+        elif len(on) <= 1 or (_chevron(it.ents) == -1 and (it.box[2] - it.box[0]) >= 5):
+            ch = _chevron(it.ents)
+            hook = (len(it.ents) == 1 and it.ents[0].dxftype() == "LWPOLYLINE" and not it.ents[0].closed
+                    and any(b for *_, b in it.ents[0].get_points("xyb")))
+            if ch == 1 or hook:
+                cls, why = "VentilationDevice", "an open pipe end turned up (^ or a hook): a vent"
+            elif ch == -1 and (it.box[2] - it.box[0]) >= 5:
+                cls, why = "Funnel", "an open \"v\" at a pipe end: a funnel (drain)"
+        if cls:
+            it.kind, it.cls, it.why = "valve", cls, why
+            found.append(cls)
+    return found
+
+
+def heat_tracing(chains: list[dict], items: list[Item]) -> list[str]:
+    """A dashed line running alongside a pipe (within 3.5 mm, most of its length) is that pipe's
+    heat tracing, not a signal line: it goes, and the pipes it runs along get heatTracingType
+    (electrical when it starts at an "EL" supply, which goes too). The pipes' tags, for the report."""
+    pipes = [c for c in chains if not c["dashed"] and not c.get("future")]
+
+    def along(p, d):   # pipes a point lies alongside (parallel, 0.4-3.5 mm away)
+        out = []
+        for c in pipes:
+            for a, b in zip(c["pts"], c["pts"][1:]):
+                L = math.dist(a, b)
+                if L == 0:
+                    continue
+                u = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+                if abs(u[0] * d[1] - u[1] * d[0]) > 0.1:
+                    continue
+                if 0.4 <= _seg_dist(p, a, b) <= 3.5:
+                    out.append(c)
+                    break
+        return out
+    supplies = [it for it in items if (it.tag or "").strip().upper() == "EL"]
+    traced, gone = [], []
+    for c in chains:
+        if not c["dashed"]:
+            continue
+        samples, hits, near = 0, 0, []
+        for a, b in zip(c["pts"], c["pts"][1:]):
+            L = math.dist(a, b)
+            if L == 0:
+                continue
+            d = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+            for k in range(int(L) + 1):
+                p = (a[0] + d[0] * min(k, L), a[1] + d[1] * min(k, L))
+                samples += 1
+                ps = along(p, d)
+                if ps:
+                    hits += 1
+                    near.extend(ps)
+        if samples < 5 or hits < 0.6 * samples:
+            continue
+        gone.append((c, near))
+    # an "EL" supply on the tracing, or on a short dashed stub to it: electrical tracing
+    stubs = []
+    for c, near in gone:
+        sup = [it.id for it in supplies if c["a"] == it.id or c["b"] == it.id]
+        for st in chains:
+            if st["dashed"] and st is not c and all(st is not g for g, _ in gone):
+                feeds = [st[e] for e in ("a", "b") if st[e] in {it.id for it in supplies}]
+                other = st["pts"][-1] if st["a"] in feeds else st["pts"][0]
+                if feeds and any(_seg_dist(other, a, b) < 0.5 for a, b in zip(c["pts"], c["pts"][1:])):
+                    sup += feeds
+                    stubs.append(st)
+        kind = "electrical heat tracing system" if sup else "heat tracing system"
+        for it in [it for it in items if it.id in sup]:
+            items.remove(it)
+        for pc in {id(x): x for x in near}.values():
+            pc.setdefault("specs", {}).setdefault("dexpi", {})["heatTracingType"] = kind
+            traced.append(pc)
+    for c in [g for g, _ in gone] + stubs:
+        if c in chains:
+            chains.remove(c)
+    return [c.get("label", "") for c in {id(x): x for x in traced}.values()]
 
 
 def signal_by_ticks(chains: list[dict], items: list[Item]) -> int:
@@ -576,6 +934,8 @@ def _pointing(ents):
             segs.append(((e.dxf.start.x, e.dxf.start.y), (e.dxf.end.x, e.dxf.end.y)))
         elif t == "LWPOLYLINE":
             pts = [(p[0], p[1]) for p in e.get_points()]
+            if e.closed and len(pts) > 3:
+                return None   # a box or a body: a component, not an arrow
             if e.closed and len(pts) == 3:
                 tris.append(pts)
             elif not e.closed:
@@ -738,7 +1098,9 @@ def dxf_to_drawio(doc, title: str = "drawing", legend: dict | None = None) -> tu
     pieces = read_lines(doc, items)
     chains = join_pieces(pieces)
     attach(chains, items)
+    traced = heat_tracing(chains, items)
     signal_by_ticks(chains, items)
+    shaped = shape_rules(chains, items)
     found = [(it, sum(1 for c in chains for e in ("a", "b") if c[e] == it.id)) for it in every if it.block]
     # unknown text where a pipe ends: a stream in or out of the drawing; else a note
     ends_on = {c[e] for c in chains for e in ("a", "b") if c[e]}
@@ -780,6 +1142,9 @@ def dxf_to_drawio(doc, title: str = "drawing", legend: dict | None = None) -> tu
         if it.kind != "instrument" or it.id in ends_on or it.future:
             continue
         centre = ((it.box[0] + it.box[2]) / 2, (it.box[1] + it.box[3]) / 2)
+        # a bubble standing on an in-line symbol (an orifice plate whose block draws the line up to
+        # the bubble) measures where that symbol is on the pipe, however far that is
+        on = [x for x in items if x.kind == "inline" and not x.tag and _box_gap(x.box, it.box) <= ATTACH]
         best = None
         for c in chains:
             if c["dashed"] or c.get("future"):
@@ -790,8 +1155,11 @@ def dxf_to_drawio(doc, title: str = "drawing", legend: dict | None = None) -> tu
                 t = 0.0 if L == 0 else max(0.0, min(1.0, ((centre[0] - q[0]) * ax + (centre[1] - q[1]) * ay) / L))
                 foot = (q[0] + t * ax, q[1] + t * ay)
                 d = _dist_to_box(foot, it.box)
-                if d <= TAP and (best is None or d < best[0]):
+                if (d <= TAP or any(_dist_to_box(foot, x.box) <= 0.5 for x in on)) and (best is None or d < best[0]):
                     best = (d, foot)
+        if best is not None and it.tag[:2].upper() == "FO":
+            for x in on:   # FO: a flow orifice - the symbol it stands on is the orifice plate
+                x.kind, x.cls, x.why = "valve", "RestrictionOrifice", f"the symbol {it.tag} stands on"
         if best is None:
             continue
         foot = best[1]
@@ -825,6 +1193,8 @@ def dxf_to_drawio(doc, title: str = "drawing", legend: dict | None = None) -> tu
     for it in items:
         if it.kind == "equipment" and it.tag in tables:
             it.specs = tables[it.tag]
+    noted = details(items)
+    meta = read_title_block(doc)
     through = pass_through(chains, items)
     bridged = bridge_ends(chains, items)
     with_flow = flow_from_arrows(chains, items)
@@ -851,7 +1221,9 @@ def dxf_to_drawio(doc, title: str = "drawing", legend: dict | None = None) -> tu
     x0, ytop = ext.extmin.x, ext.extmax.y
     X = lambda x: round((x - x0) * SCALE, 1)
     Y = lambda y: round((ytop - y) * SCALE, 1)
-    cells = ['<mxCell id="0"/>', '<mxCell id="1" parent="0"/>']
+    root = " ".join(f"{k}={quoteattr(v)}" for k, v in meta.items())
+    cells = [f'<object id="0" label="" {root}><mxCell/></object>' if meta else '<mxCell id="0"/>',
+             '<mxCell id="1" parent="0"/>']
     frame = {}   # item id -> (centre x, centre y, unrotated w, h, clockwise rotation) in draw.io units
     for it in items:
         _, label = _style(it)
@@ -971,7 +1343,7 @@ def dxf_to_drawio(doc, title: str = "drawing", legend: dict | None = None) -> tu
     for it in items:
         kinds[it.kind] = kinds.get(it.kind, 0) + 1
     report = {"symbols": kinds, "pipes": sum(1 for c in chains if not c["dashed"]),
-              "signal_lines": sum(1 for c in chains if c["dashed"]), "through": through, "bridged": bridged, "tees": tees, "flow_from_arrows": with_flow,
+              "heat_traced": len(traced), "details": noted, "title_block": meta, "by_shape": dict(Counter(shaped)), "signal_lines": sum(1 for c in chains if c["dashed"]), "through": through, "bridged": bridged, "tees": tees, "flow_from_arrows": with_flow,
               "units": [it.tag for it in items if it.kind == "unit"], "future": sum(it.future for it in items),
               "tables": sorted(tables), "line_numbers": line_numbers, "taps_added": taps,
               "legend": legend_rows,
