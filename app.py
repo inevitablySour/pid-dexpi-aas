@@ -63,6 +63,8 @@ from pid_dexpi_aas.review import (  # noqa: E402
     _instrument_attributes, _short_token, cross_check, from_drawio, from_image, to_dexpi, validate_rows,
 )
 from pid_dexpi_aas.dexpi.serialize import save_and_verify  # noqa: E402
+from pid_dexpi_aas.dexpi.graphics import add_connector_references, add_drawing  # noqa: E402
+from pid_dexpi_aas.dexpi.proteus_patch import PatchedProteusSerializer  # noqa: E402
 from pid_dexpi_aas.dexpi.validate_by_counting import report_for_diagram  # noqa: E402
 
 _ML_VENV = ROOT / "ml" / "relationformer" / ".venv"
@@ -2494,7 +2496,14 @@ if build_clicked:
         except Exception as exc:  # export or round-trip failure - show, don't hide
             st.error(f"DEXPI export/verification failed: {exc}")
             st.stop()
-        xml_bytes = (Path(tmp) / f"{stem}.xml").read_bytes()
+        xml_bytes = add_connector_references((Path(tmp) / f"{stem}.xml").read_bytes(), diagram, result)
+        try:   # the same file with its drawing (positions, symbols, pipe routes), checked by re-loading
+            drawn_bytes = add_drawing(xml_bytes, diagram, result, review.drawio)
+            (Path(tmp) / f"{stem}_drawn.xml").write_bytes(drawn_bytes)
+            PatchedProteusSerializer().load(Path(tmp), f"{stem}_drawn")
+        except Exception as exc:
+            drawn_bytes = None
+            st.warning(f"The DEXPI file with its drawing could not be made ({exc}); the data-only file is fine.")
     report = report_for_diagram(diagram, result)
     cm = result.model.conceptualModel
     st.success("DEXPI model built, exported, and verified by re-loading it.")
@@ -2504,7 +2513,13 @@ if build_clicked:
     m3.metric("Pipe segments", sum(len(s.segments) for s in cm.pipingNetworkSystems))
     m4.metric("Skipped elements", report.skipped_count)
     d1, d2, d3 = st.columns(3)
-    d1.download_button("Download DEXPI XML", lambda b=xml_bytes: b, file_name=f"{stem}.xml", mime="application/xml")
+    d1.download_button("Download DEXPI XML (data only)", lambda b=xml_bytes: b, file_name=f"{stem}.xml", mime="application/xml",
+                       help="The plant data: equipment, piping, instruments and how they connect - no drawing.")
+    if drawn_bytes:
+        d1.download_button("Download DEXPI XML with drawing", lambda b=drawn_bytes: b, file_name=f"{stem}_drawing.xml",
+                           mime="application/xml",
+                           help="The same data plus the P&ID drawing, as P&ID tools write it (DEXPI 1.3 / Proteus "
+                                "graphics): each item's position and symbol, every pipe's route, the tags.")
     with st.spinner("Packaging the AAS..."):
         aas_in = DexpiModelInput(stem, xml_bytes, drawing_svg(diagram, result),
                                  {k: v for k, v in aas_model_meta.items() if v})

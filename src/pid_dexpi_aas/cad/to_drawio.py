@@ -195,7 +195,7 @@ def _bowtie_box(e):
     end sides and a diagonal between them (a plain box never steps corner to opposite corner).
     The body can be part of a longer stroke (a spring or stem drawn on in one go)."""
     if e.dxftype() != "LWPOLYLINE":
-        return False
+        return None
     pts = [(p[0], p[1]) for p in e.get_points()]
     if e.closed:
         pts = pts + pts[:3]
@@ -779,6 +779,47 @@ def shape_rules(chains: list[dict], items: list[Item]) -> list[str]:
         if cls:
             it.kind, it.cls, it.why = "valve", cls, why
             found.append(cls)
+    # a hose drawn as several wave blocks end to end is one hose (named by the piece that is)
+    hoses = [it for it in items if it.cls == "Hose" or (it.block and any(
+        h.cls == "Hose" and h.block == it.block for h in items) and it.kind in ("unknown", "inline"))]
+    merged = True
+    while merged:
+        merged = False
+        for a in hoses:
+            for b in hoses:
+                if a is b or a not in items or b not in items or _box_gap(a.box, b.box) > 0.3:
+                    continue
+                a.box = (min(a.box[0], b.box[0]), min(a.box[1], b.box[1]), max(a.box[2], b.box[2]), max(a.box[3], b.box[3]))
+                a.ents += b.ents
+                a.tag = a.tag or b.tag
+                a.kind, a.cls, a.why = "valve", "Hose", "a wave of arcs: a hose"
+                for c in chains:
+                    for e in ("a", "b"):
+                        if c[e] == b.id:
+                            c[e] = a.id
+                items.remove(b)
+                hoses.remove(b)
+                found.remove("Hose") if "Hose" in found and b.cls == "Hose" else None
+                merged = True
+                break
+            if merged:
+                break
+    # a piping part drawn straight against another item, with no pipe between (a vent on a
+    # tank's top, a hose onto a valve): connected to it where they touch
+    for it in items:
+        if it.kind != "valve" or len(ends(it)) >= 2:
+            continue
+        for o in items:
+            if o is it or o.kind not in ("valve", "equipment") or _box_gap(it.box, o.box) > ATTACH:
+                continue
+            if any({c["a"], c["b"]} == {it.id, o.id} for c in chains):
+                continue
+            p = (min(max((it.box[0] + it.box[2]) / 2, o.box[0]), o.box[2]),
+                 min(max((it.box[1] + it.box[3]) / 2, o.box[1]), o.box[3]))
+            q = (min(max(p[0], it.box[0]), it.box[2]), min(max(p[1], it.box[1]), it.box[3]))
+            if q == p:
+                q = (p[0] + 0.01, p[1])
+            chains.append({"pts": [q, p], "dashed": False, "future": it.future, "a": it.id, "b": o.id})
     return found
 
 
