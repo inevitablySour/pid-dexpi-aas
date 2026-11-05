@@ -39,7 +39,21 @@ ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT / "src"))
 
 import pandas as pd  # noqa: E402
-import streamlit as st  # noqa: E402
+import streamlit as st
+from streamlit.delta_generator import DeltaGenerator as _DG
+
+# A download never re-runs the page (Streamlit's default does): what is shown - the built DEXPI
+# and its downloads - stays as it is when a file is downloaded.
+_download_button = _DG.download_button
+
+
+def _download_no_rerun(self, *args, **kwargs):
+    kwargs.setdefault("on_click", "ignore")
+    return _download_button(self, *args, **kwargs)
+
+
+_DG.download_button = _download_no_rerun
+st.download_button = lambda *a, **k: _download_no_rerun(st._main, *a, **k)  # noqa: E402
 import streamlit.components.v2  # noqa: E402,F401  (st.components.v2: the clickable map)
 from PIL import Image  # noqa: E402
 
@@ -778,6 +792,12 @@ elif st.session_state.get("editor_open") and EDITOR_INSTALLED:
                               editor_patch(prev) if prev is not None and prev.drawio is not None else {},
                               title=uploaded_drawio.name if uploaded_drawio else "new drawing", sheet=sheet_name(),
                               focus=st.session_state.get("editor_focus", ""))
+        editing = uploaded_drawio.name if uploaded_drawio else "new drawing"
+        if saved and saved.get("t") != st.session_state.get("editor_t") and saved.get("title") not in (None, editing) \
+                and st.session_state.get("editor_name", "") != saved.get("title"):
+            # a late save of the drawing shown before this upload (a blank page's autosave): not this one
+            st.session_state["editor_t"] = saved["t"]
+            saved = None
         if saved and saved.get("t") != st.session_state.get("editor_t"):  # a new Save
             if saved.get("sync"):
                 st.session_state["spec_sync"] = saved["sync"]
@@ -2579,6 +2599,15 @@ with b2:
 with b1:
     build_clicked = st.button("Build & validate DEXPI", type="primary")
 
+# the built DEXPI stays shown (re-runs of the page included) until the review changes
+# (by what is in it - items and connections - not the file it came from: the editor's own save
+# of the same drawing keeps it)
+review_key = hashlib.sha256(json.dumps([review.symbol_rows(), review.connection_rows()], sort_keys=True,
+                                       default=str).encode()).hexdigest()
+if build_clicked:
+    st.session_state["built_for"] = review_key
+elif st.session_state.get("built_for") == review_key:
+    build_clicked = True
 if build_clicked:
     problems = validate_rows(review)
     if problems:

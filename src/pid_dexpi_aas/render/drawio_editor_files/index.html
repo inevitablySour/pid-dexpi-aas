@@ -96,7 +96,7 @@ function syncSpecs(ids) {
   pendingSync = ids;
   ui.actions.get("save").funct();
 }
-let ui = null, graph = null, W = null, lastPatch = null, schema = null;
+let ui = null, graph = null, W = null, lastPatch = null, schema = null, shownTitle = "";
 
 fetch("schema.json").then((r) => r.json()).then((s) => { schema = s; render(); }).catch(() => { schema = {}; });
 
@@ -109,6 +109,7 @@ window.addEventListener("message", (e) => {
     } else if (m.event === "init") {
       ready = true;
       shown = args.xml || "";
+      shownTitle = args.title || "";
       lastPatch = null;
       toEditor({ action: "load", xml: shown, title: args.title || "" });
       hookEditor();
@@ -131,8 +132,10 @@ window.addEventListener("message", (e) => {
       // routes: every line as draw.io draws it (its right angles are worked out while drawing,
       // not stored in the file) - the app's map follows the same path
       // sync: "all" or [ids] - the app then fills these items' specifications from the spec sheet
+      // title: the drawing this save is of - a late save of the previous one is not taken for it
       toApp("streamlit:setComponentValue", { value: { xml: m.xml, t: Date.now(), ids: Object.keys(lastPatch || {}),
-                                                      routes: drawnRoutes(), sync: pendingSync }, dataType: "json" });
+                                                      routes: drawnRoutes(), sync: pendingSync, title: shownTitle },
+                                              dataType: "json" });
       pendingSync = null;
       dirty = false;
       if (autosaveTimer) { clearTimeout(autosaveTimer); autosaveTimer = null; }
@@ -150,7 +153,12 @@ window.addEventListener("message", (e) => {
   } else if (ready && args.xml !== shown && args.xml !== saved && !ours(args.xml)) {
     shown = args.xml || "";
     lastPatch = null;
-    if (graph) keepView = { scale: graph.view.scale, x: graph.view.translate.x, y: graph.view.translate.y };
+    // the same drawing back (re-read after a change): keep where the view was; another drawing
+    // (a new upload - a DEXPI file laid out elsewhere on the sheet): fit it into view
+    const same = (args.title || "") === shownTitle;
+    if (graph && same) keepView = { scale: graph.view.scale, x: graph.view.translate.x, y: graph.view.translate.y };
+    else keepView = null;
+    shownTitle = args.title || "";
     toEditor({ action: "load", xml: shown, title: args.title || "" });
   } else if (graph) {
     applying = true;
