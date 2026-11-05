@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib.util
 import io
 import json
 import math
@@ -2700,7 +2701,7 @@ if build_clicked:
               help="Several drawings of one plant in one AAS (below: 'Plant AAS')")
     n_mapped = len(mapping_entries(xml_bytes))
     if aas_ok:
-        d3.caption(f"✓ Valid AAS {aas_version} ({'IDTA test engine + ' if aas_version == '3.0' else ''}aas-core "
+        d3.caption(f"✓ Valid AAS {aas_version} ({'IDTA test engine + ' if aas_version == '3.0' and importlib.util.find_spec('aas_test_engines') else ''}aas-core "
                    f"metamodel check) · {n_mapped} items mapped")
     else:
         d3.warning(f"The AAS {aas_version} package did not pass the compliance check")

@@ -23,11 +23,12 @@ dependencies = [
     "basyx-python-sdk>=2.0.1,<2.1",
     "aas-core3.0",  # metamodel verification of the AAS 3.0 / 3.1 output
     "aas-core3.1",
+    "aas-test-engines",  # the IDTA's own test engine: the AAS 3.0 compliance check on the build page
 ]
 
 [project.optional-dependencies]
 # scipy + scikit-image: the picture-side tests (pipe tracer, symbol fixes) - the app itself does not need them
-dev = ["pytest", "aas-test-engines", "scipy", "scikit-image"]
+dev = ["pytest", "scipy", "scikit-image"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

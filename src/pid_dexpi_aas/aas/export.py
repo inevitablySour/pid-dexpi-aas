@@ -385,11 +385,14 @@ def check_aasx(data: bytes) -> tuple[bool, list[str]]:
         return False, ["no AAS 3.0 or 3.1 environment found in the package"]
     problems = _verify_package(data) + _verify_environment(data, version)
     if version == "3.0":
-        from aas_test_engines.file import check_aasx_data
-
-        result = check_aasx_data(zipfile.ZipFile(io.BytesIO(data)))
-        if not result.ok():
-            problems += [line for line in result.to_lines() if line.strip()][:60]
+        try:
+            from aas_test_engines.file import check_aasx_data
+        except ImportError:   # (an install without the IDTA test engine: aas-core's check above only)
+            check_aasx_data = None
+        if check_aasx_data is not None:
+            result = check_aasx_data(zipfile.ZipFile(io.BytesIO(data)))
+            if not result.ok():
+                problems += [line for line in result.to_lines() if line.strip()][:60]
     return not problems, problems
 
 
