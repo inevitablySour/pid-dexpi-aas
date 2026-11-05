@@ -105,17 +105,22 @@ the normal NVIDIA driver; training also needs the CUDA toolkit.
 
 ## Using the app
 
-Upload in the sidebar:
+One upload in the sidebar takes every kind of file; each is recognised by its content and opens
+its own path:
 
-| Input | Where items and lines come from |
-|---|---|
-| draw.io file | the file itself |
-| picture | the trained model, OCR for the tags, and a pipe tracer that follows the drawn lines |
-| both | the drawing is the truth; the picture checks it (the Compare tab shows where they differ) |
-| Editor tab | draw.io itself, in the page: draw a P&ID or change the uploaded one; Save loads it. Group (Ctrl+G) several shapes to make them one DEXPI item. **Guided check** in its panel: every item one by one (lines hidden), then every uncertain connection (model-only, or a guessed draw.io end) - or keep only the sure lines, or start with none |
+| Upload | Path | Where items and lines come from |
+|---|---|---|
+| `.drawio` | drawing → DEXPI | the file itself |
+| `.dwg` / `.dxf` | AutoCAD → DEXPI | the CAD symbols and lines (general P&ID rules, a saved symbol legend per company) |
+| `.png` / `.jpg` / `.pdf` | picture → DEXPI | the trained model, OCR for the tags, and a pipe tracer that follows the drawn lines |
+| `.xml` (DEXPI) | DEXPI → P&ID | the file's own drawing when it has one, else laid out: flow left to right, instruments by what they measure, pipes routed around the symbols |
+| `.json` | resume a saved review | the review as saved |
+| `.xlsx` | spec sheet | filled-in specifications for the drawing uploaded with it |
+| drawing + picture | both | the drawing is the truth; the picture checks it (the Compare tab shows where they differ) |
+| Editor | draw.io itself, in the page: draw a P&ID or change the uploaded one; Save loads it. Group (Ctrl+G) several shapes to make them one DEXPI item. **Guided check** in its panel: every item one by one (lines hidden), then every uncertain connection (model-only, or a guessed draw.io end) - or keep only the sure lines, or start with none |
 | Training data | "Add this drawing to the training data": one button (or download, correct in draw.io, add in the sidebar); retrains automatically at night when enough is added (ml/README.md) |
 | Plant AAS | several drawings in one AAS: build each, "Add this drawing to the plant AAS", download once; a tag on several drawings is one asset; plant sections (when frames are used as sections) as an IDTA 02011 hierarchy |
-| Spec sheet | sidebar "Specifications": download an Excel template (blank, or with this drawing's tags), fill in tag + specifications, upload it - matching items get the values automatically (empty fields only) after a draw.io file or a picture is read; the editor's "Sync from the spec sheet" overwrites |
+| Spec sheet | sidebar "Specifications": download an Excel template (blank, or with this drawing's tags), fill in tag + specifications, upload it with the drawing - matching items get the values automatically (empty fields only) after a draw.io file or a picture is read; the editor's "Sync from the spec sheet" overwrites |
 
 Click anything on the map to edit it in the side panel: tag, DEXPI type, connections,
 streams in / out, and DEXPI specifications for items and pipes. Draw a box with **Add item**

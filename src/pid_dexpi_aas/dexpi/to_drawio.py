@@ -716,13 +716,13 @@ def layout_score(drawio: str) -> float:
     return crossings * 40 + bends * 15 + length / 20 + shape * 400
 
 
-def dexpi_to_drawio(xml: bytes, title: str = "from DEXPI") -> tuple[str, dict]:
+def dexpi_to_drawio(xml: bytes, title: str = "from DEXPI", use_drawing: bool = True) -> tuple[str, dict]:
     """(draw.io XML, report) for DEXPI file `xml`: drawn as its own drawing has it when it has
     one, else laid out from the plant data - both ways of handling recycle loops tried, the
-    more readable one kept (layout_score)."""
+    more readable one kept (layout_score). use_drawing=False: laid out even when it has one."""
     plant = read_plant(xml)
-    if drawn(xml, plant) is None:
-        tries = [_to_drawio(xml, title, plant, loops) for loops in ("order", "cut")]
+    if not use_drawing or drawn(xml, plant) is None:
+        tries = [_to_drawio(xml, title, plant, loops, use_drawing=False) for loops in ("order", "cut")]
         best = min(tries, key=lambda t: layout_score(t[0]))
         best[1]["layout"] = {"loops": "order" if best is tries[0] else "cut",
                              "scores": [round(layout_score(t[0])) for t in tries]}
@@ -730,10 +730,10 @@ def dexpi_to_drawio(xml: bytes, title: str = "from DEXPI") -> tuple[str, dict]:
     return _to_drawio(xml, title, plant, "order")
 
 
-def _to_drawio(xml: bytes, title: str, plant: dict, loops: str) -> tuple[str, dict]:
+def _to_drawio(xml: bytes, title: str, plant: dict, loops: str, use_drawing: bool = True) -> tuple[str, dict]:
     items = plant["items"]
     xy = layout(plant, loops)
-    own = drawn(xml, plant)
+    own = drawn(xml, plant) if use_drawing else None
     if own:
         # where the drawing puts things; a tee, where its pipes' centre lines meet
         placed = own["xy"]

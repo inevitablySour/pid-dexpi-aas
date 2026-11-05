@@ -288,11 +288,31 @@ def svg_viewer(svg: str, height: int = 560) -> None:
     components.html(page, height=height + 4)
 
 
+def input_kind(f) -> str:
+    """What an uploaded file is, by its content (not only its name): which path it opens."""
+    name = f.name.lower()
+    if name.endswith((".dwg", ".dxf")):
+        return "cad"
+    if name.endswith((".png", ".jpg", ".jpeg", ".pdf")):
+        return "picture"
+    if name.endswith(".json"):
+        return "review"
+    if name.endswith(".xlsx"):
+        return "spec"
+    head = f.getvalue()[:4000]
+    if b"<PlantModel" in head:
+        return "dexpi"
+    if name.endswith(".drawio") or b"<mxfile" in head or b"<mxGraphModel" in head:
+        return "drawio"
+    return "other"
+
+
 @st.cache_data(show_spinner="Laying out the DEXPI file...", max_entries=4)
-def dexpi_to_drawio_cached(data: bytes, name: str) -> tuple[str, dict]:
-    """A DEXPI file as a draw.io P&ID (dexpi/to_drawio.py), laid out from its plant data."""
+def dexpi_to_drawio_cached(data: bytes, name: str, use_drawing: bool = True) -> tuple[str, dict]:
+    """A DEXPI file as a draw.io P&ID (dexpi/to_drawio.py): as its own drawing has it, or laid
+    out from its plant data."""
     from pid_dexpi_aas.dexpi.to_drawio import dexpi_to_drawio
-    return dexpi_to_drawio(data, Path(name).stem)
+    return dexpi_to_drawio(data, Path(name).stem, use_drawing)
 
 
 def load_legends() -> dict:
@@ -340,14 +360,32 @@ with st.sidebar:
         st.info("Logged out - reload the page.")
         st.stop()
     st.header("Input")
-    in_drawio, in_picture, in_editor = st.tabs(["draw.io file", "Picture", "Editor"])
-    with in_drawio:
-        uploaded_drawio = st.file_uploader("draw.io, AutoCAD or DEXPI file", type=["drawio", "xml", "dwg", "dxf"],
-                                           help="A DEXPI file (.xml) is drawn as a P&ID, laid out in flow order. "
-                                                "An AutoCAD P&ID (.dwg or .dxf) is turned into a draw.io drawing: "
-                                                "symbols with their tags, equipment outlines, pipes and streams. "
-                                                "Check it in the editor - unknown symbols are flagged.")
-        if uploaded_drawio is not None and uploaded_drawio.name.lower().endswith((".dwg", ".dxf")):
+    # One upload for everything: each file is read for what it is and opens its own path
+    # (a drawing -> DEXPI, DEXPI -> a P&ID, AutoCAD, a picture, a saved review, a spec sheet).
+    files = st.file_uploader(
+        "Upload a P&ID or a file to work on", accept_multiple_files=True, key="inputs",
+        type=["drawio", "xml", "dwg", "dxf", "png", "jpg", "jpeg", "pdf", "json", "xlsx"],
+        help="draw.io drawing (.drawio) · DEXPI file (.xml) · AutoCAD P&ID (.dwg, .dxf) · picture or PDF of a "
+             "P&ID · a saved review (.json) · a filled-in spec sheet (.xlsx). Several at once: a drawing and its "
+             "picture (the drawing is checked against it), or a drawing and its spec sheet.")
+    found = {k: [] for k in ("drawio", "dexpi", "cad", "picture", "review", "spec", "other")}
+    for f in files or []:
+        found[input_kind(f)].append(f)
+    PATHS = {"drawio": "draw.io drawing → DEXPI", "dexpi": "DEXPI → P&ID", "cad": "AutoCAD → DEXPI",
+             "picture": "Picture → DEXPI (model)", "review": "Saved review", "spec": "Spec sheet",
+             "other": "Not recognised"}
+    for kind, fs in found.items():
+        for f in fs:
+            st.caption(f"**{PATHS[kind]}** · {f.name}")
+    for f in found["other"]:
+        st.error(f"{f.name}: not a draw.io, DEXPI, AutoCAD, picture, review or spec-sheet file.")
+    drawings = found["drawio"] + found["cad"] + found["dexpi"]
+    if len(drawings) > 1:
+        st.warning(f"One drawing at a time: using {drawings[0].name}. Remove the others to use them.")
+    uploaded_drawio = drawings[0] if drawings else None
+    if uploaded_drawio is not None and uploaded_drawio in found["cad"]:
+        with st.container(border=True):
+            st.markdown("**AutoCAD → DEXPI**")
             try:
                 cad_data, cad_name = uploaded_drawio.getvalue(), uploaded_drawio.name
                 cad_digest = hashlib.sha256(cad_data).hexdigest()[:16]   # (_digest is defined further down)
@@ -372,102 +410,99 @@ with st.sidebar:
                 st.caption(f"Read from AutoCAD: {n_sym} symbols, {cad_report['pipes']} pipes, "
                            f"{cad_report['signal_lines']} signal lines"
                            + (f"; {len(cad_report['unrecognised'])} symbol types not recognised (flagged in the editor)"
-                              if cad_report["unrecognised"] else "") + ".")
+                              if cad_report["unrecognised"] else "") + ". The symbol legend is below the drawing.")
                 uploaded_drawio = UploadedPicture(Path(uploaded_drawio.name).stem + ".drawio", cad_xml.encode())
             except Exception as exc:
                 st.error(f"This CAD file can't be read: {exc}")
                 uploaded_drawio = None
-        if uploaded_drawio is not None and uploaded_drawio.name.lower().endswith(".xml") \
-                and b"<PlantModel" in uploaded_drawio.getvalue()[:4000]:
-            # a DEXPI file: back to a P&ID (laid out from its plant data), then on as a draw.io drawing
+    elif uploaded_drawio is not None and uploaded_drawio in found["dexpi"]:
+        with st.container(border=True):
+            # DEXPI back to a P&ID: the file drawn (its own drawing, or laid out in flow order),
+            # then on through the editor and the DEXPI build like any drawing
+            st.markdown("**DEXPI → P&ID**")
+            data, dexpi_name = uploaded_drawio.getvalue(), uploaded_drawio.name
+            from pid_dexpi_aas.render.dexpi_svg import has_drawing
+            own = has_drawing(data)
+            how = st.radio("Draw it", ["As its own drawing", "Lay it out automatically"] if own
+                           else ["Lay it out automatically"], key="dexpi_how", horizontal=True,
+                           help="A file with its drawing (positions, symbols, pipe routes) can be drawn as it "
+                                "was; any file can be laid out: flow left to right, instruments by what they "
+                                "measure, pipes routed around the symbols.")
+            if not own:
+                st.caption("This file has the plant data only (no drawing), so it is laid out.")
             try:
-                dexpi_xml, dexpi_report = dexpi_to_drawio_cached(uploaded_drawio.getvalue(), uploaded_drawio.name)
-                st.caption(f"Read from DEXPI: {dexpi_report['items']} items, {dexpi_report['pipes']} pipes, "
-                           f"{dexpi_report['instruments']} instruments - laid out in flow order. Check it in the editor.")
-                uploaded_drawio = UploadedPicture(Path(uploaded_drawio.name).stem + ".drawio", dexpi_xml.encode())
+                dx, rep = dexpi_to_drawio_cached(data, dexpi_name, how == "As its own drawing")
+                st.caption(f"{rep['items']} items, {rep['pipes']} pipes, {rep['instruments']} instruments, "
+                           f"{rep['signal_lines']} signal lines - check it in the editor.")
+                stem = Path(dexpi_name).stem
+                st.download_button("Download the P&ID (.drawio)", dx.encode(), file_name=f"{stem}.drawio",
+                                   mime="application/xml", key="dexpi_drawio_dl", width="stretch",
+                                   help="Opens in draw.io (desktop or diagrams.net) and in this site's editor.")
+                uploaded_drawio = UploadedPicture(stem + ".drawio", dx.encode())
             except Exception as exc:
                 st.error(f"This DEXPI file can't be read: {exc}")
                 uploaded_drawio = None
-        if uploaded_drawio is None or not uploaded_drawio.name.lower().endswith(".drawio") \
-                or not isinstance(uploaded_drawio, UploadedPicture):
-            st.session_state.pop("cad_current", None)
+    if uploaded_drawio is None or not uploaded_drawio.name.lower().endswith(".drawio") \
+            or not isinstance(uploaded_drawio, UploadedPicture) or not found["cad"]:
+        st.session_state.pop("cad_current", None)
+    if uploaded_drawio is not None:
         frames_as_sections = st.checkbox(
             "Frames are plant sections", False, key="frames_as_sections",
             help="Coloured frames drawn around groups of items (e.g. 'Autoclave') are not part of a P&ID and are "
                  "left out. Tick to use each as a plant section instead: its name goes onto the items inside it "
                  "(DEXPI PlantSectionName).")
-    with in_picture:
-        image_file = st.file_uploader("P&ID image or PDF", type=["png", "jpg", "jpeg", "pdf"])
-        if image_file is not None and image_file.name.lower().endswith(".pdf"):
-            # a PDF (e.g. plotted from AutoCAD): one page as the picture the model reads
-            try:
-                n_pages = pdf_page_count(image_file.getvalue())
-                page = st.number_input("Page", 1, n_pages, 1, key="pdf_page") if n_pages > 1 else 1
-                png = pdf_page_png(image_file.getvalue(), page - 1)
-                stem = Path(image_file.name).stem + (f" (page {page})" if n_pages > 1 else "")
-                image_file = UploadedPicture(f"{stem}.png", png)
-            except Exception as exc:  # damaged or password-protected
-                st.error(f"This PDF can't be read: {exc}")
-                image_file = None
-        st.caption("With a draw.io file as well, the drawing is checked against the picture.")
-        if image_file is not None:
-            with st.popover("Re-run the model on this picture", width="stretch"):
-                st.caption("A picture is processed once and the result kept. Re-run it to use the current model "
-                           "and clean-up rules. **This starts the review of this picture again: changes made to it "
-                           "are replaced** - save the review first to keep them.")
-                if st.button("Re-run now", type="primary", width="stretch", key="rerun_model_btn"):
-                    st.session_state["rerun_model"] = True
-                    st.session_state["model_run"] = st.session_state.get("model_run", 0) + 1
-    with in_editor:
-        if not EDITOR_INSTALLED:
-            st.caption("The editor is not installed on this server (scripts/get_drawio_editor.py).")
-        else:
-            st.caption("Draw a P&ID, or change the uploaded draw.io file - or a picture's result - in draw.io "
-                       "right here. **Save** (Ctrl+S) in the editor loads it into the app.")
-            st.session_state.setdefault("editor_open", True)  # the main screen; the map is the old view
-            st.toggle("Show the editor", key="editor_open")
-            if st.session_state.get("editor_xml"):
-                st.download_button("Download the edited drawing", lambda x=st.session_state["editor_xml"]: x.encode(),
-                                   file_name=st.session_state["editor_name"], mime="application/xml",
-                                   width="stretch")
-                if st.button("Discard the edits", width="stretch",
-                             help="Back to the uploaded draw.io file (or nothing)"):
-                    st.session_state.pop("editor_xml")
-                    st.rerun()
-    models = available_models()
-    checkpoint = st.selectbox("Model (pictures)", list(models), format_func=lambda p: models[p][0],
-                              index=list(models).index(DEFAULT_CHECKPOINT), key="model_pick",
-                              help="Which trained model reads uploaded pictures. Each model's result is kept, "
-                                   "so switching back is instant.")
-    with st.expander("About this model"):
-        st.caption(models[checkpoint][1])
-        st.caption("All models: " + " · ".join(f"**{n}**" for n, _ in models.values()))
-    if PUBLIC:
-        device = "auto"
     else:
-        with st.expander("Model settings"):
-            other = st.text_input("Other model file", "", help="A checkpoint path on this PC; overrides the list.")
-            if other.strip():
-                checkpoint = other.strip()
-            device = st.selectbox("Device", ["auto", "cuda", "cpu"] if HAS_GPU else ["cpu", "cuda"],
-                                  help="auto: the GPU unless a training run is using it, else the CPU. CPU works (no NVIDIA GPU "
-                                       "needed) but takes minutes per sheet.")
-    if pick_device(device) == "cpu":
-        st.warning(f"**Pictures are slow right now.** {cpu_reason(device)} "
-                   f"A picture takes **{CPU_MINUTES}**. draw.io files are not affected.")
-    st.divider()
-    st.header("Saved review")
-    review_upload = st.file_uploader("Resume a saved review (.json)", type=["json"])
-    st.divider()
-    st.header("Specifications")
-    st.caption("An Excel sheet with a row per item: its tag (as on the P&ID), its DEXPI type from a dropdown, "
-               "and then the fields of that type to fill in - they change with the type picked. Filled in once "
-               "and used for every P&ID: items whose tags match get its values (empty fields only) and its type "
-               "(where the drawing gave none); the editor's 'Sync from the spec sheet' puts them over what is there.")
-    st.download_button("Download a blank spec sheet (.xlsx)", blank_spec_sheet, file_name="spec_sheet.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
-    spec_slot = st.container()  # the sheet with this drawing's tags, once there is a drawing
-    spec_upload = st.file_uploader("Filled-in spec sheet (.xlsx)", type=["xlsx"], key="spec_upload")
+        frames_as_sections = st.session_state.get("frames_as_sections", False)
+    image_file = found["picture"][0] if found["picture"] else None
+    if len(found["picture"]) > 1:
+        st.warning(f"One picture at a time: using {image_file.name}.")
+    models = available_models()
+    checkpoint = st.session_state.get("model_pick", DEFAULT_CHECKPOINT)
+    if checkpoint not in models:
+        checkpoint = DEFAULT_CHECKPOINT
+    device = "auto" if PUBLIC else st.session_state.get("model_device", "auto")
+    if image_file is not None:
+        with st.container(border=True):
+            st.markdown("**Picture → DEXPI**" + (" · checked against the drawing" if uploaded_drawio else ""))
+            if image_file.name.lower().endswith(".pdf"):
+                # a PDF (e.g. plotted from AutoCAD): one page as the picture the model reads
+                try:
+                    n_pages = pdf_page_count(image_file.getvalue())
+                    page = st.number_input("Page", 1, n_pages, 1, key="pdf_page") if n_pages > 1 else 1
+                    png = pdf_page_png(image_file.getvalue(), page - 1)
+                    stem = Path(image_file.name).stem + (f" (page {page})" if n_pages > 1 else "")
+                    image_file = UploadedPicture(f"{stem}.png", png)
+                except Exception as exc:  # damaged or password-protected
+                    st.error(f"This PDF can't be read: {exc}")
+                    image_file = None
+            checkpoint = st.selectbox("Model", list(models), format_func=lambda p: models[p][0],
+                                      index=list(models).index(checkpoint), key="model_pick",
+                                      help="Which trained model reads the picture. Each model's result is kept, "
+                                           "so switching back is instant.")
+            with st.expander("About this model"):
+                st.caption(models[checkpoint][1])
+                st.caption("All models: " + " · ".join(f"**{n}**" for n, _ in models.values()))
+            if not PUBLIC:
+                with st.expander("Model settings"):
+                    other = st.text_input("Other model file", "", help="A checkpoint path on this PC; overrides the list.")
+                    if other.strip():
+                        checkpoint = other.strip()
+                    device = st.selectbox("Device", ["auto", "cuda", "cpu"] if HAS_GPU else ["cpu", "cuda"], key="model_device",
+                                          help="auto: the GPU unless a training run is using it, else the CPU. CPU works "
+                                               "(no NVIDIA GPU needed) but takes minutes per sheet.")
+            if pick_device(device) == "cpu":
+                st.warning(f"**Pictures are slow right now.** {cpu_reason(device)} "
+                           f"A picture takes **{CPU_MINUTES}**. draw.io files are not affected.")
+            if image_file is not None:
+                with st.popover("Re-run the model on this picture", width="stretch"):
+                    st.caption("A picture is processed once and the result kept. Re-run it to use the current model "
+                               "and clean-up rules. **This starts the review of this picture again: changes made to it "
+                               "are replaced** - save the review first to keep them.")
+                    if st.button("Re-run now", type="primary", width="stretch", key="rerun_model_btn"):
+                        st.session_state["rerun_model"] = True
+                        st.session_state["model_run"] = st.session_state.get("model_run", 0) + 1
+    review_upload = found["review"][0] if found["review"] else None
+    spec_upload = found["spec"][0] if found["spec"] else None
     if spec_upload is not None:
         digest = hashlib.sha256(spec_upload.getvalue()).hexdigest()[:16]
         if (st.session_state.get("spec_sheet") or {}).get("digest") != digest:
@@ -480,11 +515,38 @@ with st.sidebar:
                 st.error(f"This file can't be read as a spec sheet: {exc}. Start from 'Download a blank spec sheet'.")
         sheet = st.session_state.get("spec_sheet")
         if sheet:
-            st.caption(f"{len(sheet['rows'])} tags in {sheet['name']}.")
+            st.caption(f"Spec sheet: {len(sheet['rows'])} tags in {sheet['name']}.")
             for note in sheet["notes"][:5]:
                 st.warning(note)
     else:
         st.session_state.pop("spec_sheet", None)
+    st.divider()
+    st.header("Editor")
+    if not EDITOR_INSTALLED:
+        st.caption("The editor is not installed on this server (scripts/get_drawio_editor.py).")
+    else:
+        st.caption("Draw a P&ID from scratch, or change the uploaded drawing - or a picture's result - in draw.io "
+                   "right here. **Save** (Ctrl+S) in the editor loads it into the app.")
+        st.session_state.setdefault("editor_open", True)  # the main screen; the map is the old view
+        st.toggle("Show the editor", key="editor_open")
+        if st.session_state.get("editor_xml"):
+            st.download_button("Download the edited drawing", lambda x=st.session_state["editor_xml"]: x.encode(),
+                               file_name=st.session_state["editor_name"], mime="application/xml",
+                               width="stretch")
+            if st.button("Discard the edits", width="stretch",
+                         help="Back to the uploaded drawing (or nothing)"):
+                st.session_state.pop("editor_xml")
+                st.rerun()
+    st.divider()
+    st.header("Specifications")
+    st.caption("An Excel sheet with a row per item: its tag (as on the P&ID), its DEXPI type from a dropdown, "
+               "and then the fields of that type to fill in - they change with the type picked. Filled in once "
+               "and used for every P&ID: upload it with the drawing above. Items whose tags match get its values "
+               "(empty fields only) and its type (where the drawing gave none); the editor's 'Sync from the spec "
+               "sheet' puts them over what is there.")
+    st.download_button("Download a blank spec sheet (.xlsx)", blank_spec_sheet, file_name="spec_sheet.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
+    spec_slot = st.container()  # the sheet with this drawing's tags, once there is a drawing
     st.divider()
     st.header("Training data")
     with st.expander("Add a drawing labelled in draw.io"):
