@@ -24,7 +24,22 @@ import re
 import xml.etree.ElementTree as ET
 
 MM = 0.25   # mm per draw.io unit (cad/to_drawio.py draws 4 units per mm)
-_SVG_IMAGE = re.compile(r"image=data:image/svg\+xml,([A-Za-z0-9+/=]+)")
+# a symbol drawn as a picture: draw.io keeps the SVG in the style as base64 or URL-encoded text
+_SVG_IMAGE = re.compile(r"image=data:image/svg\+xml(?:;base64)?,([^;]+)")
+
+
+def _svg_text(data: str) -> str | None:
+    """The SVG a style's picture holds, however it is written (base64 or URL-encoded)."""
+    from urllib.parse import unquote
+    data = data.strip()
+    for text in (None, unquote(data)):
+        try:
+            text = text if text is not None else base64.b64decode(data + "=" * (-len(data) % 4)).decode("utf-8")
+        except Exception:
+            continue
+        if "<svg" in text[:300]:
+            return text
+    return None
 _PATH = re.compile(r'<path d="([^"]+)"(?: fill="([^"]+)")?')
 
 
@@ -80,21 +95,27 @@ def _circle(cx: float, cy: float, r: float) -> ET.Element:
 
 
 def _svg_strokes(svg: str, w: float, h: float) -> list:
-    """A CAD symbol's picture (our own SVG: one path per stroke, "M x,y L x,y ... [Z]") as
-    strokes in symbol coordinates: mm, around its centre, Y upwards, scaled to w x h mm."""
-    vb = re.search(r'viewBox="0 0 ([\d.]+) ([\d.]+)"', svg)
-    if not vb:
+    """A symbol's picture (any SVG: paths, shapes, transforms) as strokes in symbol coordinates:
+    mm, around its centre, Y upwards, scaled to w x h mm."""
+    from pid_dexpi_aas.drawio.line_routes import _shape_strokes
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError:
         return []
-    vw, vh = float(vb.group(1)), float(vb.group(2))
-    kx, ky = (w / vw if vw else 1.0), (h / vh if vh else 1.0)
+    vb = [float(v) for v in re.split(r"[\s,]+", (root.get("viewBox") or "").strip()) if v]
+    if len(vb) != 4:
+        num = lambda k: float(re.sub(r"[^\d.]", "", root.get(k) or "0") or 0)
+        vb = [0.0, 0.0, num("width"), num("height")]
+    x0, y0, vw, vh = vb
+    if vw <= 0 or vh <= 0:
+        return []
+    kx, ky = w / vw, h / vh
     dashed = "stroke-dasharray" in svg
     out = []
-    for d, fill in _PATH.findall(svg):
-        closed = d.rstrip().endswith("Z")
-        pts = [(float(a), float(b)) for a, b in re.findall(r"(-?[\d.]+),(-?[\d.]+)", d)]
-        pts = [((x - vw / 2) * kx, (vh / 2 - y) * ky) for x, y in pts]
+    for pts, closed, filled in _shape_strokes(root):
+        pts = [((x - x0 - vw / 2) * kx, (vh / 2 - (y - y0)) * ky) for x, y in pts]
         if len(pts) >= 2:
-            out.append(_polyline(pts, closed=closed, filled=closed and fill not in (None, "", "none"), dashed=dashed))
+            out.append(_polyline(pts, closed=closed, filled=filled, dashed=dashed))
     return out
 
 
@@ -285,9 +306,12 @@ def add_drawing(xml: bytes, diagram, result, source=None) -> bytes:
             sym.extend(strokes)
             symbols[key] = key
         if key not in symbols:
-            strokes = (_svg_strokes(base64.b64decode(m.group(1)).decode("utf-8", "replace"), w, h) if m
+            text = _svg_text(m.group(1)) if m else None
+            strokes = (_svg_strokes(text, w, h) if text
                        else [_polyline(pts, closed=closed, filled=filled) for pts, closed, filled in local if len(pts) > 1]
-                       if own else _library_strokes(type(obj).__name__, w, h))
+                       if own else [])
+            if not strokes:   # a picture that could not be read: the class's own symbol, never nothing
+                strokes = _library_strokes(type(obj).__name__, w, h)
             sym = ET.SubElement(catalogue, el.tag, ID=key, ComponentName=key)
             sym.extend(strokes)
             symbols[key] = key

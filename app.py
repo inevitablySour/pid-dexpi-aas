@@ -79,6 +79,7 @@ from pid_dexpi_aas.review import (  # noqa: E402
 from pid_dexpi_aas.dexpi.serialize import save_and_verify  # noqa: E402
 from pid_dexpi_aas.dexpi.graphics import add_connector_references, add_drawing  # noqa: E402
 from pid_dexpi_aas.render.dexpi_svg import dexpi_svg  # noqa: E402
+from pid_dexpi_aas.render.pdf_export import dexpi_pdf  # noqa: E402
 from pid_dexpi_aas.dexpi.proteus_patch import PatchedProteusSerializer  # noqa: E402
 from pid_dexpi_aas.dexpi.validate_by_counting import report_for_diagram  # noqa: E402
 
@@ -300,6 +301,13 @@ def svg_viewer(svg: str, height: int = 560) -> None:
     v.addEventListener('dblclick',fit); fit();
     </script>""".replace("HEIGHT", str(height)).replace("SVG_HERE", svg)
     components.html(page, height=height + 4)
+
+
+@st.cache_data(show_spinner="Making the PDF...", max_entries=8)
+def pdf_with_data(drawn: bytes, name: str) -> bytes:
+    """The P&ID as a PDF with each item's data and the DEXPI file attached (render/pdf_export.py) -
+    made once per DEXPI file, so its download link stays valid across re-runs of the page."""
+    return dexpi_pdf(drawn, name) or b""
 
 
 def input_kind(f) -> str:
@@ -2604,6 +2612,7 @@ with b1:
 # of the same drawing keeps it)
 review_key = hashlib.sha256(json.dumps([review.symbol_rows(), review.connection_rows()], sort_keys=True,
                                        default=str).encode()).hexdigest()
+fresh_build = build_clicked   # a click now (else the build already made is shown again)
 if build_clicked:
     st.session_state["built_for"] = review_key
 elif st.session_state.get("built_for") == review_key:
@@ -2626,7 +2635,12 @@ if problems:
             st.session_state["editor_focus"] = f"{sid}|{time.time()}"
             st.rerun()
     build_clicked = False
-if build_clicked:
+kept = st.session_state.get("built")
+if build_clicked and not fresh_build and kept and kept["key"] == review_key:
+    # the same build again (the page re-ran): the same files, so their download links stay valid
+    diagram, result, xml_bytes, drawn_bytes = kept["diagram"], kept["result"], kept["xml"], kept["drawn"]
+    stem = Path(review.source_name).stem
+elif build_clicked:
     with tempfile.TemporaryDirectory() as tmp:
         diagram, result = to_dexpi(review)
         stem = Path(review.source_name).stem
@@ -2643,6 +2657,9 @@ if build_clicked:
         except Exception as exc:
             drawn_bytes = None
             st.warning(f"The DEXPI file with its drawing could not be made ({exc}); the data-only file is fine.")
+    st.session_state["built"] = {"key": review_key, "diagram": diagram, "result": result, "xml": xml_bytes,
+                                 "drawn": drawn_bytes}
+if build_clicked:
     report = report_for_diagram(diagram, result)
     cm = result.model.conceptualModel
     st.success("DEXPI model built, exported, and verified by re-loading it.")
@@ -2655,6 +2672,10 @@ if build_clicked:
     d1.download_button("Download DEXPI XML (data only)", lambda b=xml_bytes: b, file_name=f"{stem}.xml", mime="application/xml",
                        help="The plant data: equipment, piping, instruments and how they connect - no drawing.")
     if drawn_bytes:
+        d1.download_button("Download the P&ID as PDF (with its data)", pdf_with_data(drawn_bytes, f"{stem}_drawing.xml"),
+                           file_name=f"{stem}.pdf", mime="application/pdf",
+                           help="The drawing in vector form, tags searchable. Hover or click an item in a PDF viewer to "
+                                "see its tag, type and specifications; the DEXPI file is attached inside the PDF.")
         d1.download_button("Download DEXPI XML with drawing", lambda b=drawn_bytes: b, file_name=f"{stem}_drawing.xml",
                            mime="application/xml",
                            help="The same data plus the P&ID drawing, as P&ID tools write it (DEXPI 1.3 / Proteus "
