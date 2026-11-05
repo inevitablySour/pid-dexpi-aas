@@ -9,7 +9,8 @@ project (Zuyd University of Applied Sciences); background in [`docs/HANDOFF.md`]
 
 The app runs locally in your browser. Two parts:
 
-- **The app** (draw.io files, the editor, DEXPI and AAS export). Works on Linux, macOS and Windows.
+- **The app** (draw.io, AutoCAD and DEXPI files, the editor, DEXPI, PDF and AAS export). Works on
+  Linux, macOS and Windows.
 - **The picture model** (reading P&IDs from images). Linux, or Windows through WSL2; on macOS only
   on the CPU and untested. Optional: without it everything except picture upload works.
 
@@ -23,7 +24,7 @@ sudo apt install python3 python3-venv git
 git clone https://github.com/inevitablySour/pid-dexpi-aas.git
 cd pid-dexpi-aas
 ./launch_app.sh            # first run installs everything (a minute), then opens the browser
-./scripts/get_drawio.sh    # optional: draw.io, for line routes, tees, the flow map and the Editor tab
+./scripts/get_drawio.sh    # recommended: draw.io, for line routes, tees, the flow map and the editor
 ```
 
 ### macOS
@@ -34,7 +35,7 @@ brew install --cask drawio         # optional: line routes, tees, the flow map
 git clone https://github.com/inevitablySour/pid-dexpi-aas.git
 cd pid-dexpi-aas
 ./launch_app.sh
-.venv/bin/python scripts/get_drawio_editor.py   # optional: the Editor tab
+.venv/bin/python scripts/get_drawio_editor.py   # optional: the editor
 ```
 
 ### Windows (PowerShell)
@@ -47,7 +48,7 @@ git clone https://github.com/inevitablySour/pid-dexpi-aas.git
 cd pid-dexpi-aas
 py -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
-.venv\Scripts\python scripts\get_drawio_editor.py   # optional: the Editor tab
+.venv\Scripts\python scripts\get_drawio_editor.py   # optional: the editor
 .venv\Scripts\streamlit run app.py
 ```
 
@@ -56,7 +57,7 @@ Next time: `cd pid-dexpi-aas` and `.venv\Scripts\streamlit run app.py`
 
 ### AutoCAD drawings (optional: .dwg)
 
-The **draw.io file** upload also takes AutoCAD P&IDs. A `.dxf` is read directly; a `.dwg` needs
+The upload also takes AutoCAD P&IDs. A `.dxf` is read directly; a `.dwg` needs
 **LibreDWG** (open source), built once into `tools/libredwg`:
 
 ```bash
@@ -67,11 +68,17 @@ On Windows, save the drawing as `.dxf` in AutoCAD, or run the app in WSL2. The d
 into a draw.io drawing (symbols with their tags, equipment outlines, pipes, tees, streams) and
 opens in the editor; symbols whose type is not recognised are flagged there.
 
-### Cairo (optional: the re-drawn P&ID)
+### DEXPI files (no install needed)
 
-The check sheet and the build page show the P&ID re-drawn from the DEXPI file. That drawing
-uses **Cairo**, a graphics library installed on the computer itself (not with pip). Without it
-everything works except that one picture, which is replaced by a note.
+The upload also takes DEXPI files (`.xml`, DEXPI 1.3 / Proteus) and draws them as a P&ID: as the
+file's own drawing when it has one, else laid out automatically. With **draw.io** installed (above)
+the drawing's tees and pipe networks are read back exactly when it is built into DEXPI again.
+
+### Cairo (optional: the PDF export and the check sheet picture)
+
+The **PDF export** (the P&ID with each item's data) and the picture in the check sheet use **Cairo**,
+a graphics library installed on the computer itself (not with pip). Without it everything else
+works; the page's own re-drawn P&ID is an SVG and does not need it.
 
 | OS | Install |
 |---|---|
@@ -101,7 +108,7 @@ the normal NVIDIA driver; training also needs the CUDA toolkit.
 | "ML environment not found" | Run the picture model steps, or use draw.io files only |
 | "The re-drawn P&ID needs the Cairo graphics library" | Install Cairo (above), or ignore it |
 | "Reading .dwg files needs LibreDWG" | Run `scripts/get_libredwg.sh`, or upload the drawing as `.dxf` |
-| Editor tab missing | Run `scripts/get_drawio_editor.py` with the app's Python (above) |
+| Editor missing | Run `scripts/get_drawio_editor.py` with the app's Python (above) |
 
 ## Using the app
 

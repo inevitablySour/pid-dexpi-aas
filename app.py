@@ -306,8 +306,12 @@ def svg_viewer(svg: str, height: int = 560) -> None:
 @st.cache_data(show_spinner="Making the PDF...", max_entries=8)
 def pdf_with_data(drawn: bytes, name: str) -> bytes:
     """The P&ID as a PDF with each item's data and the DEXPI file attached (render/pdf_export.py) -
-    made once per DEXPI file, so its download link stays valid across re-runs of the page."""
-    return dexpi_pdf(drawn, name) or b""
+    made once per DEXPI file, so its download link stays valid across re-runs of the page. b"" when
+    it cannot be made (Cairo, which draws it, not installed - common on Windows)."""
+    try:
+        return dexpi_pdf(drawn, name) or b""
+    except (ImportError, OSError):
+        return b""
 
 
 def input_kind(f) -> str:
@@ -2671,11 +2675,13 @@ if build_clicked:
     d1, d2, d3 = st.columns(3)
     d1.download_button("Download DEXPI XML (data only)", lambda b=xml_bytes: b, file_name=f"{stem}.xml", mime="application/xml",
                        help="The plant data: equipment, piping, instruments and how they connect - no drawing.")
-    if drawn_bytes:
-        d1.download_button("Download the P&ID as PDF (with its data)", pdf_with_data(drawn_bytes, f"{stem}_drawing.xml"),
+    pdf_bytes = pdf_with_data(drawn_bytes, f"{stem}_drawing.xml") if drawn_bytes else b""
+    if pdf_bytes:
+        d1.download_button("Download the P&ID as PDF (with its data)", pdf_bytes,
                            file_name=f"{stem}.pdf", mime="application/pdf",
                            help="The drawing in vector form, tags searchable. Hover or click an item in a PDF viewer to "
                                 "see its tag, type and specifications; the DEXPI file is attached inside the PDF.")
+    if drawn_bytes:
         d1.download_button("Download DEXPI XML with drawing", lambda b=drawn_bytes: b, file_name=f"{stem}_drawing.xml",
                            mime="application/xml",
                            help="The same data plus the P&ID drawing, as P&ID tools write it (DEXPI 1.3 / Proteus "
